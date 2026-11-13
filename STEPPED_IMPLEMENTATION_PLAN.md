@@ -19,37 +19,36 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 7** | `/goal` | Agent reports, `chrono` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/checkpoint.rs` (NEW) | — |
-| 2 | **STEP 8** | `/goal` | Workflow checkpoint and reconcile, `uuid` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/checkpoint.rs` | — |
-| 3 | **STEP 9** | `/goal` | Live stream hub and rotating log, `tokio` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/stream_log.rs` (NEW) | — |
-| 4 | **STEP 10** | `/goal` | MCP gatekeeper, `WriteScope`, mock transport, `async-trait` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/mcp.rs` (NEW) | — |
-| 5 | **STEP 11** | `/goal` | MCP transport via `rmcp`, `reqwest`, deny targets | `Cargo.toml`, `Cargo.lock`, `deny.toml`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/tests/live_mcp.rs` (NEW) | — |
-| 6 | **STEP 12** | `/goal` | Inference config: attach to existing servers | `crates/orrery-core/src/config.rs` | — |
-| 7 | **STEP 13** | `/goal` | Container and inference types, mocks, pure helpers | `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/docker.rs` (NEW) | — |
-| 8 | **STEP 14** | `/goal` | `ResourceManager` and inference control | `crates/orrery-core/src/docker.rs` | — |
-| 9 | **STEP 15** | `/goal` | Docker backend via `bollard`, `futures-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/tests/live_docker.rs` (NEW) | — |
-| 10 | **STEP 16** | `/goal` | Prompt builders, `AgentDriver`, mock driver | `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/llm.rs` (NEW) | — |
-| 11 | **STEP 17** | `/goal` | HTTP chat: request building and SSE parsing (pure) | `crates/orrery-core/src/llm.rs` | — |
-| 12 | **STEP 18** | `/boost` | `HttpChatDriver` turn loop | `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/llm.rs`, `crates/orrery-core/tests/live_llm.rs` (NEW) | — |
-| 13 | **STEP 19** | `/goal` | `CliContainerDriver` | `crates/orrery-core/src/llm.rs` | — |
-| 14 | **STEP 20** | `/goal` | Engine types and pure rules, `tokio-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/engine.rs` (NEW) | — |
-| 15 | **STEP 21** | `/boost` | Engine core loop, Run and Loop modes | `crates/orrery-core/src/engine.rs` | — |
-| 16 | **STEP 22** | `/boost` | Engine gates, retries, escalation, operator | `crates/orrery-core/src/engine.rs` | — |
-| 17 | **STEP 23** | `/goal` | Engine lifecycle hooks | `crates/orrery-core/src/engine.rs` | — |
-| 18 | **STEP 24** | `/goal` | Engine stage concurrency, validator broadcast | `crates/orrery-core/src/engine.rs` | — |
-| 19 | **STEP 25** | `/goal` | Engine interrupt, resume, plan reconcile | `crates/orrery-core/src/engine.rs` | — |
-| 20 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`) | `crates/orrery-core/src/engine.rs` | — |
-| 21 | **STEP 27** | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) | — |
-| 22 | **STEP 28** | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) | — |
-| 23 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
-| 24 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
-| 25 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
-| 26 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
-| 27 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 28 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 29 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 30 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 31 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 8** | `/goal` | Workflow checkpoint and reconcile, `uuid` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/checkpoint.rs` | — |
+| 2 | **STEP 9** | `/goal` | Live stream hub and rotating log, `tokio` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/stream_log.rs` (NEW) | — |
+| 3 | **STEP 10** | `/goal` | MCP gatekeeper, `WriteScope`, mock transport, `async-trait` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/mcp.rs` (NEW) | — |
+| 4 | **STEP 11** | `/goal` | MCP transport via `rmcp`, `reqwest`, deny targets | `Cargo.toml`, `Cargo.lock`, `deny.toml`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/tests/live_mcp.rs` (NEW) | — |
+| 5 | **STEP 12** | `/goal` | Inference config: attach to existing servers | `crates/orrery-core/src/config.rs` | — |
+| 6 | **STEP 13** | `/goal` | Container and inference types, mocks, pure helpers | `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/docker.rs` (NEW) | — |
+| 7 | **STEP 14** | `/goal` | `ResourceManager` and inference control | `crates/orrery-core/src/docker.rs` | — |
+| 8 | **STEP 15** | `/goal` | Docker backend via `bollard`, `futures-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/tests/live_docker.rs` (NEW) | — |
+| 9 | **STEP 16** | `/goal` | Prompt builders, `AgentDriver`, mock driver | `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/llm.rs` (NEW) | — |
+| 10 | **STEP 17** | `/goal` | HTTP chat: request building and SSE parsing (pure) | `crates/orrery-core/src/llm.rs` | — |
+| 11 | **STEP 18** | `/boost` | `HttpChatDriver` turn loop | `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/llm.rs`, `crates/orrery-core/tests/live_llm.rs` (NEW) | — |
+| 12 | **STEP 19** | `/goal` | `CliContainerDriver` | `crates/orrery-core/src/llm.rs` | — |
+| 13 | **STEP 20** | `/goal` | Engine types and pure rules, `tokio-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/engine.rs` (NEW) | — |
+| 14 | **STEP 21** | `/boost` | Engine core loop, Run and Loop modes | `crates/orrery-core/src/engine.rs` | — |
+| 15 | **STEP 22** | `/boost` | Engine gates, retries, escalation, operator | `crates/orrery-core/src/engine.rs` | — |
+| 16 | **STEP 23** | `/goal` | Engine lifecycle hooks | `crates/orrery-core/src/engine.rs` | — |
+| 17 | **STEP 24** | `/goal` | Engine stage concurrency, validator broadcast | `crates/orrery-core/src/engine.rs` | — |
+| 18 | **STEP 25** | `/goal` | Engine interrupt, resume, plan reconcile | `crates/orrery-core/src/engine.rs` | — |
+| 19 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`) | `crates/orrery-core/src/engine.rs` | — |
+| 20 | **STEP 27** | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) | — |
+| 21 | **STEP 28** | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) | — |
+| 22 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
+| 23 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
+| 24 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
+| 25 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
+| 26 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
+| 27 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 28 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 29 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 30 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 4** | **COMPLETED** (gates re-run by Claude 2026-11-13) | `/goal` | `SecretValue`, `SecretStore`, OS keychain | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/security.rs`, `crates/orrery-core/tests/live_keyring.rs` |
 | **STEP 5** | **COMPLETED** (gates re-run by Claude 2026-11-13) | `/goal` | `SecretRedactor` | `crates/orrery-core/src/security.rs` |
 | **STEP 6** | **COMPLETED** (2026-11-13, validate-step PASS) | `/goal` | Plan step parser (`plan.rs`), `sha2` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/plan.rs` |
+| **STEP 7** | **COMPLETED** (2026-11-13, validate-step PASS) | `/goal` | Agent reports, `chrono` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/checkpoint.rs` |
 
 ---
 

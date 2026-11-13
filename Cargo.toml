@@ -9,6 +9,7 @@ rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 dirs = "7.0.0"
 keyring-core = "1.0.1"
