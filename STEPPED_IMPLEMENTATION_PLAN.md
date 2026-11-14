@@ -606,6 +606,8 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 Scope note: written 2026-11-13. `deny.toml` has no `[graph]` table yet. `cargo deny` passes today, but `reqwest`/`rustls` bring in the Android-only `webpki-root-certs` (CDLA-Permissive-2.0), which fails the license check unless the targets are limited (spec §8).
 
+Amended 2026-11-14 after Step 10's review: `execute_for_role` only checked path args via `args.get(..)`, so a JSON array or string as args skipped the write-scope check. The spec relied on `RmcpTransport::call_tool` rejecting non-object args, which can't be unit-tested without a live server. Spec §9.5 line 841 now has check (0) in the gatekeeper itself, and this step adds it plus `non_object_args_rejected_before_transport`.
+
 ```text
 [STEP_ID]
 STEP 11: mcp.rs part 2 — RmcpTransport + RmcpConnector (stdio, streamable HTTP), Error::Http, deny.toml targets, live_mcp test
@@ -643,14 +645,15 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
      [graph]
      targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 3. lib.rs: variant `#[error("HTTP error")] Http(#[source] reqwest::Error)` in §5.1 order (after `Agent`).
-4. mcp.rs: §9.5 `RmcpTransport` (+ its `McpTransport` impl) and `RmcpConnector`, built exactly as the `RmcpTransport::connect` bullet says.
+4. mcp.rs: §9.5 `RmcpTransport` (+ its `McpTransport` impl) and `RmcpConnector`, built exactly as the `RmcpTransport::connect` bullet says. Also add check (0) from the `execute_for_role` bullet (spec line 841) as the first statement of `McpGatekeeper::execute_for_role`: `if !args.is_object()` → `Error::Security`, before the allowed-tool check.
 5. tests/live_mcp.rs: `live_stdio_list_and_call`. Read `ORRERY_LIVE_MCP_CMD` and split it on whitespace into command + args (a missing var is a `panic!` with a clear message). Connect; `list_tools` is non-empty; call the first tool with `{}` and assert an `Ok` or an MCP-level error result, not a transport error.
 6. Unit tests in mcp.rs:
    - `missing_http_secret_is_keychain_error_before_network`: `StreamableHttp` at `https://mcp.example.com/mcp` with a keychain pair and an empty `InMemorySecretStore` gives `Error::Keychain`.
    - `stdio_missing_command_errors`: command `"orrery-test-no-such-binary"` gives an `Err` (any variant), no panic.
+   - `non_object_args_rejected_before_transport` (`#[tokio::test]`): a gatekeeper with a `MockMcpTransport` whose tool is a registered write tool and allowed for the role. Calling it with `json!(["src/lib.rs"])` and with `json!("src/lib.rs")` each gives `Error::Security`, and the mock's `calls()` is empty afterwards.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && grep -q '^\[graph\]$' deny.toml && grep -q 'fn live_stdio_list_and_call' crates/orrery-core/tests/live_mcp.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^mcp::tests::(missing_http_secret_is_keychain_error_before_network|stdio_missing_command_errors): test$')" -eq 2
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && grep -q '^\[graph\]$' deny.toml && grep -q 'fn live_stdio_list_and_call' crates/orrery-core/tests/live_mcp.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^mcp::tests::(missing_http_secret_is_keychain_error_before_network|stdio_missing_command_errors|non_object_args_rejected_before_transport): test$')" -eq 3
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
