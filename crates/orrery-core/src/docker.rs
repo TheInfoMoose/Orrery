@@ -1,14 +1,19 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::checkpoint::SubtaskAllocation;
-use crate::config::{AgentBackend, AgentConfig, InferenceConfig, InferenceMode, WorkspaceMount};
+use crate::config::{
+    AgentBackend, AgentConfig, InferenceConfig, InferenceLifecycle, InferenceMode, WorkspaceMount,
+};
 use crate::mcp::scopes_overlap;
-use crate::security::SecretValue;
+use crate::security::{SecretRedactor, SecretValue};
 use crate::{Error, Result};
 
 #[derive(Debug)]
@@ -71,6 +76,108 @@ pub trait ComposeRunner: Send + Sync {
     async fn is_running(&self, file: &Path, service: Option<&str>) -> Result<bool>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposeOp {
+    Up,
+    Down,
+    Ps,
+}
+
+fn compose_args(file: &Path, service: Option<&str>, op: ComposeOp) -> Vec<String> {
+    let mut args = vec![
+        "compose".to_string(),
+        "-f".to_string(),
+        file.to_string_lossy().into_owned(),
+    ];
+    match op {
+        ComposeOp::Up => {
+            args.push("up".to_string());
+            args.push("-d".to_string());
+            if let Some(svc) = service {
+                args.push(svc.to_string());
+            }
+        }
+        ComposeOp::Down => match service {
+            Some(svc) => {
+                args.push("stop".to_string());
+                args.push(svc.to_string());
+            }
+            None => {
+                args.push("down".to_string());
+            }
+        },
+        ComposeOp::Ps => {
+            args.push("ps".to_string());
+            args.push("--status".to_string());
+            args.push("running".to_string());
+            args.push("-q".to_string());
+            if let Some(svc) = service {
+                args.push(svc.to_string());
+            }
+        }
+    }
+    args
+}
+
+fn ensure_absolute_compose_file(file: &Path) -> Result<()> {
+    if !file.is_absolute() {
+        return Err(Error::Validation {
+            field: "compose".to_string(),
+            message: "compose file must be resolved by ConfigStore::load_inference".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DockerComposeCli;
+
+impl DockerComposeCli {
+    async fn run_compose(file: &Path, args: &[String]) -> Result<std::process::Output> {
+        let output = tokio::process::Command::new("docker")
+            .args(args)
+            .output()
+            .await
+            .map_err(|source| Error::Io {
+                path: file.to_path_buf(),
+                source,
+            })?;
+        if !output.status.success() {
+            let raw_stderr = String::from_utf8_lossy(&output.stderr);
+            let redacted = SecretRedactor::new().redact(raw_stderr.trim())?;
+            return Err(Error::Validation {
+                field: "compose".to_string(),
+                message: redacted,
+            });
+        }
+        Ok(output)
+    }
+}
+
+#[async_trait]
+impl ComposeRunner for DockerComposeCli {
+    async fn up(&self, file: &Path, service: Option<&str>) -> Result<()> {
+        ensure_absolute_compose_file(file)?;
+        let args = compose_args(file, service, ComposeOp::Up);
+        Self::run_compose(file, &args).await?;
+        Ok(())
+    }
+
+    async fn down(&self, file: &Path, service: Option<&str>) -> Result<()> {
+        ensure_absolute_compose_file(file)?;
+        let args = compose_args(file, service, ComposeOp::Down);
+        Self::run_compose(file, &args).await?;
+        Ok(())
+    }
+
+    async fn is_running(&self, file: &Path, service: Option<&str>) -> Result<bool> {
+        ensure_absolute_compose_file(file)?;
+        let args = compose_args(file, service, ComposeOp::Ps);
+        let output = Self::run_compose(file, &args).await?;
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
+    }
+}
+
 #[async_trait]
 pub trait InferenceControl: Send + Sync {
     async fn is_running(&self, inference: &InferenceConfig) -> Result<bool>;
@@ -78,6 +185,96 @@ pub trait InferenceControl: Send + Sync {
     async fn stop(&self, inference: &InferenceConfig) -> Result<()>;
     async fn wait_ready(&self, inference: &InferenceConfig) -> Result<()>;
     async fn unload(&self, inference: &InferenceConfig, model: &str) -> Result<()>;
+}
+
+pub struct DockerInferenceControl {
+    pub containers: Arc<dyn ContainerBackend>,
+    pub compose: Arc<dyn ComposeRunner>,
+    client: reqwest::Client,
+}
+
+impl DockerInferenceControl {
+    pub fn new(containers: Arc<dyn ContainerBackend>, compose: Arc<dyn ComposeRunner>) -> Self {
+        Self {
+            containers,
+            compose,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl InferenceControl for DockerInferenceControl {
+    async fn is_running(&self, inference: &InferenceConfig) -> Result<bool> {
+        match &inference.lifecycle {
+            InferenceLifecycle::External => Ok(true),
+            InferenceLifecycle::Container { name } => {
+                Ok(self.containers.inspect(name).await? == ContainerState::Running)
+            }
+            InferenceLifecycle::Compose { file, service } => {
+                self.compose.is_running(file, service.as_deref()).await
+            }
+        }
+    }
+
+    async fn start(&self, inference: &InferenceConfig) -> Result<()> {
+        match &inference.lifecycle {
+            InferenceLifecycle::External => Ok(()),
+            InferenceLifecycle::Container { name } => self.containers.start(name).await,
+            InferenceLifecycle::Compose { file, service } => {
+                self.compose.up(file, service.as_deref()).await
+            }
+        }
+    }
+
+    async fn stop(&self, inference: &InferenceConfig) -> Result<()> {
+        match &inference.lifecycle {
+            InferenceLifecycle::External => Ok(()),
+            InferenceLifecycle::Container { name } => self.containers.stop(name).await,
+            InferenceLifecycle::Compose { file, service } => {
+                self.compose.down(file, service.as_deref()).await
+            }
+        }
+    }
+
+    async fn wait_ready(&self, inference: &InferenceConfig) -> Result<()> {
+        let health_url = format!("{}/health", inference.endpoint_url.trim_end_matches('/'));
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(inference.startup_timeout_secs);
+        loop {
+            if let Ok(resp) = self
+                .client
+                .get(&health_url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+                && resp.status() == reqwest::StatusCode::OK
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::Agent {
+                    agent_id: inference.inference_id.clone(),
+                    message: "not ready".to_string(),
+                });
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn unload(&self, inference: &InferenceConfig, model: &str) -> Result<()> {
+        if let Some((url, body)) = unload_request(inference, model) {
+            self.client
+                .post(&url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(Error::Http)?
+                .error_for_status()
+                .map_err(Error::Http)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,12 +677,22 @@ pub fn mounts_for(agent: &AgentConfig, project_root: &Path, agent_io_dir: &Path)
                 container: "/workspace".to_string(),
                 read_only: true,
             });
+            mounts.push(MountSpec::Bind {
+                host: agent_io_dir.join("mask"),
+                container: "/workspace/.orrery".to_string(),
+                read_only: true,
+            });
         }
         WorkspaceMount::ReadWrite => {
             mounts.push(MountSpec::Bind {
                 host: project_root.to_path_buf(),
                 container: "/workspace".to_string(),
                 read_only: false,
+            });
+            mounts.push(MountSpec::Bind {
+                host: agent_io_dir.join("mask"),
+                container: "/workspace/.orrery".to_string(),
+                read_only: true,
             });
         }
         WorkspaceMount::None => {}
@@ -505,22 +712,320 @@ pub fn mounts_for(agent: &AgentConfig, project_root: &Path, agent_io_dir: &Path)
     mounts
 }
 
+struct LeaseOpenGuard {
+    open: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl LeaseOpenGuard {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LeaseOpenGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.open.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+pub struct ResourceManager {
+    backend: Arc<dyn ContainerBackend>,
+    inference_control: Arc<dyn InferenceControl>,
+    inference: Vec<InferenceConfig>,
+    max_concurrent_agents: usize,
+    project_root: PathBuf,
+    lease_open: Arc<AtomicBool>,
+    started: Mutex<HashSet<String>>,
+    held: Mutex<Vec<(String, String)>>,
+}
+
+impl ResourceManager {
+    pub fn new(
+        backend: Arc<dyn ContainerBackend>,
+        inference_control: Arc<dyn InferenceControl>,
+        inference: Vec<InferenceConfig>,
+        max_concurrent_agents: usize,
+        project_root: PathBuf,
+    ) -> Self {
+        Self {
+            backend,
+            inference_control,
+            inference,
+            max_concurrent_agents,
+            project_root,
+            lease_open: Arc::new(AtomicBool::new(false)),
+            started: Mutex::new(HashSet::new()),
+            held: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub async fn begin_stage(
+        &self,
+        run_id: uuid::Uuid,
+        agents: &[AgentConfig],
+        writer: bool,
+        allocations: &[SubtaskAllocation],
+    ) -> Result<StageLease> {
+        if self.lease_open.swap(true, Ordering::SeqCst) {
+            return Err(Error::Engine {
+                step_number: 0,
+                message: "stage lease already open".to_string(),
+            });
+        }
+        let open_guard = LeaseOpenGuard {
+            open: Arc::clone(&self.lease_open),
+            armed: true,
+        };
+
+        let mut needed: Vec<(String, String)> = Vec::new();
+        let mut needed_servers: Vec<String> = Vec::new();
+        let mut cli_agents: Vec<String> = Vec::new();
+
+        for agent in agents {
+            match &agent.backend {
+                AgentBackend::LocalModel {
+                    inference_id,
+                    model,
+                    ..
+                } => {
+                    if !self
+                        .inference
+                        .iter()
+                        .any(|inf| &inf.inference_id == inference_id)
+                    {
+                        return Err(Error::Validation {
+                            field: "inference_id".to_string(),
+                            message: format!("unknown inference_id '{inference_id}'"),
+                        });
+                    }
+                    let pair = (inference_id.clone(), model.clone());
+                    if !needed.contains(&pair) {
+                        needed.push(pair);
+                    }
+                    if !needed_servers.contains(inference_id) {
+                        needed_servers.push(inference_id.clone());
+                    }
+                }
+                AgentBackend::AgentCli { .. } => {
+                    if !cli_agents.contains(&agent.agent_id) {
+                        cli_agents.push(agent.agent_id.clone());
+                    }
+                }
+                AgentBackend::CloudApi { .. } => {}
+            }
+        }
+
+        let prev_held = self
+            .held
+            .lock()
+            .map_err(|_| Error::Security {
+                message: "ResourceManager held lock poisoned".to_string(),
+            })?
+            .clone();
+
+        for (held_inf_id, held_model) in &prev_held {
+            let Some(inf) = self
+                .inference
+                .iter()
+                .find(|i| &i.inference_id == held_inf_id)
+            else {
+                continue;
+            };
+            if !inf.unload_after_stage {
+                continue;
+            }
+            match inf.mode {
+                InferenceMode::Router => {
+                    let still_needed = needed
+                        .iter()
+                        .any(|(id, m)| id == held_inf_id && m == held_model);
+                    if !still_needed {
+                        self.inference_control.unload(inf, held_model).await?;
+                        self.held
+                            .lock()
+                            .map_err(|_| Error::Security {
+                                message: "ResourceManager held lock poisoned".to_string(),
+                            })?
+                            .retain(|(id, m)| !(id == held_inf_id && m == held_model));
+                    }
+                }
+                InferenceMode::Single => {
+                    let server_needed = needed_servers.iter().any(|id| id == held_inf_id);
+                    if !server_needed {
+                        let was_started = self
+                            .started
+                            .lock()
+                            .map_err(|_| Error::Security {
+                                message: "ResourceManager started lock poisoned".to_string(),
+                            })?
+                            .remove(held_inf_id);
+                        if was_started {
+                            self.inference_control.stop(inf).await?;
+                        }
+                        self.held
+                            .lock()
+                            .map_err(|_| Error::Security {
+                                message: "ResourceManager held lock poisoned".to_string(),
+                            })?
+                            .retain(|(id, _)| id != held_inf_id);
+                    }
+                }
+            }
+        }
+
+        for server_id in &needed_servers {
+            let Some(inf) = self.inference.iter().find(|i| &i.inference_id == server_id) else {
+                continue;
+            };
+            if !self.inference_control.is_running(inf).await? {
+                self.inference_control.start(inf).await?;
+                self.started
+                    .lock()
+                    .map_err(|_| Error::Security {
+                        message: "ResourceManager started lock poisoned".to_string(),
+                    })?
+                    .insert(inf.inference_id.clone());
+            }
+            self.inference_control.wait_ready(inf).await?;
+        }
+
+        *self.held.lock().map_err(|_| Error::Security {
+            message: "ResourceManager held lock poisoned".to_string(),
+        })? = needed;
+
+        let concurrency =
+            effective_concurrency(self.max_concurrent_agents, writer, agents, allocations);
+        let lease = StageLease {
+            run_id,
+            semaphore: Arc::new(Semaphore::new(concurrency)),
+            concurrency,
+            cli_agents,
+            open: Arc::clone(&self.lease_open),
+        };
+        open_guard.disarm();
+        Ok(lease)
+    }
+
+    pub async fn end_stage(&self, lease: StageLease) -> Result<()> {
+        for agent_id in &lease.cli_agents {
+            let name = cli_container_name(&lease.run_id, agent_id);
+            // Backends return Ok for a missing container; any other failure
+            // may leave a container holding secret env, so it propagates.
+            self.backend.remove(&name).await?;
+        }
+
+        let run_io_dir = self
+            .project_root
+            .join(".orrery")
+            .join("agent_io")
+            .join(lease.run_id.to_string());
+        if run_io_dir.exists() {
+            fs::remove_dir_all(&run_io_dir).map_err(|source| Error::Io {
+                path: run_io_dir,
+                source,
+            })?;
+        }
+
+        lease.open.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        let held = {
+            let mut guard = self.held.lock().map_err(|_| Error::Security {
+                message: "ResourceManager held lock poisoned".to_string(),
+            })?;
+            std::mem::take(&mut *guard)
+        };
+
+        for (inf_id, model) in &held {
+            if let Some(inf) = self.inference.iter().find(|i| &i.inference_id == inf_id)
+                && inf.mode == InferenceMode::Router
+                && inf.unload_after_stage
+            {
+                self.inference_control.unload(inf, model).await?;
+            }
+        }
+
+        let started = {
+            let mut guard = self.started.lock().map_err(|_| Error::Security {
+                message: "ResourceManager started lock poisoned".to_string(),
+            })?;
+            std::mem::take(&mut *guard)
+        };
+
+        for inf in &self.inference {
+            if started.contains(&inf.inference_id) {
+                self.inference_control.stop(inf).await?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct StageLease {
+    run_id: uuid::Uuid,
+    semaphore: Arc<Semaphore>,
+    concurrency: usize,
+    cli_agents: Vec<String>,
+    open: Arc<AtomicBool>,
+}
+
+impl StageLease {
+    pub async fn acquire_slot(&self) -> Result<SlotPermit> {
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Engine {
+                step_number: 0,
+                message: "stage semaphore closed".to_string(),
+            })?;
+        Ok(SlotPermit { _permit: permit })
+    }
+
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+}
+
+impl Drop for StageLease {
+    fn drop(&mut self) {
+        self.open.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug)]
+pub struct SlotPermit {
+    _permit: OwnedSemaphorePermit,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
     use crate::config::InferenceLifecycle;
 
     fn local_agent(id: &str) -> AgentConfig {
+        local_agent_on(id, "coder-14b", "Qwen2.5-Coder-14B-Instruct-Q4_K_M")
+    }
+
+    fn local_agent_on(id: &str, inference_id: &str, model: &str) -> AgentConfig {
         AgentConfig {
             agent_id: id.to_string(),
             display_name: id.to_string(),
             backend: AgentBackend::LocalModel {
-                inference_id: "coder-14b".to_string(),
-                model: "qwen2.5-coder-14b-q4_k_m.gguf".to_string(),
+                inference_id: inference_id.to_string(),
+                model: model.to_string(),
                 temperature: 0.1,
                 max_context_tokens: 16384,
             },
@@ -564,6 +1069,88 @@ mod tests {
             target_agent_id: agent_id.to_string(),
             instructions: "do work".to_string(),
             write_scope: scopes.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn spec_coder_14b() -> InferenceConfig {
+        InferenceConfig {
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "llama-coder-14b".to_string(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        }
+    }
+
+    fn spec_router(compose_file: PathBuf) -> InferenceConfig {
+        InferenceConfig {
+            inference_id: "router".to_string(),
+            endpoint_url: "http://127.0.0.1:8081".to_string(),
+            mode: InferenceMode::Router,
+            lifecycle: InferenceLifecycle::Compose {
+                file: compose_file,
+                service: Some("llama".to_string()),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        }
+    }
+
+    fn spec_always_on(endpoint_url: &str) -> InferenceConfig {
+        InferenceConfig {
+            inference_id: "always-on".to_string(),
+            endpoint_url: endpoint_url.to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::External,
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingComposeRunner {
+        calls: Mutex<Vec<(String, PathBuf, Option<String>)>>,
+        running: Mutex<bool>,
+    }
+
+    impl RecordingComposeRunner {
+        fn calls(&self) -> Vec<(String, PathBuf, Option<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl ComposeRunner for RecordingComposeRunner {
+        async fn up(&self, file: &Path, service: Option<&str>) -> Result<()> {
+            self.calls.lock().unwrap().push((
+                "up".to_string(),
+                file.to_path_buf(),
+                service.map(str::to_string),
+            ));
+            *self.running.lock().unwrap() = true;
+            Ok(())
+        }
+
+        async fn down(&self, file: &Path, service: Option<&str>) -> Result<()> {
+            self.calls.lock().unwrap().push((
+                "down".to_string(),
+                file.to_path_buf(),
+                service.map(str::to_string),
+            ));
+            *self.running.lock().unwrap() = false;
+            Ok(())
+        }
+
+        async fn is_running(&self, file: &Path, service: Option<&str>) -> Result<bool> {
+            self.calls.lock().unwrap().push((
+                "is_running".to_string(),
+                file.to_path_buf(),
+                service.map(str::to_string),
+            ));
+            Ok(*self.running.lock().unwrap())
         }
     }
 
@@ -639,6 +1226,11 @@ mod tests {
                     read_only: true,
                 },
                 MountSpec::Bind {
+                    host: PathBuf::from("project/.orrery/agent_io/run-1/cli1/mask"),
+                    container: "/workspace/.orrery".to_string(),
+                    read_only: true,
+                },
+                MountSpec::Bind {
                     host: PathBuf::from("project/.orrery/agent_io/run-1/cli1/in"),
                     container: "/orrery/in".to_string(),
                     read_only: true,
@@ -664,6 +1256,11 @@ mod tests {
                     host: PathBuf::from("project"),
                     container: "/workspace".to_string(),
                     read_only: false,
+                },
+                MountSpec::Bind {
+                    host: PathBuf::from("project/.orrery/agent_io/run-1/cli1/mask"),
+                    container: "/workspace/.orrery".to_string(),
+                    read_only: true,
                 },
                 MountSpec::Bind {
                     host: PathBuf::from("project/.orrery/agent_io/run-1/cli1/in"),
@@ -723,6 +1320,43 @@ mod tests {
                 assert_ne!(host, orrery_dir);
             }
         }
+    }
+
+    #[test]
+    fn mounts_mask_orrery_dir() {
+        let tmp_root = tempfile::TempDir::new().unwrap();
+        let run_id = uuid::Uuid::new_v4();
+        let io_dir = agent_io_dir(tmp_root.path(), &run_id, "cli1");
+
+        for mode in [WorkspaceMount::ReadOnly, WorkspaceMount::ReadWrite] {
+            let mounts = mounts_for(&cli_agent("cli1", mode), tmp_root.path(), &io_dir);
+            let mask_mounts: Vec<&MountSpec> = mounts
+                .iter()
+                .filter(|m| {
+                    let MountSpec::Bind { container, .. } = m;
+                    container == "/workspace/.orrery"
+                })
+                .collect();
+            assert_eq!(mask_mounts.len(), 1);
+            assert_eq!(
+                mask_mounts[0],
+                &MountSpec::Bind {
+                    host: io_dir.join("mask"),
+                    container: "/workspace/.orrery".to_string(),
+                    read_only: true,
+                }
+            );
+        }
+
+        let none_mounts = mounts_for(
+            &cli_agent("cli1", WorkspaceMount::None),
+            tmp_root.path(),
+            &io_dir,
+        );
+        assert!(none_mounts.iter().all(|m| {
+            let MountSpec::Bind { container, .. } = m;
+            !container.starts_with("/workspace")
+        }));
     }
 
     #[test]
@@ -897,5 +1531,571 @@ mod tests {
                 InferenceCall::IsRunning("coder-14b".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn second_begin_stage_fails_while_open() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            inf_ctrl,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let agents = vec![local_agent("a1")];
+        let _lease = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+
+        let err = rm
+            .begin_stage(run_id, &agents, false, &[])
+            .await
+            .unwrap_err();
+        match err {
+            Error::Engine {
+                step_number,
+                message,
+            } => {
+                assert_eq!(step_number, 0);
+                assert_eq!(message, "stage lease already open");
+            }
+            other => panic!("expected Error::Engine, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn begin_after_end_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            inf_ctrl,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let agents = vec![local_agent("a1")];
+        let lease1 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        rm.end_stage(lease1).await.unwrap();
+
+        let lease2 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        assert_eq!(lease2.concurrency(), 1);
+        rm.end_stage(lease2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_lease_does_not_block_next_stage() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            inf_ctrl,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let agents = vec![local_agent("a1")];
+        let lease1 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        drop(lease1);
+
+        let lease2 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        rm.end_stage(lease2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopped_server_started_and_waited() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &[local_agent("a1")], false, &[])
+            .await
+            .unwrap();
+        rm.end_stage(lease).await.unwrap();
+
+        assert_eq!(
+            inf_ctrl.calls(),
+            vec![
+                InferenceCall::IsRunning("coder-14b".to_string()),
+                InferenceCall::Start("coder-14b".to_string()),
+                InferenceCall::WaitReady("coder-14b".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn running_server_not_started_or_stopped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        inf_ctrl.set_running("coder-14b", true);
+
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &[local_agent("a1")], false, &[])
+            .await
+            .unwrap();
+        rm.end_stage(lease).await.unwrap();
+        rm.shutdown().await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        assert!(!calls.iter().any(|c| matches!(c, InferenceCall::Start(_))));
+        assert!(!calls.iter().any(|c| matches!(c, InferenceCall::Stop(_))));
+    }
+
+    #[tokio::test]
+    async fn external_server_never_started() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let backend = Arc::new(MockContainerBackend::new());
+        let compose = Arc::new(RecordingComposeRunner::default());
+        let ctrl = Arc::new(DockerInferenceControl::new(
+            Arc::clone(&backend) as Arc<dyn ContainerBackend>,
+            Arc::clone(&compose) as Arc<dyn ComposeRunner>,
+        ));
+
+        let ext = spec_always_on(&format!("http://{addr}"));
+        assert!(ctrl.is_running(&ext).await.unwrap());
+        ctrl.start(&ext).await.unwrap();
+        ctrl.stop(&ext).await.unwrap();
+        ctrl.wait_ready(&ext).await.unwrap();
+        ctrl.unload(&ext, "model").await.unwrap();
+
+        let rm = ResourceManager::new(
+            Arc::clone(&backend) as Arc<dyn ContainerBackend>,
+            Arc::clone(&ctrl) as Arc<dyn InferenceControl>,
+            vec![ext],
+            2,
+            tmp.path().to_path_buf(),
+        );
+        let agent = local_agent_on("a1", "always-on", "m1");
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &[agent], false, &[])
+            .await
+            .unwrap();
+        rm.end_stage(lease).await.unwrap();
+        rm.shutdown().await.unwrap();
+
+        assert!(backend.calls().is_empty());
+        assert!(compose.calls().is_empty());
+
+        // Also verify Container and Compose delegation + Router HTTP unload on DockerInferenceControl
+        backend.add_container("llama-coder-14b", ContainerState::Exited { code: 0 });
+        let mut container_inf = spec_coder_14b();
+        container_inf.endpoint_url = format!("http://{addr}");
+        assert!(!ctrl.is_running(&container_inf).await.unwrap());
+        ctrl.start(&container_inf).await.unwrap();
+        assert!(ctrl.is_running(&container_inf).await.unwrap());
+        ctrl.stop(&container_inf).await.unwrap();
+
+        let compose_file = tmp.path().join(".orrery").join("compose.yaml");
+        let mut router_inf = spec_router(compose_file);
+        router_inf.endpoint_url = format!("http://{addr}");
+        assert!(!ctrl.is_running(&router_inf).await.unwrap());
+        ctrl.start(&router_inf).await.unwrap();
+        assert!(ctrl.is_running(&router_inf).await.unwrap());
+        ctrl.unload(&router_inf, "m1").await.unwrap();
+        ctrl.stop(&router_inf).await.unwrap();
+
+        server_task.abort();
+
+        // Verify wait_ready timeout returns Error::Agent { agent_id: inference_id, message: "not ready" }
+        let mut unready_ext = spec_always_on(&format!("http://{addr}"));
+        unready_ext.startup_timeout_secs = 0;
+        let err = ctrl.wait_ready(&unready_ext).await.unwrap_err();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "always-on");
+                assert_eq!(message, "not ready");
+            }
+            other => panic!("expected Error::Agent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn same_server_next_stage_not_restarted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let agents = vec![local_agent("a1")];
+        let lease1 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        rm.end_stage(lease1).await.unwrap();
+
+        let lease2 = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        rm.end_stage(lease2).await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        let starts = calls
+            .iter()
+            .filter(|c| matches!(c, InferenceCall::Start(id) if id == "coder-14b"))
+            .count();
+        let stops = calls
+            .iter()
+            .filter(|c| matches!(c, InferenceCall::Stop(_)))
+            .count();
+        assert_eq!(starts, 1);
+        assert_eq!(stops, 0);
+    }
+
+    #[tokio::test]
+    async fn single_mode_swapped_between_stages() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let other_inf = InferenceConfig {
+            inference_id: "other".to_string(),
+            endpoint_url: "http://127.0.0.1:8083".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "llama-other".to_string(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_coder_14b(), other_inf],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let stage_a = vec![local_agent("a1")];
+        let lease_a = rm.begin_stage(run_id, &stage_a, false, &[]).await.unwrap();
+        rm.end_stage(lease_a).await.unwrap();
+
+        let stage_b = vec![local_agent_on("a2", "other", "other-model")];
+        let lease_b = rm.begin_stage(run_id, &stage_b, false, &[]).await.unwrap();
+        rm.end_stage(lease_b).await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        let stop_pos = calls
+            .iter()
+            .position(|c| c == &InferenceCall::Stop("coder-14b".to_string()))
+            .expect("expected Stop(coder-14b)");
+        let start_other_pos = calls
+            .iter()
+            .position(|c| c == &InferenceCall::Start("other".to_string()))
+            .expect("expected Start(other)");
+        assert!(stop_pos < start_other_pos);
+    }
+
+    #[tokio::test]
+    async fn router_unloads_models_next_stage_drops() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let compose_file = tmp.path().join(".orrery").join("compose.yaml");
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_router(compose_file)],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let stage_a = vec![local_agent_on("a1", "router", "m1")];
+        let lease_a = rm.begin_stage(run_id, &stage_a, false, &[]).await.unwrap();
+        rm.end_stage(lease_a).await.unwrap();
+
+        let stage_b = vec![local_agent_on("a2", "router", "m2")];
+        let lease_b = rm.begin_stage(run_id, &stage_b, false, &[]).await.unwrap();
+        rm.end_stage(lease_b).await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        assert!(calls.contains(&InferenceCall::Unload(
+            "router".to_string(),
+            "m1".to_string()
+        )));
+        assert!(!calls.contains(&InferenceCall::Unload(
+            "router".to_string(),
+            "m2".to_string()
+        )));
+    }
+
+    #[tokio::test]
+    async fn unload_after_stage_false_keeps_server() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+
+        let mut coder_inf = spec_coder_14b();
+        coder_inf.unload_after_stage = false;
+
+        let mut router_inf = spec_router(tmp.path().join(".orrery").join("compose.yaml"));
+        router_inf.unload_after_stage = false;
+
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![coder_inf, router_inf],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let stage_a = vec![local_agent("a1"), local_agent_on("a2", "router", "m1")];
+        let lease_a = rm.begin_stage(run_id, &stage_a, false, &[]).await.unwrap();
+        rm.end_stage(lease_a).await.unwrap();
+
+        let stage_b = vec![cloud_agent("c1")];
+        let lease_b = rm.begin_stage(run_id, &stage_b, false, &[]).await.unwrap();
+        rm.end_stage(lease_b).await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        assert!(!calls.iter().any(|c| matches!(c, InferenceCall::Stop(_))));
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, InferenceCall::Unload(_, _)))
+        );
+    }
+
+    #[tokio::test]
+    async fn end_stage_removes_cli_containers_and_agent_io() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            Arc::clone(&backend) as Arc<dyn ContainerBackend>,
+            inf_ctrl,
+            Vec::new(),
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let io_dir = agent_io_dir(tmp.path(), &run_id, "cli-validator");
+        fs::create_dir_all(io_dir.join("in")).unwrap();
+        fs::create_dir_all(io_dir.join("out")).unwrap();
+        let run_io_root = tmp
+            .path()
+            .join(".orrery")
+            .join("agent_io")
+            .join(run_id.to_string());
+        assert!(run_io_root.exists());
+
+        let agents = vec![cli_agent("cli-validator", WorkspaceMount::ReadOnly)];
+        let lease = rm.begin_stage(run_id, &agents, false, &[]).await.unwrap();
+        rm.end_stage(lease).await.unwrap();
+
+        let expected_name = cli_container_name(&run_id, "cli-validator");
+        assert_eq!(backend.calls(), vec![MockCall::Remove(expected_name)]);
+        assert!(!run_io_root.exists());
+    }
+
+    #[tokio::test]
+    async fn unknown_inference_id_is_validation_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            inf_ctrl,
+            vec![spec_coder_14b()],
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let bad_agent = local_agent_on("a1", "missing-server", "m1");
+        let err = rm
+            .begin_stage(uuid::Uuid::new_v4(), &[bad_agent], false, &[])
+            .await
+            .unwrap_err();
+        match err {
+            Error::Validation { field, .. } => assert_eq!(field, "inference_id"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        // Failed begin_stage must not leave lease_open stuck true
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &[local_agent("a1")], false, &[])
+            .await
+            .unwrap();
+        rm.end_stage(lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn slots_limit_parallelism() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            backend,
+            inf_ctrl,
+            vec![spec_coder_14b()],
+            1,
+            tmp.path().to_path_buf(),
+        );
+
+        let agents = vec![local_agent("a1"), local_agent("a2")];
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &agents, false, &[])
+            .await
+            .unwrap();
+        assert_eq!(lease.concurrency(), 1);
+
+        let permit1 = lease.acquire_slot().await.unwrap();
+        let second_attempt =
+            tokio::time::timeout(Duration::from_millis(50), lease.acquire_slot()).await;
+        assert!(second_attempt.is_err());
+
+        drop(permit1);
+        let _permit2 = lease.acquire_slot().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_unloads_router_and_stops_only_started() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+
+        let pre_running = InferenceConfig {
+            inference_id: "pre-running".to_string(),
+            endpoint_url: "http://127.0.0.1:8084".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "llama-pre".to_string(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        inf_ctrl.set_running("pre-running", true);
+
+        let router_inf = spec_router(tmp.path().join(".orrery").join("compose.yaml"));
+        let rm = ResourceManager::new(
+            backend,
+            Arc::clone(&inf_ctrl) as Arc<dyn InferenceControl>,
+            vec![spec_coder_14b(), router_inf, pre_running],
+            3,
+            tmp.path().to_path_buf(),
+        );
+
+        let agents = vec![
+            local_agent("a1"),
+            local_agent_on("a2", "router", "router-m1"),
+            local_agent_on("a3", "pre-running", "pre-m1"),
+        ];
+        let lease = rm
+            .begin_stage(uuid::Uuid::new_v4(), &agents, false, &[])
+            .await
+            .unwrap();
+        rm.end_stage(lease).await.unwrap();
+
+        rm.shutdown().await.unwrap();
+
+        let calls = inf_ctrl.calls();
+        assert!(calls.contains(&InferenceCall::Unload(
+            "router".to_string(),
+            "router-m1".to_string()
+        )));
+        assert!(calls.contains(&InferenceCall::Stop("coder-14b".to_string())));
+        assert!(calls.contains(&InferenceCall::Stop("router".to_string())));
+        assert!(!calls.contains(&InferenceCall::Stop("pre-running".to_string())));
+    }
+
+    #[test]
+    fn compose_args_shapes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file = tmp.path().join("docker-models/router/compose.yaml");
+        let f = file.to_string_lossy().into_owned();
+
+        assert_eq!(
+            compose_args(&file, Some("llama"), ComposeOp::Up),
+            vec!["compose", "-f", &f, "up", "-d", "llama"]
+        );
+        assert_eq!(
+            compose_args(&file, None, ComposeOp::Up),
+            vec!["compose", "-f", &f, "up", "-d"]
+        );
+        assert_eq!(
+            compose_args(&file, None, ComposeOp::Down),
+            vec!["compose", "-f", &f, "down"]
+        );
+        assert_eq!(
+            compose_args(&file, Some("llama"), ComposeOp::Down),
+            vec!["compose", "-f", &f, "stop", "llama"]
+        );
+        assert_eq!(
+            compose_args(&file, Some("llama"), ComposeOp::Ps),
+            vec![
+                "compose", "-f", &f, "ps", "--status", "running", "-q", "llama"
+            ]
+        );
+        assert_eq!(
+            compose_args(&file, None, ComposeOp::Ps),
+            vec!["compose", "-f", &f, "ps", "--status", "running", "-q"]
+        );
+    }
+
+    #[tokio::test]
+    async fn compose_cli_rejects_relative_file() {
+        let cli = DockerComposeCli;
+        let rel = Path::new("compose.yaml");
+
+        for res in [
+            cli.up(rel, None).await,
+            cli.down(rel, Some("llama")).await,
+            cli.is_running(rel, None).await.map(|_| ()),
+        ] {
+            let err = res.unwrap_err();
+            match err {
+                Error::Validation { field, message } => {
+                    assert_eq!(field, "compose");
+                    assert_eq!(
+                        message,
+                        "compose file must be resolved by ConfigStore::load_inference"
+                    );
+                }
+                other => panic!("expected Error::Validation, got {other:?}"),
+            }
+        }
     }
 }

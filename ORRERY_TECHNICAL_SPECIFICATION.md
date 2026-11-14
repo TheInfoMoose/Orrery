@@ -866,7 +866,7 @@ pub struct DockerComposeCli;   // runs `docker compose …` via tokio::process::
     async fn is_running(&self, inference: &InferenceConfig) -> Result<bool>;   // External → true
     async fn start(&self, inference: &InferenceConfig) -> Result<()>;          // Container → backend.start; Compose → up; External → Ok
     async fn stop(&self, inference: &InferenceConfig) -> Result<()>;           // Container → backend.stop; Compose → down; External → Ok
-    async fn wait_ready(&self, inference: &InferenceConfig) -> Result<()>;     // GET {endpoint_url}/health every 1 s until 200; > startup_timeout_secs → Error::Agent { agent_id: inference_id, message: "not ready" }
+    async fn wait_ready(&self, inference: &InferenceConfig) -> Result<()>;     // GET {endpoint_url}/health (2 s per-request timeout) every 1 s until 200; > startup_timeout_secs → Error::Agent { agent_id: inference_id, message: "not ready" }
     async fn unload(&self, inference: &InferenceConfig, model: &str) -> Result<()>; // Router: POST {endpoint_url}/models/unload {"model": m}; Single: Ok (no-op)
 }
 pub struct DockerInferenceControl { pub containers: Arc<dyn ContainerBackend>, pub compose: Arc<dyn ComposeRunner>, client: reqwest::Client }
@@ -900,7 +900,7 @@ impl ResourceManager {   // not generic (overrides §5.7 `ResourceManager<B>`)
 pub struct StageLease { /* run_id, semaphore: Arc<Semaphore>, concurrency, cli_agents: Vec<String>, open: Arc<AtomicBool> */ }
 impl StageLease { pub async fn acquire_slot(&self) -> Result<SlotPermit>; pub fn concurrency(&self) -> usize; }
 impl Drop for StageLease { /* open.store(false) — a dropped lease never blocks the next stage */ }
-pub struct SlotPermit(tokio::sync::OwnedSemaphorePermit);
+pub struct SlotPermit { _permit: tokio::sync::OwnedSemaphorePermit }   // named `_permit` so no dead_code allow is needed
 pub struct BollardContainerBackend { docker: bollard::Docker }
 impl BollardContainerBackend {
     pub fn connect() -> Result<Self>;  // Docker::connect_with_local_defaults() (honors DOCKER_HOST); no socket argument (overrides §5.7)
@@ -915,7 +915,7 @@ pub fn create_body(spec: &ContainerSpec) -> bollard::models::ContainerCreateBody
   3. **Release what the previous stage held and this one doesn't need** (only for servers with `unload_after_stage`): `Router` → `unload(inference, model)` for each held model not in `needed`; `Single` → if the server isn't in `needed` and is in `started`, `stop` it and remove it from `started`.
   4. For each server in `needed`: `is_running` false → `start`, add to `started`; then `wait_ready`.
   5. `held = needed`.
-- `end_stage`: `remove(cli_container_name(..))` for each CLI agent (a "missing" error is ignored); `remove_dir_all(<root>/.orrery/agent_io/<run_id>)` if it exists; `open = false`. Models stay loaded until the next `begin_stage` decides (step 3), so back-to-back stages on the same model don't reload it.
+- `end_stage`: `remove(cli_container_name(..))` for each CLI agent (backends return `Ok` for a missing container; every other error propagates, since a surviving container still holds secret env); `remove_dir_all(<root>/.orrery/agent_io/<run_id>)` if it exists; `open = false`. Models stay loaded until the next `begin_stage` decides (step 3), so back-to-back stages on the same model don't reload it.
 - `shutdown`: `unload` every held `Router` model (when `unload_after_stage`), then `stop` every server in `started`. Servers Orrery found already running are never stopped.
 - `create_body`: `image`, `cmd`, `env` as `"K=V"`, `host_config.binds` (`host:container[:ro]`), `memory = mb * 1024 * 1024`, `auto_remove`, `open_stdin`/`attach_stdin`/`stdin_once: true`. No GPU or port settings: Orrery never configures GPUs (inference servers are the operator's own; AgentCli containers don't need one).
 

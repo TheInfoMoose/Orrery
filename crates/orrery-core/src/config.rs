@@ -847,6 +847,82 @@ fn default_startup_timeout() -> u64 {
     300
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    Project,
+    Machine,
+}
+
+pub fn resolve_compose_file(
+    file: &Path,
+    scope: ConfigScope,
+    project_root: &Path,
+    global_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    if file.as_os_str().is_empty() || file.to_string_lossy().trim().is_empty() {
+        return Err(Error::Validation {
+            field: "lifecycle.file".to_string(),
+            message: "compose file must not be empty".to_string(),
+        });
+    }
+
+    let candidate = match (scope, file.is_absolute()) {
+        (ConfigScope::Project, true) => {
+            return Err(Error::Validation {
+                field: "lifecycle.file".to_string(),
+                message: "project config must use a path relative to .orrery/".to_string(),
+            });
+        }
+        (ConfigScope::Project, false) => {
+            resolve_safe_within_dir(&project_root.join(".orrery"), file, "lifecycle.file")?
+        }
+        (ConfigScope::Machine, false) => {
+            let Some(gdir) = global_dir else {
+                return Err(Error::Validation {
+                    field: "lifecycle.file".to_string(),
+                    message: "global_dir is required to resolve a relative machine compose file"
+                        .to_string(),
+                });
+            };
+            gdir.join(file)
+        }
+        (ConfigScope::Machine, true) => file.to_path_buf(),
+    };
+
+    let canonical_file = fs::canonicalize(&candidate).map_err(|source| Error::Io {
+        path: candidate,
+        source,
+    })?;
+
+    let meta = fs::metadata(&canonical_file).map_err(|source| Error::Io {
+        path: canonical_file.clone(),
+        source,
+    })?;
+    if !meta.is_file() {
+        return Err(Error::Validation {
+            field: "lifecycle.file".to_string(),
+            message: format!(
+                "compose file '{}' must be a regular file",
+                canonical_file.display()
+            ),
+        });
+    }
+
+    let canonical_root = fs::canonicalize(project_root).map_err(|source| Error::Io {
+        path: project_root.to_path_buf(),
+        source,
+    })?;
+    let canonical_orrery = canonical_root.join(".orrery");
+    if canonical_file.starts_with(&canonical_root) && !canonical_file.starts_with(&canonical_orrery)
+    {
+        return Err(Error::Security {
+            message: "compose file is inside the agent-writable workspace".to_string(),
+        });
+    }
+
+    Ok(canonical_file)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InferenceMode {
     #[default]
@@ -890,6 +966,18 @@ impl InferenceConfig {
             "{}/v1/chat/completions",
             self.endpoint_url.trim_end_matches('/')
         )
+    }
+
+    pub fn validate_project_scope(&self) -> Result<()> {
+        if let InferenceLifecycle::Compose { file, .. } = &self.lifecycle
+            && file.is_absolute()
+        {
+            return Err(Error::Validation {
+                field: "lifecycle.file".to_string(),
+                message: "project config must use a path relative to .orrery/".to_string(),
+            });
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -1008,6 +1096,25 @@ pub struct McpServerConfig {
 }
 
 impl McpServerConfig {
+    pub fn validate_project_scope(&self) -> Result<()> {
+        if let McpTransportConfig::Stdio { command, args } = &self.transport {
+            if command.contains('/') || command.contains('\\') {
+                return Err(Error::Validation {
+                    field: "transport.command".to_string(),
+                    message: "project MCP stdio command must not contain path separators"
+                        .to_string(),
+                });
+            }
+            if args.iter().any(|a| Path::new(a).is_absolute()) {
+                return Err(Error::Validation {
+                    field: "transport.args".to_string(),
+                    message: "project MCP stdio args must not contain absolute paths".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         validate_tool_identifier_part(&self.server_id, "server_id")?;
         if self.server_id.len() + 3 > MAX_MAPPED_TOOL_NAME_LEN {
@@ -1497,12 +1604,18 @@ impl ConfigStore {
         let config: ProjectConfig =
             toml::from_str(&content).map_err(|source| Error::TomlDe { path, source })?;
         config.validate_staging()?;
+        for inf in &config.inference {
+            inf.validate_project_scope()?;
+        }
         self.resolve_safe_path(&config.plan_path)?;
         Ok(config)
     }
 
     pub fn save_project(&self, config: &ProjectConfig) -> Result<()> {
         config.validate_staging()?;
+        for inf in &config.inference {
+            inf.validate_project_scope()?;
+        }
         self.resolve_safe_path(&config.plan_path)?;
         let path = self.orrery_dir().join("project.toml");
         let serialized = toml::to_string_pretty(config)?;
@@ -1703,6 +1816,7 @@ impl ConfigStore {
         let project_orrery = self.orrery_dir();
         let project_mcp_path = project_orrery.join("mcp").join("servers.toml");
         for server in Self::read_mcp_servers_file(&project_orrery, &project_mcp_path)? {
+            server.validate_project_scope()?;
             upsert_by_key(&mut layered, server, |s| &s.server_id);
         }
 
@@ -1711,6 +1825,7 @@ impl ConfigStore {
 
     pub fn save_mcp_server(&self, server: &McpServerConfig) -> Result<()> {
         server.validate()?;
+        server.validate_project_scope()?;
         let project_orrery = self.orrery_dir();
         let mcp_dir = project_orrery.join("mcp");
         fs::create_dir_all(&mcp_dir).map_err(|source| Error::Io {
@@ -1724,6 +1839,9 @@ impl ConfigStore {
 
         let file = McpServersFile { servers };
         file.validate()?;
+        for s in &file.servers {
+            s.validate_project_scope()?;
+        }
         let serialized = toml::to_string_pretty(&file)?;
         atomic_write(&servers_path, serialized.as_bytes())
     }
@@ -1759,24 +1877,51 @@ impl ConfigStore {
 
     pub fn load_inference(&self) -> Result<Vec<InferenceConfig>> {
         let mut layered: Vec<InferenceConfig> = Vec::new();
+        let global_dir = self.global_dir();
 
-        if let Some(global_dir) = self.global_dir() {
-            let global_inf_path = global_dir.join("inference.toml");
-            for inf in Self::read_inference_file(&global_dir, &global_inf_path)? {
+        if let Some(ref gdir) = global_dir {
+            let global_inf_path = gdir.join("inference.toml");
+            for mut inf in Self::read_inference_file(gdir, &global_inf_path)? {
+                if let InferenceLifecycle::Compose { ref mut file, .. } = inf.lifecycle {
+                    *file = resolve_compose_file(
+                        file,
+                        ConfigScope::Machine,
+                        &self.project_root,
+                        Some(gdir.as_path()),
+                    )?;
+                }
                 upsert_by_key(&mut layered, inf, |i| &i.inference_id);
             }
         }
 
         let project_orrery = self.orrery_dir();
         let project_inf_path = project_orrery.join("inference.toml");
-        for inf in Self::read_inference_file(&project_orrery, &project_inf_path)? {
+        for mut inf in Self::read_inference_file(&project_orrery, &project_inf_path)? {
+            inf.validate_project_scope()?;
+            if let InferenceLifecycle::Compose { ref mut file, .. } = inf.lifecycle {
+                *file = resolve_compose_file(
+                    file,
+                    ConfigScope::Project,
+                    &self.project_root,
+                    global_dir.as_deref(),
+                )?;
+            }
             upsert_by_key(&mut layered, inf, |i| &i.inference_id);
         }
 
         let project_toml_path = project_orrery.join("project.toml");
         if project_toml_path.exists() {
             let project = self.load_project()?;
-            for inf in project.inference {
+            for mut inf in project.inference {
+                inf.validate_project_scope()?;
+                if let InferenceLifecycle::Compose { ref mut file, .. } = inf.lifecycle {
+                    *file = resolve_compose_file(
+                        file,
+                        ConfigScope::Project,
+                        &self.project_root,
+                        global_dir.as_deref(),
+                    )?;
+                }
                 upsert_by_key(&mut layered, inf, |i| &i.inference_id);
             }
         }
@@ -1787,6 +1932,7 @@ impl ConfigStore {
     pub fn save_inference(&self, inference: &InferenceConfig) -> Result<()> {
         validate_config_file_id(&inference.inference_id, "inference_id")?;
         inference.validate()?;
+        inference.validate_project_scope()?;
 
         let project_orrery = self.orrery_dir();
         let project_toml_path = project_orrery.join("project.toml");
@@ -1807,6 +1953,9 @@ impl ConfigStore {
         upsert_by_key(&mut list, inference.clone(), |i| &i.inference_id);
         let file = InferenceFile { inference: list };
         file.validate()?;
+        for inf in &file.inference {
+            inf.validate_project_scope()?;
+        }
         let serialized = toml::to_string_pretty(&file)?;
         atomic_write(&inf_path, serialized.as_bytes())
     }
@@ -3179,6 +3328,13 @@ lifecycle = { type = "External" }
         assert_eq!(mcp_servers[2], project_cargo);
 
         // Global inference: "coder-14b" (port 8080) and "router" (port 8081)
+        let router_compose_path = global_dir
+            .join("docker-models")
+            .join("router")
+            .join("compose.yaml");
+        atomic_write(&router_compose_path, b"services:\n  llama:\n    image: x\n").unwrap();
+        let canonical_router_compose = fs::canonicalize(&router_compose_path).unwrap();
+
         let global_inf = InferenceFile {
             inference: vec![
                 InferenceConfig {
@@ -3227,6 +3383,13 @@ lifecycle = { type = "External" }
         assert_eq!(loaded_inf.len(), 2);
         assert_eq!(loaded_inf[0], project_coder_inf);
         assert_eq!(loaded_inf[1].inference_id, "router");
+        assert_eq!(
+            loaded_inf[1].lifecycle,
+            InferenceLifecycle::Compose {
+                file: canonical_router_compose,
+                service: Some("llama".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -3389,5 +3552,259 @@ max_context_tokens = 1024
         store.remove_inference("coder-14b").unwrap();
         assert!(store.load_inference().unwrap().is_empty());
         assert!(store.remove_inference("coder-14b").is_err());
+    }
+
+    #[test]
+    fn project_compose_resolves_under_orrery() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("compose-proj").unwrap();
+
+        let compose_path = store.orrery_dir().join("compose").join("router.yaml");
+        atomic_write(&compose_path, b"services:\n  llama:\n    image: x\n").unwrap();
+        let expected_canonical = fs::canonicalize(&compose_path).unwrap();
+
+        let resolved = resolve_compose_file(
+            Path::new("compose/router.yaml"),
+            ConfigScope::Project,
+            proj_tmp.path(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(resolved, expected_canonical);
+
+        let router_inf = InferenceConfig {
+            inference_id: "router".to_string(),
+            endpoint_url: "http://127.0.0.1:8081".to_string(),
+            mode: InferenceMode::Router,
+            lifecycle: InferenceLifecycle::Compose {
+                file: PathBuf::from("compose/router.yaml"),
+                service: Some("llama".to_string()),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        store.save_inference(&router_inf).unwrap();
+
+        let loaded = store.load_inference().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded[0].lifecycle,
+            InferenceLifecycle::Compose {
+                file: expected_canonical,
+                service: Some("llama".to_string()),
+            }
+        );
+
+        // Saved project.toml still holds the relative path, never the canonical path
+        let saved_proj = store.load_project().unwrap();
+        assert_eq!(
+            saved_proj.inference[0].lifecycle,
+            InferenceLifecycle::Compose {
+                file: PathBuf::from("compose/router.yaml"),
+                service: Some("llama".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn project_compose_absolute_rejected() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let abs_compose = outside_tmp.path().join("compose.yaml");
+        fs::write(&abs_compose, "services: {}\n").unwrap();
+
+        let err = resolve_compose_file(&abs_compose, ConfigScope::Project, proj_tmp.path(), None)
+            .unwrap_err();
+        match err {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "lifecycle.file");
+                assert_eq!(
+                    message,
+                    "project config must use a path relative to .orrery/"
+                );
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let inf = InferenceConfig {
+            inference_id: "router".to_string(),
+            endpoint_url: "http://127.0.0.1:8081".to_string(),
+            mode: InferenceMode::Router,
+            lifecycle: InferenceLifecycle::Compose {
+                file: abs_compose,
+                service: Some("llama".to_string()),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        let scope_err = inf.validate_project_scope().unwrap_err();
+        match scope_err {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "lifecycle.file");
+                assert_eq!(
+                    message,
+                    "project config must use a path relative to .orrery/"
+                );
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("abs-compose-proj").unwrap();
+        assert!(matches!(
+            store.save_inference(&inf),
+            Err(Error::Validation { ref field, .. }) if field == "lifecycle.file"
+        ));
+        let mut proj = store.load_project().unwrap();
+        proj.inference.push(inf);
+        assert!(matches!(
+            store.save_project(&proj),
+            Err(Error::Validation { ref field, .. }) if field == "lifecycle.file"
+        ));
+    }
+
+    #[test]
+    fn project_compose_escape_rejected() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(proj_tmp.path().join(".orrery")).unwrap();
+
+        let err = resolve_compose_file(
+            Path::new("../outside.yaml"),
+            ConfigScope::Project,
+            proj_tmp.path(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::PathTraversal { .. }));
+    }
+
+    #[test]
+    fn machine_compose_absolute_outside_workspace_allowed() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        let abs_compose = outside_tmp.path().join("compose.yaml");
+        fs::write(&abs_compose, "services: {}\n").unwrap();
+        let expected = fs::canonicalize(&abs_compose).unwrap();
+
+        let resolved =
+            resolve_compose_file(&abs_compose, ConfigScope::Machine, proj_tmp.path(), None)
+                .unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn compose_inside_workspace_rejected() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let workspace_compose = proj_tmp.path().join("compose.yaml");
+        fs::write(&workspace_compose, "services: {}\n").unwrap();
+
+        let err = resolve_compose_file(
+            &workspace_compose,
+            ConfigScope::Machine,
+            proj_tmp.path(),
+            None,
+        )
+        .unwrap_err();
+        match err {
+            Error::Security { message } => {
+                assert_eq!(
+                    message,
+                    "compose file is inside the agent-writable workspace"
+                );
+            }
+            other => panic!("expected Error::Security, got {other:?}"),
+        }
+
+        let orrery_compose = proj_tmp.path().join(".orrery").join("compose.yaml");
+        atomic_write(&orrery_compose, b"services: {}\n").unwrap();
+        let expected = fs::canonicalize(&orrery_compose).unwrap();
+
+        let ok = resolve_compose_file(&orrery_compose, ConfigScope::Machine, proj_tmp.path(), None)
+            .unwrap();
+        assert_eq!(ok, expected);
+    }
+
+    #[test]
+    fn compose_missing_file_is_io_error() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let outside_tmp = tempfile::TempDir::new().unwrap();
+        fs::create_dir_all(proj_tmp.path().join(".orrery")).unwrap();
+
+        let err_proj = resolve_compose_file(
+            Path::new("missing.yaml"),
+            ConfigScope::Project,
+            proj_tmp.path(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err_proj, Error::Io { .. }));
+
+        let err_machine = resolve_compose_file(
+            &outside_tmp.path().join("missing.yaml"),
+            ConfigScope::Machine,
+            proj_tmp.path(),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err_machine, Error::Io { .. }));
+    }
+
+    #[test]
+    fn project_stdio_command_with_separator_rejected() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+
+        for bad_cmd in ["bin/server", "bin\\server"] {
+            let server = McpServerConfig {
+                server_id: "filesystem".to_string(),
+                transport: McpTransportConfig::Stdio {
+                    command: bad_cmd.to_string(),
+                    args: Vec::new(),
+                },
+                write_tools: Vec::new(),
+            };
+            let err = store.save_mcp_server(&server).unwrap_err();
+            match err {
+                Error::Validation { field, .. } => assert_eq!(field, "transport.command"),
+                other => panic!("expected Error::Validation, got {other:?}"),
+            }
+        }
+        assert!(!store.orrery_dir().join("mcp").join("servers.toml").exists());
+    }
+
+    #[test]
+    fn project_stdio_absolute_arg_rejected() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let arg_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+
+        let abs_arg = arg_tmp.path().to_string_lossy().into_owned();
+        let file = McpServersFile {
+            servers: vec![McpServerConfig {
+                server_id: "filesystem".to_string(),
+                transport: McpTransportConfig::Stdio {
+                    command: "mcp-filesystem".to_string(),
+                    args: vec!["--root".to_string(), abs_arg],
+                },
+                write_tools: Vec::new(),
+            }],
+        };
+        let servers_toml = store.orrery_dir().join("mcp").join("servers.toml");
+        atomic_write(
+            &servers_toml,
+            toml::to_string_pretty(&file).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        let err = store.load_mcp_servers().unwrap_err();
+        match err {
+            Error::Validation { field, .. } => assert_eq!(field, "transport.args"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
     }
 }
