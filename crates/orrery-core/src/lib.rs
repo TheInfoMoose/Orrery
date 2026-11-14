@@ -1,6 +1,7 @@
 pub mod checkpoint;
 pub mod config;
 pub mod docker;
+pub mod llm;
 pub mod mcp;
 pub mod plan;
 pub mod security;
