@@ -138,7 +138,7 @@ The workspace line's `features` list is replaced (not appended) at these steps:
 ├── checkpoints/
 │   ├── workflow_state.toml                       # WorkflowCheckpoint
 │   └── step_001/round_02_stage_01_<agent_id>.toml # StampedReport
-├── agent_io/<run_id>/<agent_id>/                 # AgentCli mounts: in/ (ro), out/ (rw). Deleted after the stage.
+├── agent_io/<run_id>/<agent_id>/                 # AgentCli mounts: in/ (ro), out/ (rw), mask/ (empty, ro over /workspace/.orrery). Deleted after the stage.
 └── logs/live_stream.log, .log.1, .log.2
 ```
 
@@ -397,7 +397,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
   - `inspect(&self, name: &str) -> Result<ContainerState>`
   - `run_to_completion(&self, spec: &ContainerSpec, stdin: Vec<u8>, on_output: &(dyn Fn(String) + Send + Sync)) -> Result<ExitStatus>` (AgentCli)
 - `ContainerSpec { name, image, cmd, env: Vec<(String, EnvValue)>, mounts: Vec<MountSpec>, memory_limit_mb, auto_remove: bool }` (AgentCli containers only); `EnvValue::{Plain(String), Secret(SecretValue)}`.
-- `BollardContainerBackend::connect(socket: Option<PathBuf>)` — default local socket; accepts rootless Docker or Podman socket paths. No GPU configuration (§9.6).
+- `BollardContainerBackend::connect()` — `Docker::connect_with_local_defaults()`, which honors `DOCKER_HOST` (rootless Docker, Podman). No socket path in any config file. No GPU configuration (§9.6).
 - `MockContainerBackend` records every call for tests.
 - `ResourceManager<B: ContainerBackend>`:
   - `new(backend: Arc<B>, inference: Vec<InferenceConfig>, max_concurrent_agents)`
@@ -409,11 +409,11 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
 
 #### 5.7.1 Mounts
 - Inference servers: Orrery adds no mounts (they are the operator's own).
-- AgentCli containers: project at `/workspace` per `workspace_mount`; `agent_io/<run>/<agent>/in` at `/orrery/in` (ro); `.../out` at `/orrery/out` (rw). Never mount `.orrery/` itself.
+- AgentCli containers: project at `/workspace` per `workspace_mount`; `agent_io/<run>/<agent>/in` at `/orrery/in` (ro); `.../out` at `/orrery/out` (rw). Never mount `.orrery/` itself: when the project is mounted, an empty `agent_io/<run>/<agent>/mask` is bound read-only over `/workspace/.orrery`, so no agent can read or edit `.orrery/` (config, checkpoints, role prompts).
 
 #### 5.7.2 AgentCli guardrails & secrets
 - The MCP gatekeeper does not see a CLI's built-in tools. Guardrails are: `workspace_mount`, container isolation, memory/time limits, and whatever tool config the image ships. Document this in the TUI agent details and `orrery agent show`.
-- Secrets are injected as an env var at container create time and the container is removed when the stage ends. Residual risk: anyone with Docker socket access can read container env while it runs (that access is already root-equivalent). State this in `orrery agent add-cli` output.
+- Secrets are injected as an env var at container create time and the container is removed when the stage ends. Residual risk: anyone with Docker socket access can read container env while it runs (that access is already root-equivalent). Second residual risk: a `ReadWrite` mount can write `.git/hooks`, which the host runs at the next git command. State both in `orrery agent add-cli` output.
 
 ### 5.8 `mcp.rs` — MCP Gatekeeper
 
@@ -598,12 +598,12 @@ All commands accept `--project <PATH>` (default `.`). Output is plain text; add 
 | `orrery agent add-cli --id --name --image <IMG@DIGEST> --command <ARG>... [--mount none\|ro\|rw] [--memory-mb] [--timeout] [--secret-env <VAR> --keychain-service --keychain-account]` | Register `AgentCli`; prints the §5.7.2 residual-risk note. |
 | `orrery agent add-cloud --id --name --endpoint <URL> --model <M> --keychain-service --keychain-account` | Register `CloudApi`. |
 | `orrery agent list [--json]` / `show <ID>` / `remove <ID>` | Inspect/remove agents. |
-| `orrery inference add --id --endpoint <URL> [--mode single\|router] [--container <NAME> \| --compose <FILE> [--service <S>]] [--no-unload] [--startup-timeout <SECS>]` / `list` / `remove <ID>` | Register an existing model server. No `--container`/`--compose` → `External`. `--container` and `--compose` conflict. |
+| `orrery inference add --id --endpoint <URL> [--mode single\|router] [--container <NAME> \| --compose <FILE> [--service <S>]] [--no-unload] [--startup-timeout <SECS>]` / `list` / `remove <ID>` | Register an existing model server. No `--container`/`--compose` → `External`. `--container` and `--compose` conflict. `--compose` is relative to `.orrery/` and must resolve (`resolve_compose_file`, Project) before saving; absolute paths go in the machine-scope `inference.toml` by hand. |
 | `orrery secret set --service <S> --account <A>` | Read secret from a no-echo prompt (or stdin when not a TTY) into the OS keychain. |
 | `orrery secret delete --service <S> --account <A>` | Remove it. |
 | `orrery role add --id --name --kind <orchestrator\|implementer\|validator> --rules-file <MD> [--allow-tool <SERVER:TOOL>]...` / `list` / `show <ID>` / `remove <ID>` | Manage roles. |
-| `orrery mcp add-stdio --id --command <CMD> [--arg <A>]... [--write-tool <TOOL>:<ARG>[,<ARG>]]...` | Register stdio MCP server. |
-| `orrery mcp add-http --id --endpoint <URL> [--keychain-service --keychain-account] [--write-tool ...]` | Register Streamable HTTP MCP server. |
+| `orrery mcp add-stdio --id --command <CMD> [--arg <A>]... [--write-tool <TOOL>:<ARG>[,<ARG>]]...` | Register stdio MCP server. Connects first (handshake + `list_tools`) and saves only on success; prints the tool count. Project scope: `--command` is a bare name on `PATH` and no `--arg` is an absolute path. |
+| `orrery mcp add-http --id --endpoint <URL> [--keychain-service --keychain-account] [--write-tool ...]` | Register Streamable HTTP MCP server. Connects first and saves only on success, as `add-stdio`. |
 | `orrery mcp list` / `tools <ID>` / `remove <ID>` | Inspect/remove; `tools` connects and lists tools. |
 | `orrery gate set <SERVER:TOOL>...` / `clear` | Set/clear `gate_tools`. |
 | `orrery hook set <start\|pass\|retry\|halt> <SERVER:TOOL> [--on-failure halt\|warn]` / `clear <EVENT>` | Configure hooks. |
@@ -833,13 +833,13 @@ impl MockMcpTransport {
     pub fn calls(&self) -> Vec<(String, serde_json::Value)>;
 }
 pub struct RmcpTransport { /* server_id, rmcp::service::RunningService<rmcp::RoleClient, ()> */ }
-impl RmcpTransport { pub async fn connect(server: &McpServerConfig, secrets: &dyn SecretStore) -> Result<Self>; }
-pub struct RmcpConnector { pub secrets: Arc<dyn SecretStore> }
+impl RmcpTransport { pub async fn connect(server: &McpServerConfig, secrets: &dyn SecretStore) -> Result<Self>; pub async fn connect_in(server: &McpServerConfig, secrets: &dyn SecretStore, workdir: &Path) -> Result<Self>; }   // connect_in added (Step 26)
+pub struct RmcpConnector { pub secrets: Arc<dyn SecretStore>, pub project_root: PathBuf, pub search_path: Option<std::ffi::OsString> }   // project_root, search_path added (Step 26); Stdio → resolve_stdio_command then RmcpTransport::connect_in(.., &project_root)
 pub struct MockMcpConnector { pub transports: HashMap<String, Arc<dyn McpTransport>> } // unknown id → Error::Mcp
 ```
 - Path normalization for `contains`/`scopes_overlap`: split on `/`, drop empty and `.` segments; any `..` segment or a leading `/` → not contained / treated as overlapping everything. `contains`: empty prefix list → true; else some prefix's segments are a leading run of the path's segments. Overlap: either segment list is a leading run of the other (`src` vs `src/lib.rs` overlap; `src` vs `src2` don't).
 - `execute_for_role` order: (0) `args` not a JSON object → `Error::Security` (so no shape skips the path checks); (1) not allowed → `Error::Security`; (2) server not registered → `Error::Security`; (3) write tool: each `path_args` key present in `args` must be a JSON string with `scope.contains(..)`, else `Error::Security`; (4) `transport.call_tool(tool, args)`.
-- `RmcpTransport::connect`: `Stdio` → `rmcp::transport::TokioChildProcess::new(tokio::process::Command::new(command).args(args))` then `rmcp::ServiceExt::serve((), transport).await`. `StreamableHttp` → if a keychain pair is set, `secrets.get(..)?` **first** (before any network); `StreamableHttpClientTransportConfig::with_uri(endpoint_url)` + `.auth_header(secret.expose())` (token without `Bearer `); `StreamableHttpClientTransport::from_config(cfg)`; then `serve`. `list_tools` → `peer().list_all_tools()`; `call_tool` → `CallToolRequestParams::new(name.to_owned()).with_arguments(obj)` (non-object args → `Error::Validation`), result via `serde_json::to_value`. Every rmcp error → `Error::Mcp { server_id, source: Box::new(e) }`.
+- `RmcpTransport::connect(server, secrets)` = `connect_in(server, secrets, Path::new("."))`; `connect_in(.., workdir: &Path)`: `Stdio` → `rmcp::transport::TokioChildProcess::new(tokio::process::Command::new(command).args(args).current_dir(workdir))` then `rmcp::ServiceExt::serve((), transport).await`. `StreamableHttp` → if a keychain pair is set, `secrets.get(..)?` **first** (before any network); `StreamableHttpClientTransportConfig::with_uri(endpoint_url)` + `.auth_header(secret.expose())` (token without `Bearer `); `StreamableHttpClientTransport::from_config(cfg)`; then `serve`. `list_tools` → `peer().list_all_tools()`; `call_tool` → `CallToolRequestParams::new(name.to_owned()).with_arguments(obj)` (non-object args → `Error::Validation`), result via `serde_json::to_value`. Every rmcp error → `Error::Mcp { server_id, source: Box::new(e) }`. `resolve_stdio_command(command: &str, project_root: &Path, search_path: Option<&OsStr>) -> Result<PathBuf>` (`mcp.rs`, Step 26): No '/' or '\\' → first absolute search_path entry holding a regular file (unix: any exec bit) named `command`; relative/empty entries skipped; none → Error::Validation { field: "transport.command", message: "'{command}' not found on PATH" }. Absolute → canonicalize (missing → Error::Io), regular file, unix exec bit, else Error::Validation. Relative with a separator → Error::Validation. Result inside canonical project_root and not under <root>/.orrery → Error::Security { "stdio command is inside the agent-writable workspace" }
 
 ### 9.6 `docker.rs`
 ```rust
@@ -861,7 +861,7 @@ pub struct ContainerSpec { pub name: String, pub image: String, pub cmd: Vec<Str
     async fn down(&self, file: &Path, service: Option<&str>) -> Result<()>;      // no service: docker compose -f <file> down; service: docker compose -f <file> stop <service>
     async fn is_running(&self, file: &Path, service: Option<&str>) -> Result<bool>; // docker compose -f <file> ps --status running -q [service] → non-empty stdout
 }
-pub struct DockerComposeCli;   // runs `docker compose …` via tokio::process::Command; non-zero exit → Error::Validation { field: "compose", message: <stderr, redacted> }
+pub struct DockerComposeCli;   // runs `docker compose …` via tokio::process::Command; a relative `file` → Error::Validation { field: "compose", message: "compose file must be resolved by ConfigStore::load_inference" } before any process starts; non-zero exit → Error::Validation { field: "compose", message: <stderr, redacted> }
 #[async_trait] pub trait InferenceControl: Send + Sync {
     async fn is_running(&self, inference: &InferenceConfig) -> Result<bool>;   // External → true
     async fn start(&self, inference: &InferenceConfig) -> Result<()>;          // Container → backend.start; Compose → up; External → Ok
@@ -903,12 +903,12 @@ impl Drop for StageLease { /* open.store(false) — a dropped lease never blocks
 pub struct SlotPermit(tokio::sync::OwnedSemaphorePermit);
 pub struct BollardContainerBackend { docker: bollard::Docker }
 impl BollardContainerBackend {
-    pub fn connect(socket: Option<PathBuf>) -> Result<Self>;  // Some → Docker::connect_with_socket(path, 120, bollard::API_DEFAULT_VERSION); None → Docker::connect_with_local_defaults()
+    pub fn connect() -> Result<Self>;  // Docker::connect_with_local_defaults() (honors DOCKER_HOST); no socket argument (overrides §5.7)
 }
 pub fn create_body(spec: &ContainerSpec) -> bollard::models::ContainerCreateBody; // AgentCli containers only; the only place EnvValue::Secret is exposed
 ```
 - `effective_concurrency`: `cap = max(1, min(max_concurrent_agents, agents.len()))`. Non-writer → `cap`. Writer → `cap` only if allocations is non-empty, every allocation has a non-empty `write_scope`, no two scope entries across different allocations overlap (`scopes_overlap`), and no agent is `AgentCli` with `ReadWrite`; else `1`.
-- `mounts_for`: `LocalModel`/`CloudApi` → `[]`. `AgentCli` → project `Bind` at `/workspace` (`ReadOnly` → `read_only: true`, `ReadWrite` → `false`, `None` → no project mount), plus `Bind { agent_io_dir/in, "/orrery/in", true }` and `Bind { agent_io_dir/out, "/orrery/out", false }`.
+- `mounts_for`: `LocalModel`/`CloudApi` → `[]`. `AgentCli` → project `Bind` at `/workspace` (`ReadOnly` → `read_only: true`, `ReadWrite` → `false`, `None` → no project mount), then, only when the project is mounted, `Bind { agent_io_dir/mask, "/workspace/.orrery", true }`, plus `Bind { agent_io_dir/in, "/orrery/in", true }` and `Bind { agent_io_dir/out, "/orrery/out", false }`.
 - `begin_stage`, in order:
   1. `lease_open.swap(true)` was `true` → `Error::Engine { step_number: 0, message: "stage lease already open" }`.
   2. `needed` = distinct `(inference_id, model)` of the stage's `LocalModel` agents; unknown `inference_id` → `Error::Validation`.
@@ -920,7 +920,7 @@ pub fn create_body(spec: &ContainerSpec) -> bollard::models::ContainerCreateBody
 - `create_body`: `image`, `cmd`, `env` as `"K=V"`, `host_config.binds` (`host:container[:ro]`), `memory = mb * 1024 * 1024`, `auto_remove`, `open_stdin`/`attach_stdin`/`stdin_once: true`. No GPU or port settings: Orrery never configures GPUs (inference servers are the operator's own; AgentCli containers don't need one).
 
 ### 9.6a Inference servers (`config.rs`)
-Orrery attaches to model servers the operator already runs (any GPU stack, e.g. ROCm, is configured in the operator's own container or compose file). It never creates, configures or deletes an inference server.
+Orrery attaches to model servers the operator already runs (any GPU stack, e.g. ROCm, is configured in the operator's own container or compose file). It never creates, configures or deletes an inference server. Path scope: a project-scope entry (`.orrery/inference.toml`, `project.toml`) may hold only a relative `Compose.file`, resolved under `<root>/.orrery/`; the machine-scope `<global_dir>/inference.toml` may also hold an absolute one (relative resolves under `global_dir`). This keeps host paths out of anything committable.
 ```rust
 #[serde(deny_unknown_fields)]
 pub struct InferenceConfig {     // replaces the Step 2 shape (overrides §4.3's original fields)
@@ -936,7 +936,7 @@ pub struct InferenceConfig {     // replaces the Step 2 shape (overrides §4.3's
 pub enum InferenceLifecycle { #[default] External, Container { name: String }, Compose { file: PathBuf, #[serde(default)] service: Option<String> } }
 impl InferenceConfig {
     pub fn chat_url(&self) -> String;     // endpoint_url without trailing '/' + "/v1/chat/completions"
-    pub fn validate(&self) -> Result<()>; // id non-empty; endpoint starts with http:// or https://; no embedded secret (check_no_embedded_secret); Container name non-empty; Compose file non-empty; startup_timeout_secs >= 1
+    pub fn validate(&self) -> Result<()>; // id non-empty; endpoint starts with http:// or https://; no embedded secret (check_no_embedded_secret); Container name non-empty; Compose file non-empty; startup_timeout_secs >= 1. Also (Step 14): `pub enum ConfigScope { Project, Machine }`; `pub fn resolve_compose_file(file: &Path, scope: ConfigScope, project_root: &Path, global_dir: Option<&Path>) -> Result<PathBuf>`: Project + absolute → Error::Validation { field: "lifecycle.file", message: "project config must use a path relative to .orrery/" }; Project + relative → resolve_safe_within_dir(<root>/.orrery, file); Machine + relative → global_dir.join(file) (no global_dir → Error::Validation); then canonicalize (missing → Error::Io), must be a regular file (else Error::Validation); canonical path inside canonical project_root and not under <root>/.orrery → Error::Security { "compose file is inside the agent-writable workspace" }. `ConfigStore::load_inference` replaces every Compose `file` with this result (in memory only; global entries as Machine, project entries as Project). Project-scope MCP entries (`.orrery/mcp/servers.toml`): a Stdio `command` containing '/' or '\\' or an absolute `args` entry → Error::Validation (checked on load and save)
 }
 ```
 
@@ -1001,7 +1001,7 @@ impl ToolCallAccumulator { pub fn apply(&mut self, delta: &ToolCallDelta); pub f
 pub struct CliContainerDriver { backend: Arc<dyn ContainerBackend>, secrets: Arc<dyn SecretStore>, project_root: PathBuf }
 impl CliContainerDriver { pub fn new(backend: Arc<dyn ContainerBackend>, secrets: Arc<dyn SecretStore>, project_root: PathBuf) -> Self; }
 ```
-- `run_turn`: `dir = agent_io_dir(root, run_id, agent_id)`; create `dir/in`, `dir/out`; prompt = system + `"\n\n"` + user; write `dir/in/prompt.md`; secret env (if `secret_env` + keychain pair set) = `EnvValue::Secret(secrets.get(..)?)` fetched before the run; spec = `{ name: cli_container_name, image, cmd: command, env, mounts: mounts_for(..), port: None, memory_limit_mb, gpu: None, auto_remove: false }`; `tokio::time::timeout(timeout_secs, backend.run_to_completion(&spec, prompt bytes, &|line| emit Output))`. Timeout → `backend.remove(name)` then `Error::Agent { message: "timed out after {n}s" }`. Then read `dir/out/report.toml` → `toml::from_str` → `validate_for_role`. Missing/invalid → delete the file, re-run once with prompt + `"\n\n# Previous report was invalid\n{error}"`; second failure → `Error::Report`. After each run: `backend.remove(name)`.
+- `run_turn`: `dir = agent_io_dir(root, run_id, agent_id)`; create `dir/in`, `dir/out` and, if the agent mounts the project, an empty `dir/mask`; prompt = system + `"\n\n"` + user; write `dir/in/prompt.md`; secret env (if `secret_env` + keychain pair set) = `EnvValue::Secret(secrets.get(..)?)` fetched before the run; spec = `{ name: cli_container_name, image, cmd: command, env, mounts: mounts_for(..), memory_limit_mb, auto_remove: false }`; `tokio::time::timeout(timeout_secs, backend.run_to_completion(&spec, prompt bytes, &|line| emit Output))`. Timeout → `backend.remove(name)` then `Error::Agent { message: "timed out after {n}s" }`. Then read `dir/out/report.toml` → `toml::from_str` → `validate_for_role`. Missing/invalid → delete the file, re-run once with prompt + `"\n\n# Previous report was invalid\n{error}"`; second failure → `Error::Report`. After each run: `backend.remove(name)`.
 
 ### 9.8 `engine.rs`
 ```rust
@@ -1030,7 +1030,7 @@ impl WorkflowEngine {
 }
 pub struct Backends { pub secrets: Arc<dyn SecretStore>, pub containers: Arc<dyn ContainerBackend>, pub inference_control: Arc<dyn InferenceControl>,
                       pub connector: Arc<dyn McpConnector>, pub drivers: DriverSet }
-impl Backends { pub fn real(project_root: &Path) -> Result<Self>; }   // OsKeyringStore, BollardContainerBackend::connect(None), DockerInferenceControl::new(containers, Arc::new(DockerComposeCli)), RmcpConnector, Http + Cli drivers
+impl Backends { pub fn real(project_root: &Path) -> Result<Self>; }   // OsKeyringStore, BollardContainerBackend::connect(), DockerInferenceControl::new(containers, Arc::new(DockerComposeCli)), RmcpConnector { secrets, project_root, search_path: std::env::var_os("PATH") }, Http + Cli drivers
 pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<WorkflowEngine>;
 ```
 - `check_dispatch`: `next = last_stage_run.map_or(1, |l| l + 1)`. `target == next && target < kinds.len()` → `Forward`. `1 <= target < next` and `kinds[target]` is not `Validator` → `Retry`. Anything else → `Error::Engine { step_number: 0, message }` (caller fills the step number).

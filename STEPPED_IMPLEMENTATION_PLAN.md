@@ -19,7 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 14** | `/goal` | `ResourceManager` and inference control | `crates/orrery-core/src/docker.rs` | — |
+| 1 | **STEP 14** | `/boost` | `ResourceManager`, inference control, `.orrery` mask, path scope | `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/config.rs` | — |
 | 2 | **STEP 15** | `/goal` | Docker backend via `bollard`, `futures-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/tests/live_docker.rs` (NEW) | — |
 | 3 | **STEP 16** | `/goal` | Prompt builders, `AgentDriver`, mock driver | `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/llm.rs` (NEW) | — |
 | 4 | **STEP 17** | `/goal` | HTTP chat: request building and SSE parsing (pure) | `crates/orrery-core/src/llm.rs` | — |
@@ -31,7 +31,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | 10 | **STEP 23** | `/goal` | Engine lifecycle hooks | `crates/orrery-core/src/engine.rs` | — |
 | 11 | **STEP 24** | `/goal` | Engine stage concurrency, validator broadcast | `crates/orrery-core/src/engine.rs` | — |
 | 12 | **STEP 25** | `/goal` | Engine interrupt, resume, plan reconcile | `crates/orrery-core/src/engine.rs` | — |
-| 13 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`) | `crates/orrery-core/src/engine.rs` | — |
+| 13 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`), stdio command resolution | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/mcp.rs` | — |
 | 14 | **STEP 27** | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) | — |
 | 15 | **STEP 28** | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) | — |
 | 16 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
@@ -75,6 +75,7 @@ These apply to every block. A block never repeats them.
 - **Code rules.** No `#[ignore]`, no `#[allow(...)]`, no empty or assertion-free tests, no `.unwrap()`/`.expect()` outside tests. Tests go in `#[cfg(test)] mod tests` at the bottom of the file they test (spec §9.0), so test paths are `<module>::tests::<name>`.
 - **Tests.** The named tests are the minimum, each with real assertions, using exactly the given names and inputs. The `POST_GATE` counts them by name, so extra tests (for the coverage floor) never break it.
 - **Fixtures** use reserved placeholders only (spec §8): `example.com` / `.test`, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `testuser`. No absolute host paths. No server product other than llama.cpp.
+- **Paths.** Committed files (code, tests, fixtures, docs) never hold a host's absolute path; tests build every path from a `TempDir`. At run time Orrery takes host paths only from the launch workspace, the machine-scope global dir or `PATH`, and checks each one before use (spec §9.6a path scope, §9.5 `resolve_stdio_command`).
 - **Live-backend tests** (`tests/live_*.rs`) are written and compiled, never run by the agent. The operator runs them.
 - **Free choices.** Anything spec §9.0 calls a free choice (private helpers, extra derives, field order, test helpers): decide, don't halt. List each one in one line of the step report.
 - **Network.** If the sandbox blocks network, run `cargo deny --offline check` in place of `cargo deny check` and say so in the report.
@@ -763,33 +764,51 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 ---
 
-### STEP 14: ResourceManager & Inference Control
+### STEP 14: ResourceManager, Inference Control & Path Scope
 
-* **Recommended Command:** `/goal`
+* **Recommended Command:** `/boost`
 
-Scope note: written 2026-11-13. `external_server_never_started` needs a `ComposeRunner` that records calls. If §9.6 doesn't define one, write a private one inside `mod tests` (a free choice).
+Scope note: written 2026-11-13; amended 2026-11-14 after Step 13's review.
+- Step 13's `/workspace` bind exposed `<root>/.orrery` to CLI agents. A `ReadWrite` agent could then edit `.orrery/mcp/servers.toml`, whose stdio commands Orrery runs on the host, or forge checkpoints. This step masks it.
+- It also adds the path-scope rules (spec §9.6a): project-scope config holds only relative paths, and compose files are resolved and checked before Orrery ever runs `docker compose`.
+- `external_server_never_started` needs a `ComposeRunner` that records calls. If §9.6 doesn't define one, write a private one inside `mod tests` (a free choice).
 
 ```text
 [STEP_ID]
-STEP 14: docker.rs part 2 — DockerComposeCli (+ compose_args), DockerInferenceControl, ResourceManager, StageLease, SlotPermit
+STEP 14: docker.rs part 2 — DockerComposeCli (+ compose_args), DockerInferenceControl, ResourceManager, StageLease, SlotPermit, .orrery mask in mounts_for; config.rs — ConfigScope, resolve_compose_file, project-scope path checks
 
 [SCOPE_LOCK]
 ALLOWED_FILES:
   - crates/orrery-core/src/docker.rs
+  - crates/orrery-core/src/config.rs
 READ_ONLY_REFS:
-  - ORRERY_TECHNICAL_SPECIFICATION.md:844-921 (§9.6: begin_stage steps 1-5, end_stage, shutdown; binding)
-  - ORRERY_TECHNICAL_SPECIFICATION.md:922-955 (§9.6a: lifecycle table, readiness)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:844-921 (§9.6: DockerComposeCli, begin_stage steps 1-5, end_stage, shutdown, mounts_for; binding)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:922-955 (§9.6a: path scope, ConfigScope, resolve_compose_file, project-scope MCP checks, lifecycle table, readiness; binding)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:410-417 (§5.7.1 mounts, §5.7.2)
   - ORRERY_TECHNICAL_SPECIFICATION.md:204-280 (§4.3 inference examples, used as fixtures)
 FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. No bollard (Step 15). Tests never run docker: compose argv is checked through compose_args only.
+  - A resolved (absolute) path is never written to a project-scope file. No new dependency.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct MockContainerBackend' crates/orrery-core/src/docker.rs && ! grep -q 'struct ResourceManager' crates/orrery-core/src/docker.rs && sed -n 844p $S | grep -q '^### 9.6 '
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct MockContainerBackend' crates/orrery-core/src/docker.rs && ! grep -q 'struct ResourceManager' crates/orrery-core/src/docker.rs && ! grep -q 'enum ConfigScope' crates/orrery-core/src/config.rs && sed -n 844p $S | grep -q '^### 9.6 ' && sed -n 922p $S | grep -q '^### 9.6a ' && sed -n 939p $S | grep -q 'resolve_compose_file' && sed -n 911p $S | grep -q 'agent_io_dir/mask'
 
 [MUTATION_SPEC]
-1. From §9.6: `DockerComposeCli` (+ `ComposeRunner`), `DockerInferenceControl` (+ `new`, `InferenceControl`), `ResourceManager` (`new`; `begin_stage` steps 1-5; `end_stage`; `shutdown`), `StageLease` (`acquire_slot`, `concurrency`, `Drop`), `SlotPermit`.
-   `DockerComposeCli` builds its argv with a private pure fn `compose_args(file, service, op) -> Vec<String>`.
-2. Tests (`#[tokio::test]`; `MockContainerBackend` + `MockInferenceControl`; TempDir project root; inference configs from the §4.3 examples):
+1. docker.rs, from §9.6: `DockerComposeCli` (+ `ComposeRunner`), `DockerInferenceControl` (+ `new`, `InferenceControl`), `ResourceManager` (`new`; `begin_stage` steps 1-5; `end_stage`; `shutdown`), `StageLease` (`acquire_slot`, `concurrency`, `Drop`), `SlotPermit`.
+   - `DockerComposeCli` builds its argv with a private pure fn `compose_args(file, service, op) -> Vec<String>`.
+   - Each `ComposeRunner` method first rejects a relative `file` with the §9.6 `Error::Validation`, before any process starts.
+2. docker.rs, `mounts_for` (spec line 911): when the project is mounted, insert `Bind { agent_io_dir.join("mask"), "/workspace/.orrery", read_only: true }` right after the `/workspace` bind. Order: `/workspace`, mask, `/orrery/in`, `/orrery/out`. `WorkspaceMount::None` gets no mask. Update Step 13's `mounts_cli_readonly` and `mounts_cli_readwrite` to expect the mask.
+3. config.rs, from §9.6a (spec lines 923 and 939):
+   - `pub enum ConfigScope { Project, Machine }` (derive `Debug, Clone, Copy, PartialEq, Eq`).
+   - `pub fn resolve_compose_file(..)` exactly as specified. Reuse `resolve_safe_within_dir` for the Project case.
+   - `McpServerConfig::validate_project_scope(&self) -> Result<()>`: a Stdio `command` containing `/` or `\` → `Error::Validation { field: "transport.command", .. }`; any `args` entry where `Path::new(a).is_absolute()` → `Error::Validation { field: "transport.args", .. }`.
+   - `InferenceConfig::validate_project_scope(&self) -> Result<()>`: a Compose `file` that `is_absolute()` → the same `Error::Validation` as `resolve_compose_file` (Project).
+   - `ConfigStore::load_inference`: resolve each Compose `file` with `resolve_compose_file` before `upsert_by_key`. Global entries use `Machine` with `global_dir()`; `.orrery/inference.toml` and `project.toml` entries use `Project`, after `validate_project_scope`.
+   - `ConfigStore::load_mcp_servers`: call `validate_project_scope` on every project-scope entry.
+   - `save_inference`, `save_mcp_server` and `save_project`: call `validate_project_scope` on what they write.
+4. Fix Step 3's `config_store_layering_global_first_project_replaces_by_id` (it loads the global `router` Compose entry): create `<global_dir>/docker-models/router/compose.yaml` first, then assert that the loaded `file` equals its canonical path. Don't weaken any other assertion.
+5. Tests (`#[tokio::test]` where async; `MockContainerBackend` + `MockInferenceControl`; TempDir project root and TempDir global dir; inference configs from the §4.3 examples; every path is built from a TempDir):
+   docker::tests:
    - `second_begin_stage_fails_while_open`.
    - `begin_after_end_succeeds`.
    - `dropped_lease_does_not_block_next_stage`.
@@ -809,9 +828,20 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
      - down without a service: `[...,"down"]`;
      - down with a service: `[...,"stop",S]`;
      - ps: `[...,"ps","--status","running","-q",S]`.
+   - `mounts_mask_orrery_dir`: `ReadOnly` and `ReadWrite` each give exactly one mount with `container == "/workspace/.orrery"`, `read_only: true`, host `agent_io_dir/mask`. `None` gives no mount whose container starts with `/workspace`.
+   - `compose_cli_rejects_relative_file`: `DockerComposeCli.up(Path::new("compose.yaml"), None)` gives `Error::Validation` with `field == "compose"`.
+   config::tests:
+   - `project_compose_resolves_under_orrery`: `<root>/.orrery/compose/router.yaml` exists; `resolve_compose_file("compose/router.yaml", Project, ..)` returns its canonical path.
+   - `project_compose_absolute_rejected`: an absolute path (from a TempDir) with `Project` gives `Error::Validation` with `field == "lifecycle.file"`.
+   - `project_compose_escape_rejected`: `"../outside.yaml"` with `Project` gives `Error::PathTraversal`.
+   - `machine_compose_absolute_outside_workspace_allowed`: an absolute file in a separate TempDir with `Machine` returns its canonical path.
+   - `compose_inside_workspace_rejected`: an absolute `<root>/compose.yaml` with `Machine` gives `Error::Security`; an absolute `<root>/.orrery/compose.yaml` with `Machine` is `Ok`.
+   - `compose_missing_file_is_io_error`.
+   - `project_stdio_command_with_separator_rejected`: saving a project-scope Stdio server with command `"bin/server"` gives `Error::Validation` with `field == "transport.command"`, and nothing is written.
+   - `project_stdio_absolute_arg_rejected`: loading a project `.orrery/mcp/servers.toml` whose args hold an absolute TempDir path gives `Error::Validation` with `field == "transport.args"`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct ResourceManager' crates/orrery-core/src/docker.rs && grep -q 'fn compose_args' crates/orrery-core/src/docker.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^docker::tests::(second_begin_stage_fails_while_open|begin_after_end_succeeds|dropped_lease_does_not_block_next_stage|stopped_server_started_and_waited|running_server_not_started_or_stopped|external_server_never_started|same_server_next_stage_not_restarted|single_mode_swapped_between_stages|router_unloads_models_next_stage_drops|unload_after_stage_false_keeps_server|end_stage_removes_cli_containers_and_agent_io|unknown_inference_id_is_validation_error|slots_limit_parallelism|shutdown_unloads_router_and_stops_only_started|compose_args_shapes): test$')" -eq 15
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct ResourceManager' crates/orrery-core/src/docker.rs && grep -q 'fn compose_args' crates/orrery-core/src/docker.rs && grep -q '"/workspace/.orrery"' crates/orrery-core/src/docker.rs && grep -q 'pub fn resolve_compose_file' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^docker::tests::(second_begin_stage_fails_while_open|begin_after_end_succeeds|dropped_lease_does_not_block_next_stage|stopped_server_started_and_waited|running_server_not_started_or_stopped|external_server_never_started|same_server_next_stage_not_restarted|single_mode_swapped_between_stages|router_unloads_models_next_stage_drops|unload_after_stage_false_keeps_server|end_stage_removes_cli_containers_and_agent_io|unknown_inference_id_is_validation_error|slots_limit_parallelism|shutdown_unloads_router_and_stops_only_started|compose_args_shapes|mounts_mask_orrery_dir|compose_cli_rejects_relative_file): test$')" -eq 17 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(project_compose_resolves_under_orrery|project_compose_absolute_rejected|project_compose_escape_rejected|machine_compose_absolute_outside_workspace_allowed|compose_inside_workspace_rejected|compose_missing_file_is_io_error|project_stdio_command_with_separator_rejected|project_stdio_absolute_arg_rejected): test$')" -eq 8
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -823,11 +853,11 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/goal`
 
-Scope note: written 2026-11-13. AMD/ROCm host: no NVIDIA device requests anywhere, and model servers are never created by Orrery.
+Scope note: written 2026-11-13; amended 2026-11-14. AMD/ROCm host: no NVIDIA device requests anywhere, and model servers are never created by Orrery. `connect()` takes no socket path: bollard's local defaults honor `DOCKER_HOST`, so no path ever lands in config (spec line 906).
 
 ```text
 [STEP_ID]
-STEP 15: docker.rs part 3 — BollardContainerBackend (connect, create_body, ContainerBackend impl), Error::Docker, live_docker tests
+STEP 15: docker.rs part 3 — BollardContainerBackend (connect() with no socket argument, create_body, ContainerBackend impl), Error::Docker, live_docker tests
 
 [SCOPE_LOCK]
 ALLOWED_FILES:
@@ -844,7 +874,7 @@ FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. `start` never creates a container. No device_requests, devices, port_bindings or exposed_ports. The live tests never remove ORRERY_LIVE_CONTAINER.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct ResourceManager' crates/orrery-core/src/docker.rs && ! grep -q '^bollard' Cargo.toml && test ! -e crates/orrery-core/tests/live_docker.rs && sed -n 844p $S | grep -q '^### 9.6 '
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct ResourceManager' crates/orrery-core/src/docker.rs && ! grep -q '^bollard' Cargo.toml && test ! -e crates/orrery-core/tests/live_docker.rs && sed -n 844p $S | grep -q '^### 9.6 ' && sed -n 906p $S | grep -q 'pub fn connect() -> Result<Self>'
 
 [MUTATION_SPEC]
 1. Root: `bollard = "0.21.1"`, `futures-util = "0.3.34"`. Crate: both as `.workspace = true`, and
@@ -853,7 +883,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
      required-features = ["live-backends"]
    Run `cargo fetch`.
 2. lib.rs: variant `#[error("docker error")] Docker(#[source] bollard::errors::Error)` in §5.1 order (after `Report`).
-3. docker.rs: `BollardContainerBackend::connect`, `create_body` (§9.6 bullet), and `ContainerBackend for BollardContainerBackend`:
+3. docker.rs: `BollardContainerBackend::connect()` (`Docker::connect_with_local_defaults()`, no arguments), `create_body` (§9.6 bullet), and `ContainerBackend for BollardContainerBackend`:
    - `inspect`: `inspect_container`. 404 gives `Missing`; `state.running` gives `Running`; `state.status == created` gives `Created`; anything else gives `Exited { code: state.exit_code }`.
    - `start`: `inspect` first. `Missing` gives the §9.6 `Error::Validation`; `Running` gives `Ok`; anything else calls `start_container`.
    - `stop` and `remove` (`force: true`): 404 gives `Ok(())`.
@@ -874,7 +904,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `secret_env_only_in_create_body`: `format!("{spec:?}")` doesn't contain the secret value; the `create_body` env does.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && ! grep -qi 'nvidia' crates/orrery-core/src/docker.rs && grep -q 'fn live_start_stop_existing_container' crates/orrery-core/tests/live_docker.rs && grep -q 'fn live_run_to_completion_echoes_stdin' crates/orrery-core/tests/live_docker.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^docker::tests::(create_body_maps_image_cmd_env_memory|create_body_binds_readonly_with_ro_suffix|create_body_sets_no_gpu_or_ports|secret_env_only_in_create_body): test$')" -eq 4
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && ! grep -qi 'nvidia' crates/orrery-core/src/docker.rs && ! grep -q 'connect_with_socket' crates/orrery-core/src/docker.rs && grep -q 'fn live_start_stop_existing_container' crates/orrery-core/tests/live_docker.rs && grep -q 'fn live_run_to_completion_echoes_stdin' crates/orrery-core/tests/live_docker.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^docker::tests::(create_body_maps_image_cmd_env_memory|create_body_binds_readonly_with_ro_suffix|create_body_sets_no_gpu_or_ports|secret_env_only_in_create_body): test$')" -eq 4
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -1034,7 +1064,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/goal`
 
-Scope note: written 2026-11-13.
+Scope note: written 2026-11-13; amended 2026-11-14. `run_turn` also creates the empty `mask` dir that `mounts_for` binds over `/workspace/.orrery` (Step 14). The spec's `ContainerSpec` literal no longer lists `port`/`gpu`; those fields don't exist (§9.6).
 
 ```text
 [STEP_ID]
@@ -1051,10 +1081,10 @@ FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. Secrets reach the container only as secret env, never as plain env or in the prompt file.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct HttpChatDriver' crates/orrery-core/src/llm.rs && ! grep -q 'struct CliContainerDriver' crates/orrery-core/src/llm.rs && sed -n 1000p $S | grep -q '^```rust'
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct HttpChatDriver' crates/orrery-core/src/llm.rs && ! grep -q 'struct CliContainerDriver' crates/orrery-core/src/llm.rs && sed -n 1000p $S | grep -q '^```rust' && sed -n 1004p $S | grep -q 'dir/mask' && grep -q '"/workspace/.orrery"' crates/orrery-core/src/docker.rs
 
 [MUTATION_SPEC]
-1. `CliContainerDriver::new` and `AgentDriver for CliContainerDriver`, per the §9.7 `run_turn` bullet (spec line 1004).
+1. `CliContainerDriver::new` and `AgentDriver for CliContainerDriver`, per the §9.7 `run_turn` bullet (spec line 1004). Create `dir/mask` (empty) only when `workspace_mount` isn't `None`.
 2. Tests (`#[tokio::test]`; `MockContainerBackend` with a run script that writes `<host out mount>/report.toml`, found in `spec.mounts` by `container == "/orrery/out"`):
    - `valid_report_accepted`: also, `in/prompt.md` exists and the stdin length equals the prompt length.
    - `output_lines_streamed`: the script's output lines appear as `Output` events.
@@ -1063,9 +1093,10 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `timeout_is_agent_error_and_removes_container`: `timeout_secs = 1` and a 2 s mock delay give `Error::Agent`, with a `Remove` call recorded.
    - `secret_env_injected_as_secret`: the recorded `secret_env == ["ANTHROPIC_API_KEY"]`, and `plain_env` doesn't include it.
    - `missing_secret_fails_before_run`: an empty secret store gives `Error::Keychain` and zero `RunToCompletion` calls.
+   - `mask_dir_exists_and_empty_during_run`: `ReadWrite` agent; inside the run script, the host side of the `/workspace/.orrery` mount is an existing, empty dir.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct CliContainerDriver' crates/orrery-core/src/llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^llm::tests::(valid_report_accepted|output_lines_streamed|missing_report_reprompted_then_error|invalid_then_valid_report_accepted|timeout_is_agent_error_and_removes_container|secret_env_injected_as_secret|missing_secret_fails_before_run): test$')" -eq 7
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct CliContainerDriver' crates/orrery-core/src/llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^llm::tests::(valid_report_accepted|output_lines_streamed|missing_report_reprompted_then_error|invalid_then_valid_report_accepted|timeout_is_agent_error_and_removes_container|secret_env_injected_as_secret|missing_secret_fails_before_run|mask_dir_exists_and_empty_during_run): test$')" -eq 8
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -1394,30 +1425,34 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/goal`
 
-Scope note: written 2026-11-13. `Backends::real` is never called in tests (it touches the keychain and Docker). Tests use mocks.
+Scope note: written 2026-11-13; amended 2026-11-14. `Backends::real` is never called in tests (it touches the keychain and Docker). Tests use mocks.
+- The amendment adds stdio command resolution to `mcp.rs` (spec line 842), because `Backends::real` is where `RmcpConnector` gets the workspace root and `PATH`. `RmcpConnector` resolves the command before spawning, skips relative `PATH` entries (so a `.` in `PATH` can't pick a workspace binary), refuses binaries inside the agent-writable workspace, and starts the child with `cwd` = the workspace root.
+- MCP child stderr is still inherited. Piping it into the live stream is a later refresh.
 
 ```text
 [STEP_ID]
-STEP 26: engine.rs part 7 — Backends (+ Backends::real) and build_engine wiring config, plan, redactor, stream hub, gatekeeper, resources and checkpoints
+STEP 26: engine.rs part 7 — Backends (+ Backends::real) and build_engine wiring config, plan, redactor, stream hub, gatekeeper, resources and checkpoints; mcp.rs — resolve_stdio_command, RmcpTransport::connect_in, RmcpConnector { project_root, search_path }
 
 [SCOPE_LOCK]
 ALLOWED_FILES:
   - crates/orrery-core/src/engine.rs
+  - crates/orrery-core/src/mcp.rs
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1006-1044 (§9.8 Backends, build_engine; binding)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:836-842 (§9.5 RmcpTransport::connect_in, RmcpConnector fields, resolve_stdio_command; binding)
   - crates/orrery-core/src/config.rs (ConfigStore::load_*, resolve_safe_path, load_role_rules)
 FORBIDDEN_SCOPE:
-  - Any file not listed in ALLOWED_FILES. Tests never call Backends::real.
+  - Any file not listed in ALLOWED_FILES. Tests never call Backends::real. `RmcpTransport::connect`'s signature and behavior stay as they are (live_mcp.rs still calls it). No new dependency.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'cancelled()' crates/orrery-core/src/engine.rs && ! grep -q 'pub struct Backends' crates/orrery-core/src/engine.rs && sed -n 1006p $S | grep -q '^### 9.8 '
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'cancelled()' crates/orrery-core/src/engine.rs && ! grep -q 'pub struct Backends' crates/orrery-core/src/engine.rs && ! grep -q 'fn resolve_stdio_command' crates/orrery-core/src/mcp.rs && sed -n 1006p $S | grep -q '^### 9.8 ' && sed -n 842p $S | grep -q 'resolve_stdio_command'
 
 [MUTATION_SPEC]
 1. `Backends` and `Backends::real` (§9.8). `real` takes `project_root`, builds a `ConfigStore` itself (the inference list comes from `ConfigStore::load_inference`), and builds:
    - `OsKeyringStore::new()?`;
-   - `BollardContainerBackend::connect(None)?`;
+   - `BollardContainerBackend::connect()?`;
    - `DockerInferenceControl::new(containers.clone(), Arc::new(DockerComposeCli))`;
-   - `RmcpConnector`;
+   - `RmcpConnector { secrets, project_root, search_path: std::env::var_os("PATH") }`;
    - `DriverSet { chat: HttpChatDriver::new(..), cli: CliContainerDriver::new(..) }`.
 2. `build_engine(store, backends)`, in this order:
    a. Load the project, roles (+ `load_role_rules` for each), agents, MCP servers and inference.
@@ -1427,14 +1462,24 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    e. A gatekeeper with every server `connector.connect`ed and `refresh_catalog` called.
    f. `ResourceManager::new(..)` and `CheckpointManager::new(<.orrery>/checkpoints)`.
    g. `WorkflowEngine::new(ctx)`.
-3. Tests (a TempDir project from `ConfigStore::init_project`, a 2-step plan file, `MockMcpConnector`, mocks for the rest):
+3. mcp.rs (spec lines 836-842):
+   - `pub fn resolve_stdio_command(..)` exactly as specified. The exec-bit check is `#[cfg(unix)]` (`std::os::unix::fs::PermissionsExt`, `mode() & 0o111 != 0`); elsewhere a regular file is enough.
+   - `RmcpTransport::connect_in(server, secrets, workdir)`: today's `connect` body plus `.current_dir(workdir)` on the stdio `Command`. `connect` becomes a one-line call to `connect_in(.., Path::new("."))`.
+   - `RmcpConnector` gets `project_root` and `search_path`. For `Stdio`, its `connect` clones the server, swaps in `command` = `resolve_stdio_command(..)` (a non-UTF-8 result → `Error::Validation`), then calls `connect_in(&clone, .., &self.project_root)`. `StreamableHttp` is unchanged. Update the existing `RmcpConnector { secrets }` test literal.
+4. Tests (a TempDir project from `ConfigStore::init_project`, a 2-step plan file, `MockMcpConnector`, mocks for the rest):
    - `build_engine_from_initialized_project`: after assigning one agent per stage, `build_engine` succeeds, and `run` with scripted mocks passes step 1.
    - `build_engine_registers_secrets_with_redactor`: a `CloudApi` agent's secret emitted in a stream event is stored as `[REDACTED]`.
    - `build_engine_missing_plan_is_io_error`.
    - `build_engine_unknown_mcp_server_errors`: a role allows a server the connector doesn't know, giving `Err`.
+   mcp::tests (every path built from a TempDir; search paths built with `std::env::join_paths`):
+   - `resolve_stdio_bare_name_on_path`: an executable `<tmp>/bin/fake-mcp`; search path `[<tmp>/bin]` returns its canonical path.
+   - `resolve_stdio_only_relative_entries_not_found`: search path `["bin", ""]` gives `Error::Validation` with `field == "transport.command"`.
+   - `resolve_stdio_rejects_workspace_binary`: an executable `<root>/bin/fake-mcp` with search path `[<root>/bin]` gives `Error::Security`; one at `<root>/.orrery/bin/fake-mcp` is `Ok`.
+   - `resolve_stdio_absolute_requires_executable` (`#[cfg(unix)]`): an absolute non-executable file gives `Error::Validation`; after `chmod 0o755` it's `Ok`.
+   - `resolve_stdio_relative_with_separator_rejected`: `"bin/fake-mcp"` gives `Error::Validation`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct Backends' crates/orrery-core/src/engine.rs && grep -q 'pub async fn build_engine\|pub fn build_engine' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(build_engine_from_initialized_project|build_engine_registers_secrets_with_redactor|build_engine_missing_plan_is_io_error|build_engine_unknown_mcp_server_errors): test$')" -eq 4
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct Backends' crates/orrery-core/src/engine.rs && grep -q 'pub async fn build_engine\|pub fn build_engine' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(build_engine_from_initialized_project|build_engine_registers_secrets_with_redactor|build_engine_missing_plan_is_io_error|build_engine_unknown_mcp_server_errors): test$')" -eq 4 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^mcp::tests::(resolve_stdio_bare_name_on_path|resolve_stdio_only_relative_entries_not_found|resolve_stdio_rejects_workspace_binary|resolve_stdio_absolute_requires_executable|resolve_stdio_relative_with_separator_rejected): test$')" -eq 5
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -1880,7 +1925,9 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/goal`
 
-Scope note: written 2026-11-13. The fixtures `llama-coder-14b` and `docker-models/router/compose.yaml` are placeholders, not host paths.
+Scope note: written 2026-11-13; amended 2026-11-14. The fixtures `llama-coder-14b` and `docker-models/router/compose.yaml` are placeholders, not host paths.
+- The amendment makes `mcp add-*` validate the connection before saving, so a server that's saved has already answered `list_tools`.
+- `inference add --compose` now takes a path relative to `.orrery/` (spec §7 rows, §9.6a path scope).
 
 ```text
 [STEP_ID]
@@ -1897,16 +1944,20 @@ READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:581-620 (§7 rows for agent, inference, role, mcp, secret)
   - ORRERY_TECHNICAL_SPECIFICATION.md:414-417 (§5.7.2 residual-risk and guardrail notes)
   - ORRERY_TECHNICAL_SPECIFICATION.md:336-342 (§5.3 keyutils re-run note)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:939 (§9.6a resolve_compose_file, ConfigScope, project-scope checks)
 FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. A secret value never reaches stdout, stderr or a log.
+  - A server or inference entry that fails its check is never written. No absolute path in any fixture.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && test -f crates/orrery-cli/src/commands.rs && ! grep -q '^rpassword' Cargo.toml && sed -n 414p $S | grep -q '^#### 5.7.2 '
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && test -f crates/orrery-cli/src/commands.rs && ! grep -q '^rpassword' Cargo.toml && sed -n 414p $S | grep -q '^#### 5.7.2 ' && sed -n 939p $S | grep -q 'resolve_compose_file' && grep -q 'pub fn resolve_compose_file' crates/orrery-core/src/config.rs
 
 [MUTATION_SPEC]
 1. Root: `rpassword = "7.5.5"`. CLI crate: `rpassword.workspace = true`. Run `cargo fetch`.
 2. Handlers: `agent add-local-model|add-cli|add-cloud|list|show|remove`, `inference add|list|remove`, `role add|list|show|remove`, `mcp add-stdio|add-http|list|tools|remove`, `secret set|delete`.
-   - `agent add-cli` prints the §5.7.2 residual-risk note; `agent show` for `AgentCli` prints the §5.7.2 guardrail note.
+   - `agent add-cli` prints both §5.7.2 residual-risk notes (Docker socket env, `.git/hooks`); `agent show` for `AgentCli` prints the §5.7.2 guardrail note.
+   - `mcp add-stdio` / `add-http`: build the `McpServerConfig`, run `validate` and `validate_project_scope`, then `make_backends(project)?.connector.connect(&server)` and `list_tools()`. Save only if both succeed, then print `"{id}: {n} tools"`. Any failure exits 1 with the error and writes nothing.
+   - `inference add --compose <FILE>`: run `resolve_compose_file(FILE, ConfigScope::Project, root, None)` first and save the relative path as given (never the resolved one). Failure exits 1 and writes nothing.
    - `role add --rules-file` reads that Markdown file and saves it via `save_role`.
    - `mcp tools <ID>` connects through `make_backends(project)?.connector`.
    - `secret set` uses `ctx.read_secret` and `ctx.secrets.set` and never prints the value. When the real store's backend is `Keyutils`, it prints the §5.3 re-run note.
@@ -1917,15 +1968,17 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `agent_add_with_embedded_secret_exits_1`: `--model sk-ABCDEFGH12345678`.
    - `agent_show_and_remove`.
    - `inference_add_defaults_external_single`: only `--id` and `--endpoint` give `mode == Single` and `lifecycle == External`.
-   - `inference_add_container_and_compose`: `--container llama-coder-14b` gives `Container`; `--compose docker-models/router/compose.yaml --service llama --mode router` gives `Compose` + `Router`.
+   - `inference_add_container_and_compose`: `--container llama-coder-14b` gives `Container`. With `<root>/.orrery/docker-models/router/compose.yaml` created first, `--compose docker-models/router/compose.yaml --service llama --mode router` gives `Compose` + `Router`, and the saved `file` is still the relative path.
+   - `inference_add_compose_absolute_rejected`: an absolute TempDir path exits 1, and `inference list` shows nothing.
    - `inference_list_remove`.
    - `role_add_reads_rules_file`.
-   - `mcp_add_stdio_and_http_list`.
+   - `mcp_add_stdio_and_http_list`: `MockMcpConnector` has transports for both ids; each add prints its tool count.
+   - `mcp_add_unreachable_server_not_saved`: the connector has no transport for the id. Exit 1, and `mcp list` is empty.
    - `mcp_tools_lists_mock_tools`: `MockMcpConnector` via `make_backends`.
    - `secret_set_and_delete`: the value lands in the `InMemorySecretStore`, and the output doesn't contain it.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '^rpassword = "7.5.5"$' Cargo.toml && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(agent_add_each_backend_and_list_json|agent_add_cli_prints_residual_risk|agent_add_with_embedded_secret_exits_1|agent_show_and_remove|inference_add_defaults_external_single|inference_add_container_and_compose|inference_list_remove|role_add_reads_rules_file|mcp_add_stdio_and_http_list|mcp_tools_lists_mock_tools|secret_set_and_delete): test$')" -eq 11
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '^rpassword = "7.5.5"$' Cargo.toml && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(agent_add_each_backend_and_list_json|agent_add_cli_prints_residual_risk|agent_add_with_embedded_secret_exits_1|agent_show_and_remove|inference_add_defaults_external_single|inference_add_container_and_compose|inference_list_remove|role_add_reads_rules_file|mcp_add_stdio_and_http_list|mcp_tools_lists_mock_tools|secret_set_and_delete|inference_add_compose_absolute_rejected|mcp_add_unreachable_server_not_saved): test$')" -eq 13
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
