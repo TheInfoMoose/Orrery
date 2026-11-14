@@ -839,124 +839,121 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(from = "InferenceGpuRepr", into = "InferenceGpuRepr")]
-pub enum InferenceGpu {
-    #[default]
-    None,
-    All,
-    Devices {
-        device_ids: Vec<String>,
-    },
+fn default_true() -> bool {
+    true
 }
 
-#[derive(Serialize, Deserialize)]
-enum GpuPreset {
-    None,
-    All,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct GpuDevicesRepr {
-    device_ids: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum InferenceGpuRepr {
-    Preset(GpuPreset),
-    Devices(GpuDevicesRepr),
-}
-
-impl From<InferenceGpuRepr> for InferenceGpu {
-    fn from(repr: InferenceGpuRepr) -> Self {
-        match repr {
-            InferenceGpuRepr::Preset(GpuPreset::None) => Self::None,
-            InferenceGpuRepr::Preset(GpuPreset::All) => Self::All,
-            InferenceGpuRepr::Devices(GpuDevicesRepr { device_ids }) => {
-                Self::Devices { device_ids }
-            }
-        }
-    }
-}
-
-impl From<InferenceGpu> for InferenceGpuRepr {
-    fn from(gpu: InferenceGpu) -> Self {
-        match gpu {
-            InferenceGpu::None => Self::Preset(GpuPreset::None),
-            InferenceGpu::All => Self::Preset(GpuPreset::All),
-            InferenceGpu::Devices { device_ids } => Self::Devices(GpuDevicesRepr { device_ids }),
-        }
-    }
+fn default_startup_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UnloadStrategy {
+pub enum InferenceMode {
     #[default]
-    OllamaKeepAlive,
-    None,
+    Single,
+    Router,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum InferenceLifecycle {
+    #[default]
+    External,
+    Container {
+        name: String,
+    },
+    Compose {
+        file: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InferenceConfig {
     pub inference_id: String,
-    pub image: String,
-    pub container_name: String,
-    pub host_port: u16,
-    pub gpu: InferenceGpu,
-    pub memory_limit_mb: u64,
-    pub unload_strategy: UnloadStrategy,
-    pub models_volume: String,
+    pub endpoint_url: String,
+    #[serde(default)]
+    pub mode: InferenceMode,
+    #[serde(default)]
+    pub lifecycle: InferenceLifecycle,
+    #[serde(default = "default_true")]
+    pub unload_after_stage: bool,
+    #[serde(default = "default_startup_timeout")]
+    pub startup_timeout_secs: u64,
 }
 
 impl InferenceConfig {
+    pub fn chat_url(&self) -> String {
+        format!(
+            "{}/v1/chat/completions",
+            self.endpoint_url.trim_end_matches('/')
+        )
+    }
+
     pub fn validate(&self) -> Result<()> {
+        check_no_embedded_secret("inference_id", &self.inference_id)?;
+        check_no_embedded_secret("endpoint_url", &self.endpoint_url)?;
+
         if self.inference_id.trim().is_empty() {
             return Err(Error::Validation {
                 field: "inference_id".to_string(),
                 message: "inference_id must not be empty".to_string(),
             });
         }
-        validate_container_image(&self.image, "image")?;
-        if self.container_name.trim().is_empty() {
+
+        let rest = self
+            .endpoint_url
+            .strip_prefix("http://")
+            .or_else(|| self.endpoint_url.strip_prefix("https://"));
+        if rest.is_none_or(|r| r.trim().is_empty()) {
             return Err(Error::Validation {
-                field: "container_name".to_string(),
-                message: "container_name must not be empty".to_string(),
+                field: "endpoint_url".to_string(),
+                message: "endpoint_url must start with http:// or https://".to_string(),
             });
         }
-        if self.host_port == 0 {
+
+        match &self.lifecycle {
+            InferenceLifecycle::External => {}
+            InferenceLifecycle::Container { name } => {
+                check_no_embedded_secret("lifecycle.name", name)?;
+                if name.trim().is_empty() {
+                    return Err(Error::Validation {
+                        field: "lifecycle.name".to_string(),
+                        message: "container name must not be empty".to_string(),
+                    });
+                }
+            }
+            InferenceLifecycle::Compose { file, service } => {
+                if let Some(s) = file.to_str() {
+                    check_no_embedded_secret("lifecycle.file", s)?;
+                }
+                if file.as_os_str().is_empty() || file.to_string_lossy().trim().is_empty() {
+                    return Err(Error::Validation {
+                        field: "lifecycle.file".to_string(),
+                        message: "compose file must not be empty".to_string(),
+                    });
+                }
+                if let Some(svc) = service {
+                    check_no_embedded_secret("lifecycle.service", svc)?;
+                    if svc.trim().is_empty() {
+                        return Err(Error::Validation {
+                            field: "lifecycle.service".to_string(),
+                            message: "compose service must not be empty when set".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if self.startup_timeout_secs < 1 {
             return Err(Error::Validation {
-                field: "host_port".to_string(),
-                message: "host_port must be > 0".to_string(),
+                field: "startup_timeout_secs".to_string(),
+                message: "startup_timeout_secs must be >= 1".to_string(),
             });
         }
-        if self.memory_limit_mb == 0 {
-            return Err(Error::Validation {
-                field: "memory_limit_mb".to_string(),
-                message: "memory_limit_mb must be > 0".to_string(),
-            });
-        }
-        if let InferenceGpu::Devices { device_ids } = &self.gpu
-            && (device_ids.is_empty() || device_ids.iter().any(|d| d.trim().is_empty()))
-        {
-            return Err(Error::Validation {
-                field: "gpu.device_ids".to_string(),
-                message: "device_ids must not be empty".to_string(),
-            });
-        }
-        if self.models_volume.trim().is_empty()
-            || self.models_volume.contains('/')
-            || self.models_volume.contains('\\')
-            || self.models_volume.contains(':')
-            || self.models_volume.starts_with('.')
-        {
-            return Err(Error::Validation {
-                field: "models_volume".to_string(),
-                message: "models_volume must be a named Docker volume, not a host path".to_string(),
-            });
-        }
+
         Ok(())
     }
 }
@@ -2131,8 +2128,8 @@ mod tests {
                 agent_id: "local-coder".to_string(),
                 display_name: "Local Coder".to_string(),
                 backend: AgentBackend::LocalModel {
-                    inference_id: "ollama".to_string(),
-                    model: "qwen2.5-coder:14b".to_string(),
+                    inference_id: "coder-14b".to_string(),
+                    model: "Qwen2.5-Coder-14B-Instruct-Q4_K_M".to_string(),
                     temperature: 0.1,
                     max_context_tokens: 32768,
                 },
@@ -2223,8 +2220,8 @@ agent_id = "local-coder"
 display_name = "Local Coder"
 [backend]
 type = "LocalModel"
-inference_id = "ollama"
-model = "qwen2.5-coder:14b"
+inference_id = "coder-14b"
+model = "Qwen2.5-Coder-14B-Instruct-Q4_K_M"
 temperature = 0.1
 max_context_tokens = 32768
 "#;
@@ -2274,43 +2271,17 @@ keychain_account = "testuser"
 
         let inference_toml = r#"
 [[inference]]
-inference_id = "ollama"
-image = "ollama/ollama:<exact-version-tag>"
-container_name = "orrery-ollama"
-host_port = 11434
-gpu = "All"
-memory_limit_mb = 16384
-unload_strategy = "OllamaKeepAlive"
-models_volume = "orrery-ollama-models"
+inference_id = "coder-14b"
+endpoint_url = "http://127.0.0.1:8080"
+mode = "Single"
+lifecycle = { type = "Container", name = "llama-coder-14b" }
+unload_after_stage = true
 "#;
         let inf_file: InferenceFile = toml::from_str(inference_toml).unwrap();
         inf_file.validate().unwrap();
         let inf_reparsed: InferenceFile =
             toml::from_str(&toml::to_string(&inf_file).unwrap()).unwrap();
         assert_eq!(inf_file, inf_reparsed);
-
-        let gpu_devices_toml = r#"
-[[inference]]
-inference_id = "ollama-gpu0"
-image = "ollama/ollama:0.5.7"
-container_name = "orrery-ollama-0"
-host_port = 11435
-gpu = { device_ids = ["0"] }
-memory_limit_mb = 16384
-unload_strategy = "None"
-models_volume = "orrery-ollama-models"
-"#;
-        let inf_dev: InferenceFile = toml::from_str(gpu_devices_toml).unwrap();
-        inf_dev.validate().unwrap();
-        assert_eq!(
-            inf_dev.inference[0].gpu,
-            InferenceGpu::Devices {
-                device_ids: vec!["0".to_string()]
-            }
-        );
-        let inf_dev_reparsed: InferenceFile =
-            toml::from_str(&toml::to_string(&inf_dev).unwrap()).unwrap();
-        assert_eq!(inf_dev, inf_dev_reparsed);
     }
 
     #[test]
@@ -2494,8 +2465,8 @@ transport = { type = "StreamableHttp", endpoint_url = "https://mcp.example.com/m
             agent_id: "local-coder".to_string(),
             display_name: "Local Coder".to_string(),
             backend: AgentBackend::LocalModel {
-                inference_id: "ollama".to_string(),
-                model: "qwen2.5-coder:14b".to_string(),
+                inference_id: "coder-14b".to_string(),
+                model: "Qwen2.5-Coder-14B-Instruct-Q4_K_M".to_string(),
                 temperature: 0.1,
                 max_context_tokens: 32768,
             },
@@ -2660,7 +2631,7 @@ display_name = "A"
 extra = 1
 [backend]
 type = "LocalModel"
-inference_id = "ollama"
+inference_id = "coder-14b"
 model = "m"
 temperature = 0.0
 max_context_tokens = 1024
@@ -2757,29 +2728,207 @@ unknown = 123
         }
 
         let mut inf = InferenceConfig {
-            inference_id: "ollama".to_string(),
-            image: "ollama/ollama:0.5.7".to_string(),
-            container_name: "orrery-ollama".to_string(),
-            host_port: 11434,
-            gpu: InferenceGpu::None,
-            memory_limit_mb: 8192,
-            unload_strategy: UnloadStrategy::OllamaKeepAlive,
-            models_volume: "orrery-ollama-models".to_string(),
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "llama-coder-14b".to_string(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
         };
         inf.validate().unwrap();
 
-        // Reject :latest and untagged images
-        inf.image = "ollama/ollama:latest".to_string();
+        inf.inference_id = String::new();
         assert!(inf.validate().is_err());
-        inf.image = "ollama/ollama".to_string();
-        assert!(inf.validate().is_err());
-        inf.image = "ollama/ollama:0.5.7".to_string();
+        inf.inference_id = "coder-14b".to_string();
 
-        // Reject host path in models_volume
-        inf.models_volume = "./local-dir".to_string();
+        inf.startup_timeout_secs = 0;
         assert!(inf.validate().is_err());
-        inf.models_volume = "host/path".to_string();
-        assert!(inf.validate().is_err());
+        inf.startup_timeout_secs = 300;
+    }
+
+    #[test]
+    fn inference_defaults() {
+        let toml_input = r#"
+inference_id = "coder-14b"
+endpoint_url = "http://127.0.0.1:8080"
+"#;
+        let inf: InferenceConfig = toml::from_str(toml_input).unwrap();
+        assert_eq!(inf.mode, InferenceMode::Single);
+        assert_eq!(inf.lifecycle, InferenceLifecycle::External);
+        assert!(inf.unload_after_stage);
+        assert_eq!(inf.startup_timeout_secs, 300);
+        inf.validate().unwrap();
+    }
+
+    #[test]
+    fn inference_spec_examples_round_trip() {
+        let toml_input = r#"
+# Single-model llama-server in an existing container
+[[inference]]
+inference_id = "coder-14b"
+endpoint_url = "http://127.0.0.1:8080"
+mode = "Single"
+lifecycle = { type = "Container", name = "llama-coder-14b" }
+unload_after_stage = true
+
+# Router-mode llama-server defined in a compose file
+[[inference]]
+inference_id = "router"
+endpoint_url = "http://127.0.0.1:8081"
+mode = "Router"
+lifecycle = { type = "Compose", file = "docker-models/router/compose.yaml", service = "llama" }
+
+# Already running; Orrery only talks HTTP
+[[inference]]
+inference_id = "always-on"
+endpoint_url = "http://127.0.0.1:8082"
+lifecycle = { type = "External" }
+"#;
+        let parsed: InferenceFile = toml::from_str(toml_input).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.inference.len(), 3);
+        assert_eq!(parsed.inference[0].inference_id, "coder-14b");
+        assert_eq!(parsed.inference[0].mode, InferenceMode::Single);
+        assert_eq!(
+            parsed.inference[0].lifecycle,
+            InferenceLifecycle::Container {
+                name: "llama-coder-14b".to_string()
+            }
+        );
+        assert_eq!(parsed.inference[1].inference_id, "router");
+        assert_eq!(parsed.inference[1].mode, InferenceMode::Router);
+        assert_eq!(
+            parsed.inference[1].lifecycle,
+            InferenceLifecycle::Compose {
+                file: PathBuf::from("docker-models/router/compose.yaml"),
+                service: Some("llama".to_string()),
+            }
+        );
+        assert_eq!(parsed.inference[2].inference_id, "always-on");
+        assert_eq!(parsed.inference[2].mode, InferenceMode::Single);
+        assert_eq!(parsed.inference[2].lifecycle, InferenceLifecycle::External);
+
+        let serialized = toml::to_string(&parsed).unwrap();
+        let reparsed: InferenceFile = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed, reparsed);
+    }
+
+    #[test]
+    fn inference_chat_url_trims_slash() {
+        let with_slash = InferenceConfig {
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080/".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::External,
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        assert_eq!(
+            with_slash.chat_url(),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+
+        let without_slash = InferenceConfig {
+            endpoint_url: "http://127.0.0.1:8080".to_string(),
+            ..with_slash
+        };
+        assert_eq!(
+            without_slash.chat_url(),
+            "http://127.0.0.1:8080/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn inference_rejects_bad_endpoint() {
+        for bad_endpoint in ["127.0.0.1:8080", "ftp://x", "http://", "https://", ""] {
+            let inf = InferenceConfig {
+                inference_id: "coder-14b".to_string(),
+                endpoint_url: bad_endpoint.to_string(),
+                mode: InferenceMode::Single,
+                lifecycle: InferenceLifecycle::External,
+                unload_after_stage: true,
+                startup_timeout_secs: 300,
+            };
+            assert!(
+                matches!(inf.validate(), Err(Error::Validation { .. })),
+                "expected endpoint '{bad_endpoint}' to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn inference_rejects_empty_container_and_compose() {
+        let empty_container = InferenceConfig {
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: String::new(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        assert!(matches!(
+            empty_container.validate(),
+            Err(Error::Validation { .. })
+        ));
+
+        let empty_compose = InferenceConfig {
+            lifecycle: InferenceLifecycle::Compose {
+                file: PathBuf::from(""),
+                service: None,
+            },
+            ..empty_container.clone()
+        };
+        assert!(matches!(
+            empty_compose.validate(),
+            Err(Error::Validation { .. })
+        ));
+
+        let empty_compose_service = InferenceConfig {
+            lifecycle: InferenceLifecycle::Compose {
+                file: PathBuf::from("docker-models/router/compose.yaml"),
+                service: Some("   ".to_string()),
+            },
+            ..empty_container
+        };
+        assert!(matches!(
+            empty_compose_service.validate(),
+            Err(Error::Validation { .. })
+        ));
+    }
+
+    #[test]
+    fn inference_rejects_removed_fields() {
+        for removed_line in [
+            r#"image = "registry.example.com/llama-server:v0.9.0""#,
+            r#"gpu = "All""#,
+            r#"host_port = 8080"#,
+            concat!("models_", r#"volume = "models""#),
+        ] {
+            let toml_input = format!(
+                "inference_id = \"coder-14b\"\nendpoint_url = \"http://127.0.0.1:8080\"\n{removed_line}\n"
+            );
+            assert!(
+                toml::from_str::<InferenceConfig>(&toml_input).is_err(),
+                "expected removed field line '{removed_line}' to fail deserialization"
+            );
+        }
+    }
+
+    #[test]
+    fn inference_rejects_embedded_secret_in_endpoint() {
+        let inf = InferenceConfig {
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080?key=sk-ABCDEFGH12345678".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::External,
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
+        };
+        assert!(matches!(inf.validate(), Err(Error::Security { .. })));
     }
 
     #[test]
@@ -2918,8 +3067,8 @@ unknown = 123
             agent_id: "shared-agent".to_string(),
             display_name: "Global Shared".to_string(),
             backend: AgentBackend::LocalModel {
-                inference_id: "ollama".to_string(),
-                model: "qwen2.5-coder:7b".to_string(),
+                inference_id: "coder-14b".to_string(),
+                model: "Qwen2.5-Coder-7B-Instruct-Q4_K_M".to_string(),
                 temperature: 0.2,
                 max_context_tokens: 16384,
             },
@@ -2928,8 +3077,8 @@ unknown = 123
             agent_id: "global-only-agent".to_string(),
             display_name: "Global Only".to_string(),
             backend: AgentBackend::LocalModel {
-                inference_id: "ollama".to_string(),
-                model: "qwen2.5-coder:14b".to_string(),
+                inference_id: "coder-14b".to_string(),
+                model: "Qwen2.5-Coder-14B-Instruct-Q4_K_M".to_string(),
                 temperature: 0.1,
                 max_context_tokens: 32768,
             },
@@ -3029,28 +3178,29 @@ unknown = 123
         assert_eq!(mcp_servers[1].server_id, "git");
         assert_eq!(mcp_servers[2], project_cargo);
 
-        // Global inference: "ollama" (port 11434) and "vllm" (port 8000)
+        // Global inference: "coder-14b" (port 8080) and "router" (port 8081)
         let global_inf = InferenceFile {
             inference: vec![
                 InferenceConfig {
-                    inference_id: "ollama".to_string(),
-                    image: "ollama/ollama:0.5.6".to_string(),
-                    container_name: "global-ollama".to_string(),
-                    host_port: 11434,
-                    gpu: InferenceGpu::None,
-                    memory_limit_mb: 8192,
-                    unload_strategy: UnloadStrategy::OllamaKeepAlive,
-                    models_volume: "global-ollama-models".to_string(),
+                    inference_id: "coder-14b".to_string(),
+                    endpoint_url: "http://127.0.0.1:8080".to_string(),
+                    mode: InferenceMode::Single,
+                    lifecycle: InferenceLifecycle::Container {
+                        name: "llama-coder-14b".to_string(),
+                    },
+                    unload_after_stage: true,
+                    startup_timeout_secs: 300,
                 },
                 InferenceConfig {
-                    inference_id: "vllm".to_string(),
-                    image: "vllm/vllm-openai:v0.6.0".to_string(),
-                    container_name: "global-vllm".to_string(),
-                    host_port: 8000,
-                    gpu: InferenceGpu::All,
-                    memory_limit_mb: 16384,
-                    unload_strategy: UnloadStrategy::None,
-                    models_volume: "global-vllm-models".to_string(),
+                    inference_id: "router".to_string(),
+                    endpoint_url: "http://127.0.0.1:8081".to_string(),
+                    mode: InferenceMode::Router,
+                    lifecycle: InferenceLifecycle::Compose {
+                        file: PathBuf::from("docker-models/router/compose.yaml"),
+                        service: Some("llama".to_string()),
+                    },
+                    unload_after_stage: true,
+                    startup_timeout_secs: 300,
                 },
             ],
         };
@@ -3060,23 +3210,23 @@ unknown = 123
         )
         .unwrap();
 
-        // Project overrides "ollama" via save_inference
-        let project_ollama = InferenceConfig {
-            inference_id: "ollama".to_string(),
-            image: "ollama/ollama:0.5.7".to_string(),
-            container_name: "project-ollama".to_string(),
-            host_port: 11435,
-            gpu: InferenceGpu::All,
-            memory_limit_mb: 16384,
-            unload_strategy: UnloadStrategy::OllamaKeepAlive,
-            models_volume: "project-ollama-models".to_string(),
+        // Project overrides "coder-14b" via save_inference
+        let project_coder_inf = InferenceConfig {
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:18080".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "project-llama-coder-14b".to_string(),
+            },
+            unload_after_stage: false,
+            startup_timeout_secs: 120,
         };
-        store.save_inference(&project_ollama).unwrap();
+        store.save_inference(&project_coder_inf).unwrap();
 
         let loaded_inf = store.load_inference().unwrap();
         assert_eq!(loaded_inf.len(), 2);
-        assert_eq!(loaded_inf[0], project_ollama);
-        assert_eq!(loaded_inf[1].inference_id, "vllm");
+        assert_eq!(loaded_inf[0], project_coder_inf);
+        assert_eq!(loaded_inf[1].inference_id, "router");
     }
 
     #[test]
@@ -3151,7 +3301,7 @@ agent_id = "rogue"
 display_name = "Rogue"
 [backend]
 type = "LocalModel"
-inference_id = "ollama"
+inference_id = "coder-14b"
 model = "m"
 temperature = 0.0
 max_context_tokens = 1024
@@ -3188,14 +3338,14 @@ max_context_tokens = 1024
         store.save_mcp_server(&mcp).unwrap();
 
         let inf = InferenceConfig {
-            inference_id: "ollama".to_string(),
-            image: "ollama/ollama:0.5.7".to_string(),
-            container_name: "orrery-ollama".to_string(),
-            host_port: 11434,
-            gpu: InferenceGpu::None,
-            memory_limit_mb: 8192,
-            unload_strategy: UnloadStrategy::OllamaKeepAlive,
-            models_volume: "orrery-ollama-models".to_string(),
+            inference_id: "coder-14b".to_string(),
+            endpoint_url: "http://127.0.0.1:8080".to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::Container {
+                name: "llama-coder-14b".to_string(),
+            },
+            unload_after_stage: true,
+            startup_timeout_secs: 300,
         };
         store.save_inference(&inf).unwrap();
 
@@ -3236,8 +3386,8 @@ max_context_tokens = 1024
         assert!(store.load_mcp_servers().unwrap().is_empty());
         assert!(store.remove_mcp_server("filesystem").is_err());
 
-        store.remove_inference("ollama").unwrap();
+        store.remove_inference("coder-14b").unwrap();
         assert!(store.load_inference().unwrap().is_empty());
-        assert!(store.remove_inference("ollama").is_err());
+        assert!(store.remove_inference("coder-14b").is_err());
     }
 }
