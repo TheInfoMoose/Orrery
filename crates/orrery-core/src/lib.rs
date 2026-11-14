@@ -45,6 +45,8 @@ pub enum Error {
     },
     #[error("agent {agent_id} failed: {message}")]
     Agent { agent_id: String, message: String },
+    #[error("HTTP error")]
+    Http(#[source] reqwest::Error),
     #[error("plan step {step_number}: {message}")]
     Engine { step_number: usize, message: String },
     #[error("interrupted")]

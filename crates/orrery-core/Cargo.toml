@@ -15,6 +15,8 @@ dbus-secret-service-keyring-store.workspace = true
 dirs.workspace = true
 keyring-core.workspace = true
 linux-keyutils-keyring-store.workspace = true
+reqwest.workspace = true
+rmcp.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -30,6 +32,10 @@ tempfile.workspace = true
 
 [[test]]
 name = "live_keyring"
+required-features = ["live-backends"]
+
+[[test]]
+name = "live_mcp"
 required-features = ["live-backends"]
 
 [lints]

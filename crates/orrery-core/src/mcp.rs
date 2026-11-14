@@ -6,9 +6,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    McpServerConfig, RoleConfig, WriteToolSpec, format_mapped_tool_name,
+    McpServerConfig, McpTransportConfig, RoleConfig, WriteToolSpec, format_mapped_tool_name,
     validate_concrete_tool_ref, validate_safe_relative_path,
 };
+use crate::security::SecretStore;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +202,12 @@ impl McpGatekeeper {
         tool: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        if !args.is_object() {
+            return Err(Error::Security {
+                message: format!("tool '{server_id}:{tool}' arguments must be a JSON object"),
+            });
+        }
+
         if !Self::is_tool_allowed(role, server_id, tool) {
             return Err(Error::Security {
                 message: format!(
@@ -332,6 +339,127 @@ impl McpTransport for MockMcpTransport {
     }
 }
 
+pub struct RmcpTransport {
+    server_id: String,
+    service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
+}
+
+impl RmcpTransport {
+    pub async fn connect(server: &McpServerConfig, secrets: &dyn SecretStore) -> Result<Self> {
+        let server_id = server.server_id.clone();
+        let service = match &server.transport {
+            McpTransportConfig::Stdio { command, args } => {
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(args);
+                let transport =
+                    rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| Error::Mcp {
+                        server_id: server_id.clone(),
+                        source: Box::new(e),
+                    })?;
+                rmcp::ServiceExt::serve((), transport)
+                    .await
+                    .map_err(|e| Error::Mcp {
+                        server_id: server_id.clone(),
+                        source: Box::new(e),
+                    })?
+            }
+            McpTransportConfig::StreamableHttp {
+                endpoint_url,
+                keychain_service,
+                keychain_account,
+            } => {
+                let mut cfg =
+                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                        endpoint_url.clone(),
+                    );
+                match (keychain_service.as_deref(), keychain_account.as_deref()) {
+                    (Some(svc), Some(acc)) => {
+                        let secret = secrets.get(svc, acc)?;
+                        cfg = cfg.auth_header(secret.expose());
+                    }
+                    (None, None) => {}
+                    _ => {
+                        return Err(Error::Validation {
+                            field: "transport.keychain_service".to_string(),
+                            message: "keychain_service and keychain_account must both be set or both omitted"
+                                .to_string(),
+                        });
+                    }
+                }
+                let transport = rmcp::transport::StreamableHttpClientTransport::from_config(cfg);
+                rmcp::ServiceExt::serve((), transport)
+                    .await
+                    .map_err(|e| Error::Mcp {
+                        server_id: server_id.clone(),
+                        source: Box::new(e),
+                    })?
+            }
+        };
+
+        Ok(Self { server_id, service })
+    }
+}
+
+#[async_trait]
+impl McpTransport for RmcpTransport {
+    async fn list_tools(&self) -> Result<Vec<McpToolSchema>> {
+        let tools = self
+            .service
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| Error::Mcp {
+                server_id: self.server_id.clone(),
+                source: Box::new(e),
+            })?;
+
+        Ok(tools
+            .into_iter()
+            .map(|tool| McpToolSchema {
+                server_id: self.server_id.clone(),
+                name: tool.name.into_owned(),
+                description: tool
+                    .description
+                    .map(std::borrow::Cow::into_owned)
+                    .unwrap_or_default(),
+                input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
+            })
+            .collect())
+    }
+
+    async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+        let serde_json::Value::Object(obj) = args else {
+            return Err(Error::Validation {
+                field: "args".to_string(),
+                message: "tool arguments must be a JSON object".to_string(),
+            });
+        };
+        let params = rmcp::model::CallToolRequestParams::new(name.to_owned()).with_arguments(obj);
+        let result = self
+            .service
+            .peer()
+            .call_tool(params)
+            .await
+            .map_err(|e| Error::Mcp {
+                server_id: self.server_id.clone(),
+                source: Box::new(e),
+            })?;
+        Ok(serde_json::to_value(result)?)
+    }
+}
+
+pub struct RmcpConnector {
+    pub secrets: Arc<dyn SecretStore>,
+}
+
+#[async_trait]
+impl McpConnector for RmcpConnector {
+    async fn connect(&self, server: &McpServerConfig) -> Result<Arc<dyn McpTransport>> {
+        let transport = RmcpTransport::connect(server, self.secrets.as_ref()).await?;
+        Ok(Arc::new(transport))
+    }
+}
+
 #[derive(Default)]
 pub struct MockMcpConnector {
     pub transports: HashMap<String, Arc<dyn McpTransport>>,
@@ -362,11 +490,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        McpConnector, McpGatekeeper, McpTransport, MockMcpConnector, MockMcpTransport, WriteScope,
-        scopes_overlap, tool_result_is_error, tool_result_text,
+        McpConnector, McpGatekeeper, McpTransport, MockMcpConnector, MockMcpTransport,
+        RmcpConnector, RmcpTransport, WriteScope, scopes_overlap, tool_result_is_error,
+        tool_result_text,
     };
     use crate::Error;
     use crate::config::{McpServerConfig, McpTransportConfig, RoleConfig, RoleKind, WriteToolSpec};
+    use crate::security::InMemorySecretStore;
 
     fn test_role(allowed_mcp_tools: Vec<&str>) -> RoleConfig {
         RoleConfig {
@@ -739,5 +869,82 @@ mod tests {
             Error::Mcp { server_id, .. } => assert_eq!(server_id, "unknown"),
             other => panic!("expected Error::Mcp, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn missing_http_secret_is_keychain_error_before_network() {
+        let server = McpServerConfig {
+            server_id: "remote".to_string(),
+            transport: McpTransportConfig::StreamableHttp {
+                endpoint_url: "https://mcp.example.com/mcp".to_string(),
+                keychain_service: Some("orrery.mcp".to_string()),
+                keychain_account: Some("testuser".to_string()),
+            },
+            write_tools: Vec::new(),
+        };
+        let secrets = InMemorySecretStore::new();
+        let err = match RmcpTransport::connect(&server, &secrets).await {
+            Ok(_) => panic!("expected Error::Keychain for missing HTTP secret"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::Keychain(_)),
+            "expected Error::Keychain, got {err:?}"
+        );
+
+        let connector = RmcpConnector {
+            secrets: Arc::new(InMemorySecretStore::new()),
+        };
+        let conn_err = match connector.connect(&server).await {
+            Ok(_) => panic!("expected Error::Keychain from RmcpConnector"),
+            Err(err) => err,
+        };
+        assert!(matches!(conn_err, Error::Keychain(_)));
+    }
+
+    #[tokio::test]
+    async fn stdio_missing_command_errors() {
+        let server = McpServerConfig {
+            server_id: "missing_bin".to_string(),
+            transport: McpTransportConfig::Stdio {
+                command: "orrery-test-no-such-binary".to_string(),
+                args: vec!["--flag".to_string()],
+            },
+            write_tools: Vec::new(),
+        };
+        let secrets = InMemorySecretStore::new();
+        let res = RmcpTransport::connect(&server, &secrets).await;
+        assert!(res.is_err(), "missing binary should return Err");
+    }
+
+    #[tokio::test]
+    async fn non_object_args_rejected_before_transport() {
+        let role = test_role(vec!["fs:write_file"]);
+        let mock =
+            Arc::new(MockMcpTransport::new("fs").with_tool("write_file", json!({"ok": true})));
+        let mut gatekeeper = McpGatekeeper::new();
+        gatekeeper.register(
+            "fs",
+            mock.clone(),
+            vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string()],
+            }],
+        );
+        let scope = WriteScope::new(vec!["src".to_string()]).unwrap();
+
+        let err_array = gatekeeper
+            .execute_for_role(&role, &scope, "fs", "write_file", json!(["src/lib.rs"]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err_array, Error::Security { .. }));
+
+        let err_string = gatekeeper
+            .execute_for_role(&role, &scope, "fs", "write_file", json!("src/lib.rs"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err_string, Error::Security { .. }));
+
+        assert!(mock.calls().is_empty());
     }
 }
