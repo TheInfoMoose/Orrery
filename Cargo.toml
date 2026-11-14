@@ -9,6 +9,7 @@ rust-version = "1.99.1"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+async-trait = "0.1.92"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 dirs = "7.0.0"
@@ -20,7 +21,7 @@ serde_json = "1.0.154"
 sha2 = "0.11.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["sync"] }
+tokio = { version = "1.54.1", features = ["sync", "macros", "rt"] }
 toml = "1.1.5"
 uuid = { version = "1.29.2", features = ["v4", "serde"] }
 zeroize = "1.9.1"

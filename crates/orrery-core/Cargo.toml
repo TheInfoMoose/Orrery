@@ -9,6 +9,7 @@ license.workspace = true
 live-backends = []
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 dbus-secret-service-keyring-store.workspace = true
 dirs.workspace = true

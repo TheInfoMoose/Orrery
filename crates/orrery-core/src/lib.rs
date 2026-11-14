@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod config;
+pub mod mcp;
 pub mod plan;
 pub mod security;
 pub mod stream_log;
@@ -36,6 +37,12 @@ pub enum Error {
     PlanParse { line: usize, message: String },
     #[error("invalid agent report: {message}")]
     Report { message: String },
+    #[error("MCP error on {server_id}")]
+    Mcp {
+        server_id: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("agent {agent_id} failed: {message}")]
     Agent { agent_id: String, message: String },
     #[error("plan step {step_number}: {message}")]
