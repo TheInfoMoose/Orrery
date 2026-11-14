@@ -2,6 +2,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod plan;
 pub mod security;
+pub mod stream_log;
 
 use std::path::PathBuf;
 
