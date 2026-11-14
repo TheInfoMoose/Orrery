@@ -1,12 +1,15 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Deserialize;
 
 use crate::checkpoint::{AgentReport, StampedReport, SubtaskAllocation, report_json_schema};
-use crate::config::{AgentBackend, AgentConfig, RoleConfig, RoleKind, format_mapped_tool_name};
+use crate::config::{
+    AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, format_mapped_tool_name,
+};
 use crate::mcp::{McpGatekeeper, McpToolSchema, WriteScope};
 use crate::plan::PlanStep;
 use crate::stream_log::LiveStreamHub;
@@ -290,6 +293,266 @@ impl AgentDriver for MockAgentDriver {
                 message: "mock script exhausted".to_string(),
             }),
         }
+    }
+}
+
+pub fn endpoint_for(agent: &AgentConfig, inference: &[InferenceConfig]) -> Result<String> {
+    match &agent.backend {
+        AgentBackend::LocalModel { inference_id, .. } => {
+            let inf = inference
+                .iter()
+                .find(|entry| &entry.inference_id == inference_id)
+                .ok_or_else(|| Error::Validation {
+                    field: "backend.inference_id".to_string(),
+                    message: format!("unknown inference_id '{inference_id}'"),
+                })?;
+            Ok(inf.chat_url())
+        }
+        AgentBackend::CloudApi { endpoint_url, .. } => Ok(endpoint_url.clone()),
+        AgentBackend::AgentCli { .. } => Err(Error::Validation {
+            field: "backend".to_string(),
+            message: format!(
+                "agent '{}' uses AgentCli backend, which does not support HTTP chat",
+                agent.agent_id
+            ),
+        }),
+    }
+}
+
+pub fn build_chat_request(
+    inv: &AgentInvocation,
+    messages: &[serde_json::Value],
+) -> serde_json::Value {
+    let (model, temperature) = match &inv.agent.backend {
+        AgentBackend::LocalModel {
+            model, temperature, ..
+        }
+        | AgentBackend::CloudApi {
+            model, temperature, ..
+        } => (model.as_str(), *temperature),
+        AgentBackend::AgentCli { .. } => ("", 0.0),
+    };
+
+    let mut tools: Vec<serde_json::Value> = inv
+        .tools
+        .iter()
+        .map(|tool| {
+            let mapped_name = format_mapped_tool_name(&tool.server_id, &tool.name)
+                .unwrap_or_else(|_| format!("{}__{}", tool.server_id, tool.name));
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": mapped_name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+            })
+        })
+        .collect();
+
+    tools.push(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": SUBMIT_REPORT_TOOL,
+            "description": "Submit the structured agent report to end your turn.",
+            "parameters": report_json_schema(),
+        }
+    }));
+
+    serde_json::json!({
+        "model": model,
+        "temperature": temperature,
+        "stream": true,
+        "messages": messages,
+        "tools": tools,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatChunk {
+    pub content: Option<String>,
+    pub reasoning: Option<String>,
+    pub tool_calls: Vec<ToolCallDelta>,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseItem {
+    Chunk(ChatChunk),
+    Done,
+}
+
+#[derive(Debug, Default)]
+pub struct SseParser {
+    // Raw bytes: a network chunk can end inside a multi-byte UTF-8 char, so
+    // only complete lines (split on b'\n', never inside a char) are decoded.
+    buf: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct RawSsePayload {
+    #[serde(default)]
+    choices: Vec<RawChoice>,
+}
+
+#[derive(Deserialize)]
+struct RawChoice {
+    #[serde(default)]
+    delta: RawDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<RawToolCallDelta>,
+}
+
+#[derive(Deserialize)]
+struct RawToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+    #[serde(default)]
+    function: Option<RawFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct RawFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+impl SseParser {
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseItem>> {
+        self.buf.extend_from_slice(bytes);
+
+        let mut items = Vec::new();
+        while let Some(newline_pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = self.buf.drain(..=newline_pos).collect();
+            let line = String::from_utf8_lossy(&line_bytes[..newline_pos])
+                .trim_end_matches('\r')
+                .to_string();
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Some(data) = trimmed.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = data.trim();
+            if payload.is_empty() {
+                continue;
+            }
+            if payload == "[DONE]" {
+                items.push(SseItem::Done);
+                continue;
+            }
+
+            let parsed: RawSsePayload = serde_json::from_str(payload)?;
+            if let Some(choice) = parsed.choices.into_iter().next() {
+                let reasoning = choice.delta.reasoning_content.or(choice.delta.reasoning);
+                let tool_calls = choice
+                    .delta
+                    .tool_calls
+                    .into_iter()
+                    .map(|tc| {
+                        let name = tc
+                            .name
+                            .or_else(|| tc.function.as_ref().and_then(|f| f.name.clone()));
+                        let arguments = tc
+                            .arguments
+                            .or_else(|| tc.function.and_then(|f| f.arguments))
+                            .unwrap_or_default();
+                        ToolCallDelta {
+                            index: tc.index,
+                            id: tc.id,
+                            name,
+                            arguments,
+                        }
+                    })
+                    .collect();
+
+                items.push(SseItem::Chunk(ChatChunk {
+                    content: choice.delta.content,
+                    reasoning,
+                    tool_calls,
+                    finish_reason: choice.finish_reason,
+                }));
+            } else {
+                items.push(SseItem::Chunk(ChatChunk {
+                    content: None,
+                    reasoning: None,
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                }));
+            }
+        }
+
+        Ok(items)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ToolCallAccumulator {
+    calls: BTreeMap<usize, AssembledToolCall>,
+}
+
+impl ToolCallAccumulator {
+    pub fn apply(&mut self, delta: &ToolCallDelta) {
+        let entry = self
+            .calls
+            .entry(delta.index)
+            .or_insert_with(|| AssembledToolCall {
+                id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
+            });
+        if let Some(id) = &delta.id
+            && !id.is_empty()
+        {
+            entry.id.clone_from(id);
+        }
+        if let Some(name) = &delta.name
+            && !name.is_empty()
+        {
+            entry.name.clone_from(name);
+        }
+        entry.arguments.push_str(&delta.arguments);
+    }
+
+    pub fn finish(self) -> Vec<AssembledToolCall> {
+        self.calls.into_values().collect()
     }
 }
 
@@ -761,5 +1024,334 @@ mod tests {
         assert!(res1.is_ok());
         assert!(res2.is_ok());
         assert_eq!(driver.max_in_flight(), 2);
+    }
+
+    fn sample_inference(inference_id: &str, endpoint_url: &str) -> InferenceConfig {
+        use crate::config::{InferenceLifecycle, InferenceMode};
+        InferenceConfig {
+            inference_id: inference_id.to_string(),
+            endpoint_url: endpoint_url.to_string(),
+            mode: InferenceMode::Single,
+            lifecycle: InferenceLifecycle::External,
+            unload_after_stage: true,
+            startup_timeout_secs: 60,
+        }
+    }
+
+    #[test]
+    fn endpoint_local_model_uses_chat_url() {
+        let agent = sample_local_agent("local-coder");
+        let inference = vec![sample_inference("local-1", "http://192.0.2.10:8080/")];
+
+        let url = endpoint_for(&agent, &inference).unwrap();
+        assert_eq!(url, "http://192.0.2.10:8080/v1/chat/completions");
+    }
+
+    #[test]
+    fn endpoint_cloud_uses_url() {
+        let agent = AgentConfig {
+            agent_id: "cloud-1".to_string(),
+            display_name: "Cloud Agent".to_string(),
+            backend: AgentBackend::CloudApi {
+                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                model: "cloud-model".to_string(),
+                temperature: 0.2,
+                max_context_tokens: 16384,
+                keychain_service: "orrery.test".to_string(),
+                keychain_account: "testuser".to_string(),
+            },
+        };
+
+        let url = endpoint_for(&agent, &[]).unwrap();
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn endpoint_cli_rejected() {
+        let agent = AgentConfig {
+            agent_id: "cli-1".to_string(),
+            display_name: "CLI Agent".to_string(),
+            backend: AgentBackend::AgentCli {
+                image: "runner:latest".to_string(),
+                command: vec!["run".to_string()],
+                workspace_mount: WorkspaceMount::ReadOnly,
+                memory_limit_mb: 512,
+                timeout_secs: 60,
+                keychain_service: None,
+                keychain_account: None,
+                secret_env: None,
+            },
+        };
+
+        let err = endpoint_for(&agent, &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Validation { ref field, .. } if field == "backend"
+        ));
+    }
+
+    #[test]
+    fn endpoint_unknown_inference_rejected() {
+        let agent = sample_local_agent("local-coder");
+        let inference = vec![sample_inference("other-id", "http://192.0.2.10:8080")];
+
+        let err = endpoint_for(&agent, &inference).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Validation { ref field, .. } if field == "backend.inference_id"
+        ));
+    }
+
+    #[test]
+    fn request_includes_tools_and_submit_report() {
+        let mut inv = sample_invocation("coder-1");
+        inv.tools = vec![
+            McpToolSchema {
+                server_id: "filesystem".to_string(),
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            },
+            McpToolSchema {
+                server_id: "git".to_string(),
+                name: "status".to_string(),
+                description: "Check git status".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        ];
+
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": inv.system_prompt}),
+            serde_json::json!({"role": "user", "content": inv.user_prompt}),
+        ];
+
+        let req = build_chat_request(&inv, &messages);
+
+        assert_eq!(req["model"], "qwen-coder");
+        assert_eq!(req["temperature"], 0.2);
+        assert_eq!(req["stream"], true);
+        assert_eq!(req["messages"], serde_json::json!(messages));
+
+        let tools = req["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "filesystem__read_file");
+        assert_eq!(tools[0]["function"]["description"], "Read a file");
+        assert_eq!(
+            tools[0]["function"]["parameters"],
+            inv.tools[0].input_schema
+        );
+
+        assert_eq!(tools[1]["type"], "function");
+        assert_eq!(tools[1]["function"]["name"], "git__status");
+        assert_eq!(tools[1]["function"]["description"], "Check git status");
+        assert_eq!(
+            tools[1]["function"]["parameters"],
+            inv.tools[1].input_schema
+        );
+
+        let last_tool = &tools[2];
+        assert_eq!(last_tool["type"], "function");
+        assert_eq!(last_tool["function"]["name"], SUBMIT_REPORT_TOOL);
+        assert_eq!(last_tool["function"]["parameters"], report_json_schema());
+    }
+
+    #[test]
+    fn sse_content_chunk() {
+        let mut parser = SseParser::default();
+        let line = b"data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\"},\"finish_reason\":null}]}\n\n";
+        let items = parser.push(line).unwrap();
+
+        assert_eq!(
+            items,
+            vec![SseItem::Chunk(ChatChunk {
+                content: Some("Hello world".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn sse_reasoning_content_and_reasoning_keys() {
+        let mut parser = SseParser::default();
+        let input = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"step 1\"}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning\":\"step 2\"}}]}\n",
+        );
+        let items = parser.push(input.as_bytes()).unwrap();
+
+        assert_eq!(
+            items,
+            vec![
+                SseItem::Chunk(ChatChunk {
+                    content: None,
+                    reasoning: Some("step 1".to_string()),
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                }),
+                SseItem::Chunk(ChatChunk {
+                    content: None,
+                    reasoning: Some("step 2".to_string()),
+                    tool_calls: Vec::new(),
+                    finish_reason: None,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn sse_split_across_pushes() {
+        let mut parser = SseParser::default();
+        let part1 = b"data: {\"choices\":[{\"delta\":{\"content\":\"part";
+        let part2 = b"ial line\"},\"finish_reason\":\"stop\"}]}\n";
+
+        let first = parser.push(part1).unwrap();
+        assert!(first.is_empty());
+
+        let second = parser.push(part2).unwrap();
+        assert_eq!(
+            second,
+            vec![SseItem::Chunk(ChatChunk {
+                content: Some("partial line".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_string()),
+            })]
+        );
+    }
+
+    #[test]
+    fn sse_utf8_split_across_pushes() {
+        let mut parser = SseParser::default();
+        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"caf\u{e9} \u{2014} ok\"}}]}\n";
+        let bytes = line.as_bytes();
+        // Split inside the two-byte 'é' (0xC3 0xA9).
+        let split = line.find('\u{e9}').unwrap() + 1;
+
+        assert!(parser.push(&bytes[..split]).unwrap().is_empty());
+        let items = parser.push(&bytes[split..]).unwrap();
+        assert_eq!(
+            items,
+            vec![SseItem::Chunk(ChatChunk {
+                content: Some("caf\u{e9} \u{2014} ok".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn sse_done_marker() {
+        let mut parser = SseParser::default();
+        let items = parser.push(b"data: [DONE]\n").unwrap();
+        assert_eq!(items, vec![SseItem::Done]);
+    }
+
+    #[test]
+    fn sse_ignores_comments_and_blank_lines() {
+        let mut parser = SseParser::default();
+        let input = concat!(
+            ": keep-alive comment\n",
+            "\n",
+            "   \r\n",
+            "event: message\n",
+            ": another comment\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n",
+        );
+        let items = parser.push(input.as_bytes()).unwrap();
+
+        assert_eq!(
+            items,
+            vec![SseItem::Chunk(ChatChunk {
+                content: Some("ok".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                finish_reason: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn sse_bad_json_is_json_error() {
+        let mut parser = SseParser::default();
+        let err = parser.push(b"data: {not-valid-json\n").unwrap_err();
+        assert!(matches!(err, Error::Json(_)));
+    }
+
+    #[test]
+    fn accumulator_joins_argument_fragments() {
+        let mut parser = SseParser::default();
+        let sse_stream = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"filesystem__read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"src/lib\"}}]}}]}\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\".rs\\\"}\"}}],\"finish_reason\":\"tool_calls\"}}]}\n",
+        );
+
+        let items = parser.push(sse_stream.as_bytes()).unwrap();
+        assert_eq!(items.len(), 3);
+
+        let mut acc = ToolCallAccumulator::default();
+        for item in &items {
+            if let SseItem::Chunk(chunk) = item {
+                for delta in &chunk.tool_calls {
+                    acc.apply(delta);
+                }
+            }
+        }
+
+        let calls = acc.finish();
+        assert_eq!(
+            calls,
+            vec![AssembledToolCall {
+                id: "call_1".to_string(),
+                name: "filesystem__read_file".to_string(),
+                arguments: "{\"path\":\"src/lib.rs\"}".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn accumulator_keeps_parallel_calls_ordered() {
+        let mut acc = ToolCallAccumulator::default();
+        acc.apply(&ToolCallDelta {
+            index: 1,
+            id: Some("call_b".to_string()),
+            name: Some("git__status".to_string()),
+            arguments: "{}".to_string(),
+        });
+        acc.apply(&ToolCallDelta {
+            index: 0,
+            id: Some("call_a".to_string()),
+            name: Some("filesystem__read_file".to_string()),
+            arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+        });
+
+        let calls = acc.finish();
+        assert_eq!(
+            calls,
+            vec![
+                AssembledToolCall {
+                    id: "call_a".to_string(),
+                    name: "filesystem__read_file".to_string(),
+                    arguments: "{\"path\":\"Cargo.toml\"}".to_string(),
+                },
+                AssembledToolCall {
+                    id: "call_b".to_string(),
+                    name: "git__status".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            ]
+        );
     }
 }

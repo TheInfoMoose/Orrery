@@ -985,7 +985,7 @@ pub fn endpoint_for(agent: &AgentConfig, inference: &[InferenceConfig]) -> Resul
 pub fn build_chat_request(inv: &AgentInvocation, messages: &[serde_json::Value]) -> serde_json::Value;
 pub struct ToolCallDelta { pub index: usize, pub id: Option<String>, pub name: Option<String>, pub arguments: String }
 pub struct ChatChunk { pub content: Option<String>, pub reasoning: Option<String>, pub tool_calls: Vec<ToolCallDelta>, pub finish_reason: Option<String> }
-#[derive(Default)] pub struct SseParser { buf: String }
+#[derive(Default)] pub struct SseParser { buf: Vec<u8> }   // bytes: decode only complete lines, so a UTF-8 char split across chunks survives
 impl SseParser { pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<SseItem>>; }
 pub enum SseItem { Chunk(ChatChunk), Done }
 pub struct AssembledToolCall { pub id: String, pub name: String, pub arguments: String }
@@ -994,7 +994,7 @@ impl ToolCallAccumulator { pub fn apply(&mut self, delta: &ToolCallDelta); pub f
 ```
 - `endpoint_for`: `LocalModel` → `chat_url()` of the matching `inference_id` (missing → `Error::Validation`); `CloudApi` → `endpoint_url`; `AgentCli` → `Error::Validation`.
 - `build_chat_request`: `{"model", "temperature", "stream": true, "messages", "tools"}`; `tools` = each `inv.tools` entry as `{"type":"function","function":{"name": format_mapped_tool_name(server_id, name), "description", "parameters": input_schema}}` plus the `submit_report` tool with `parameters: report_json_schema()`.
-- `SseParser`: split on `'\n'`, keep a trailing partial line in `buf`; ignore blank lines and lines not starting with `"data:"`; `"data: [DONE]"` → `Done`; else parse JSON `choices[0].delta.{content, reasoning_content | reasoning, tool_calls[]}` and `choices[0].finish_reason`. Bad JSON → `Error::Json`.
+- `SseParser`: split the byte buffer on `b'\n'`, keep a trailing partial line in `buf`, decode each complete line as UTF-8; ignore blank lines and lines not starting with `"data:"`; `"data: [DONE]"` → `Done`; else parse JSON `choices[0].delta.{content, reasoning_content | reasoning, tool_calls[]}` and `choices[0].finish_reason`. Bad JSON → `Error::Json`.
 - Turn loop (`run_turn`): messages = `[system, user]`. Repeat: POST (Bearer from `secrets.get` only for `CloudApi`, fetched right before the request), stream body through `SseParser`, emit `Output`/`Reasoning` events per delta, accumulate tool calls. On end of response: if there are tool calls, append the assistant message with them; then for each call: `submit_report` → parse `AgentReport` from `arguments` + `validate_for_role`, success → return it; failure → (first time) append a `tool` message with the error and continue, (second time) `Error::Report`. Other names → `parse_mapped_tool_name` + `mcp.execute_for_role(&inv.role, &inv.write_scope, ..)`; append a `tool` message with `tool_result_text` or `"error: {e}"`; emit a `ToolCall` event `"{server}:{tool} ok|denied: {e}"`. Tool calls counted across the turn; `> max_tool_calls` → `Error::Agent`. No tool calls at all → append user message `"You must call submit_report."` once, second time `Error::Report`. HTTP non-2xx → `Error::Agent { message: "HTTP {status}" }`; transport errors → `Error::Http`.
 
 ```rust
