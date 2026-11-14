@@ -854,7 +854,7 @@ pub struct ContainerSpec { pub name: String, pub image: String, pub cmd: Vec<Str
     async fn stop(&self, name: &str) -> Result<()>;
     async fn remove(&self, name: &str) -> Result<()>;
     async fn inspect(&self, name: &str) -> Result<ContainerState>;
-    async fn run_to_completion(&self, spec: &ContainerSpec, stdin: Vec<u8>, on_output: &(dyn Fn(String) + Send + Sync)) -> Result<ExitStatus>;  // AgentCli: creates, runs, waits
+    async fn run_to_completion(&self, spec: &ContainerSpec, stdin: Vec<u8>, on_output: &(dyn Fn(String) + Send + Sync)) -> Result<ExitStatus>;  // AgentCli: creates, attaches, starts; writes stdin concurrently with draining output (BrokenPipe on stdin is not an error); waits; no exit status → Error::Validation
 }
 #[async_trait] pub trait ComposeRunner: Send + Sync {
     async fn up(&self, file: &Path, service: Option<&str>) -> Result<()>;        // docker compose -f <file> up -d [service]

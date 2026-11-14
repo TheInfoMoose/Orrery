@@ -6,6 +6,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bollard::models::{ContainerCreateBody, ContainerStateStatusEnum, HostConfig};
+use bollard::query_parameters::{
+    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
+    RemoveContainerOptionsBuilder, StartContainerOptionsBuilder, StopContainerOptionsBuilder,
+    WaitContainerOptionsBuilder,
+};
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::checkpoint::SubtaskAllocation;
@@ -1002,6 +1010,222 @@ impl Drop for StageLease {
 #[derive(Debug)]
 pub struct SlotPermit {
     _permit: OwnedSemaphorePermit,
+}
+
+fn is_not_found(err: &bollard::errors::Error) -> bool {
+    matches!(
+        err,
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            ..
+        }
+    )
+}
+
+fn map_inspect_state(state: Option<&bollard::models::ContainerState>) -> ContainerState {
+    if state.and_then(|s| s.running) == Some(true) {
+        ContainerState::Running
+    } else if state.and_then(|s| s.status) == Some(ContainerStateStatusEnum::CREATED) {
+        ContainerState::Created
+    } else {
+        ContainerState::Exited {
+            code: state.and_then(|s| s.exit_code).unwrap_or(0),
+        }
+    }
+}
+
+pub struct BollardContainerBackend {
+    docker: bollard::Docker,
+}
+
+impl BollardContainerBackend {
+    pub fn connect() -> Result<Self> {
+        let docker = bollard::Docker::connect_with_local_defaults().map_err(Error::Docker)?;
+        Ok(Self { docker })
+    }
+}
+
+pub fn create_body(spec: &ContainerSpec) -> ContainerCreateBody {
+    let env: Vec<String> = spec
+        .env
+        .iter()
+        .map(|(k, v)| match v {
+            EnvValue::Plain(val) => format!("{k}={val}"),
+            EnvValue::Secret(sec) => format!("{k}={}", sec.expose()),
+        })
+        .collect();
+
+    let binds: Vec<String> = spec
+        .mounts
+        .iter()
+        .map(
+            |MountSpec::Bind {
+                 host,
+                 container,
+                 read_only,
+             }| {
+                let host_str = host.to_string_lossy();
+                if *read_only {
+                    format!("{host_str}:{container}:ro")
+                } else {
+                    format!("{host_str}:{container}")
+                }
+            },
+        )
+        .collect();
+
+    let memory_bytes = i64::try_from(spec.memory_limit_mb)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1024 * 1024);
+
+    ContainerCreateBody {
+        image: Some(spec.image.clone()),
+        cmd: Some(spec.cmd.clone()),
+        env: Some(env),
+        open_stdin: Some(true),
+        attach_stdin: Some(true),
+        stdin_once: Some(true),
+        host_config: Some(HostConfig {
+            binds: Some(binds),
+            memory: Some(memory_bytes),
+            auto_remove: Some(spec.auto_remove),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[async_trait]
+impl ContainerBackend for BollardContainerBackend {
+    async fn start(&self, name: &str) -> Result<()> {
+        match self.inspect(name).await? {
+            ContainerState::Missing => Err(Error::Validation {
+                field: "container".to_string(),
+                message: format!(
+                    "container '{name}' not found; Orrery never creates inference containers"
+                ),
+            }),
+            ContainerState::Running => Ok(()),
+            ContainerState::Created | ContainerState::Exited { .. } => {
+                let options = StartContainerOptionsBuilder::default().build();
+                self.docker
+                    .start_container(name, Some(options))
+                    .await
+                    .map_err(Error::Docker)
+            }
+        }
+    }
+
+    async fn stop(&self, name: &str) -> Result<()> {
+        let options = StopContainerOptionsBuilder::default().build();
+        match self.docker.stop_container(name, Some(options)).await {
+            Ok(()) => Ok(()),
+            Err(err) if is_not_found(&err) => Ok(()),
+            Err(err) => Err(Error::Docker(err)),
+        }
+    }
+
+    async fn remove(&self, name: &str) -> Result<()> {
+        let options = RemoveContainerOptionsBuilder::default().force(true).build();
+        match self.docker.remove_container(name, Some(options)).await {
+            Ok(()) => Ok(()),
+            Err(err) if is_not_found(&err) => Ok(()),
+            Err(err) => Err(Error::Docker(err)),
+        }
+    }
+
+    async fn inspect(&self, name: &str) -> Result<ContainerState> {
+        let options = InspectContainerOptionsBuilder::default().build();
+        match self.docker.inspect_container(name, Some(options)).await {
+            Ok(info) => Ok(map_inspect_state(info.state.as_ref())),
+            Err(err) if is_not_found(&err) => Ok(ContainerState::Missing),
+            Err(err) => Err(Error::Docker(err)),
+        }
+    }
+
+    async fn run_to_completion(
+        &self,
+        spec: &ContainerSpec,
+        stdin: Vec<u8>,
+        on_output: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<ExitStatus> {
+        let create_opts = CreateContainerOptionsBuilder::default()
+            .name(&spec.name)
+            .build();
+        self.docker
+            .create_container(Some(create_opts), create_body(spec))
+            .await
+            .map_err(Error::Docker)?;
+
+        let attach_opts = AttachContainerOptionsBuilder::default()
+            .stdin(true)
+            .stdout(true)
+            .stderr(true)
+            .stream(true)
+            .build();
+        let attached = self
+            .docker
+            .attach_container(&spec.name, Some(attach_opts))
+            .await
+            .map_err(Error::Docker)?;
+
+        let start_opts = StartContainerOptionsBuilder::default().build();
+        self.docker
+            .start_container(&spec.name, Some(start_opts))
+            .await
+            .map_err(Error::Docker)?;
+
+        // Write stdin while draining output: writing everything first can
+        // deadlock once the container's output fills the attach stream.
+        let mut input = attached.input;
+        let mut output = attached.output;
+        let writer = async move {
+            input.write_all(&stdin).await?;
+            input.shutdown().await
+        };
+        let reader = async {
+            while let Some(item) = output.next().await {
+                let chunk = item.map_err(Error::Docker)?;
+                let text = String::from_utf8_lossy(chunk.as_ref());
+                for line in text.lines() {
+                    on_output(line.to_string());
+                }
+            }
+            Ok::<(), Error>(())
+        };
+        let (write_res, read_res) = tokio::join!(writer, reader);
+        read_res?;
+        match write_res {
+            Ok(()) => {}
+            // The container closed stdin early (e.g. it reads /orrery/in/prompt.md
+            // instead); its exit code below decides success.
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ) => {}
+            Err(err) => return Err(Error::Docker(bollard::errors::Error::from(err))),
+        }
+
+        let wait_opts = WaitContainerOptionsBuilder::default().build();
+        let mut wait_stream = self.docker.wait_container(&spec.name, Some(wait_opts));
+        let code = match wait_stream.next().await {
+            Some(Ok(resp)) => resp.status_code,
+            Some(Err(bollard::errors::Error::DockerContainerWaitError { code, error }))
+                if error.is_empty() =>
+            {
+                code
+            }
+            Some(Err(err)) => return Err(Error::Docker(err)),
+            None => {
+                return Err(Error::Validation {
+                    field: "container".to_string(),
+                    message: format!("container '{}' ended without an exit status", spec.name),
+                });
+            }
+        };
+        Ok(ExitStatus { code })
+    }
 }
 
 #[cfg(test)]
@@ -2097,5 +2321,170 @@ mod tests {
                 other => panic!("expected Error::Validation, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn create_body_maps_image_cmd_env_memory() {
+        let spec = ContainerSpec {
+            name: "orrery-cli-12345678-coder".to_string(),
+            image: "ghcr.io/example/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            cmd: vec!["run".to_string(), "--prompt".to_string()],
+            env: vec![
+                ("ORRERY_MODE".to_string(), EnvValue::Plain("test".to_string())),
+                ("LOG_LEVEL".to_string(), EnvValue::Plain("info".to_string())),
+            ],
+            mounts: Vec::new(),
+            memory_limit_mb: 512,
+            auto_remove: true,
+        };
+
+        let body = create_body(&spec);
+        assert_eq!(body.image.as_deref(), Some(spec.image.as_str()));
+        assert_eq!(
+            body.cmd,
+            Some(vec!["run".to_string(), "--prompt".to_string()])
+        );
+        assert_eq!(
+            body.env,
+            Some(vec![
+                "ORRERY_MODE=test".to_string(),
+                "LOG_LEVEL=info".to_string(),
+            ])
+        );
+        assert_eq!(body.open_stdin, Some(true));
+        assert_eq!(body.attach_stdin, Some(true));
+        assert_eq!(body.stdin_once, Some(true));
+
+        let hc = body.host_config.expect("host_config should be populated");
+        assert_eq!(hc.memory, Some(512 * 1024 * 1024));
+        assert_eq!(hc.auto_remove, Some(true));
+    }
+
+    #[test]
+    fn create_body_binds_readonly_with_ro_suffix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws_host = tmp.path().join("project");
+        let out_host = tmp.path().join("out");
+
+        let spec = ContainerSpec {
+            name: "orrery-cli-12345678-coder".to_string(),
+            image: "ghcr.io/example/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            cmd: vec!["agent".to_string()],
+            env: Vec::new(),
+            mounts: vec![
+                MountSpec::Bind {
+                    host: ws_host.clone(),
+                    container: "/workspace".to_string(),
+                    read_only: true,
+                },
+                MountSpec::Bind {
+                    host: out_host.clone(),
+                    container: "/orrery/out".to_string(),
+                    read_only: false,
+                },
+            ],
+            memory_limit_mb: 256,
+            auto_remove: false,
+        };
+
+        let body = create_body(&spec);
+        let hc = body.host_config.expect("host_config should be populated");
+        let binds = hc.binds.expect("binds should be populated");
+        assert_eq!(
+            binds,
+            vec![
+                format!("{}:/workspace:ro", ws_host.to_string_lossy()),
+                format!("{}:/orrery/out", out_host.to_string_lossy()),
+            ]
+        );
+    }
+
+    #[test]
+    fn create_body_sets_no_gpu_or_ports() {
+        let spec = ContainerSpec {
+            name: "orrery-cli-12345678-coder".to_string(),
+            image: "ghcr.io/example/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            cmd: vec!["agent".to_string()],
+            env: Vec::new(),
+            mounts: Vec::new(),
+            memory_limit_mb: 1024,
+            auto_remove: false,
+        };
+
+        let body = create_body(&spec);
+        assert!(body.exposed_ports.is_none());
+        let hc = body.host_config.expect("host_config should be populated");
+        assert!(hc.device_requests.is_none());
+        assert!(hc.devices.is_none());
+        assert!(hc.port_bindings.is_none());
+
+        assert!(is_not_found(
+            &bollard::errors::Error::DockerResponseServerError {
+                status_code: 404,
+                message: "not found".to_string(),
+            }
+        ));
+        assert!(!is_not_found(
+            &bollard::errors::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "internal".to_string(),
+            }
+        ));
+        assert_eq!(
+            map_inspect_state(Some(&bollard::models::ContainerState {
+                running: Some(true),
+                ..Default::default()
+            })),
+            ContainerState::Running
+        );
+        assert_eq!(
+            map_inspect_state(Some(&bollard::models::ContainerState {
+                running: Some(false),
+                status: Some(ContainerStateStatusEnum::CREATED),
+                ..Default::default()
+            })),
+            ContainerState::Created
+        );
+        assert_eq!(
+            map_inspect_state(Some(&bollard::models::ContainerState {
+                running: Some(false),
+                status: Some(ContainerStateStatusEnum::EXITED),
+                exit_code: Some(42),
+                ..Default::default()
+            })),
+            ContainerState::Exited { code: 42 }
+        );
+        assert_eq!(map_inspect_state(None), ContainerState::Exited { code: 0 });
+    }
+
+    #[test]
+    fn secret_env_only_in_create_body() {
+        let secret_val = "super-secret-value-998877";
+        let spec = ContainerSpec {
+            name: "orrery-cli-12345678-coder".to_string(),
+            image: "ghcr.io/example/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            cmd: vec!["agent".to_string()],
+            env: vec![
+                (
+                    "ANTHROPIC_API_KEY".to_string(),
+                    EnvValue::Secret(SecretValue::new(secret_val)),
+                ),
+                ("PLAIN_VAR".to_string(), EnvValue::Plain("visible".to_string())),
+            ],
+            mounts: Vec::new(),
+            memory_limit_mb: 512,
+            auto_remove: false,
+        };
+
+        let dbg = format!("{spec:?}");
+        assert!(
+            !dbg.contains(secret_val),
+            "ContainerSpec Debug output must never leak SecretValue"
+        );
+
+        let body = create_body(&spec);
+        let env = body.env.expect("env should be populated");
+        assert!(env.contains(&format!("ANTHROPIC_API_KEY={secret_val}")));
+        assert!(env.contains(&"PLAIN_VAR=visible".to_string()));
     }
 }

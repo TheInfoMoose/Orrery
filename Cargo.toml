@@ -10,9 +10,11 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 async-trait = "0.1.92"
+bollard = "0.21.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
 dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 dirs = "7.0.0"
+futures-util = "0.3.34"
 keyring-core = "1.0.1"
 linux-keyutils-keyring-store = "1.0.0"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "stream"] }

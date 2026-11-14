@@ -10,9 +10,11 @@ live-backends = []
 
 [dependencies]
 async-trait.workspace = true
+bollard.workspace = true
 chrono.workspace = true
 dbus-secret-service-keyring-store.workspace = true
 dirs.workspace = true
+futures-util.workspace = true
 keyring-core.workspace = true
 linux-keyutils-keyring-store.workspace = true
 reqwest.workspace = true
@@ -36,6 +38,10 @@ required-features = ["live-backends"]
 
 [[test]]
 name = "live_mcp"
+required-features = ["live-backends"]
+
+[[test]]
+name = "live_docker"
 required-features = ["live-backends"]
 
 [lints]

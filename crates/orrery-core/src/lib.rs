@@ -38,6 +38,8 @@ pub enum Error {
     PlanParse { line: usize, message: String },
     #[error("invalid agent report: {message}")]
     Report { message: String },
+    #[error("docker error")]
+    Docker(#[source] bollard::errors::Error),
     #[error("MCP error on {server_id}")]
     Mcp {
         server_id: String,
