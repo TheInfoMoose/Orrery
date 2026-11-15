@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,7 +11,11 @@ use serde::Deserialize;
 
 use crate::checkpoint::{AgentReport, StampedReport, SubtaskAllocation, report_json_schema};
 use crate::config::{
-    AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, format_mapped_tool_name,
+    AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, WorkspaceMount, atomic_write,
+    format_mapped_tool_name,
+};
+use crate::docker::{
+    ContainerBackend, ContainerSpec, EnvValue, agent_io_dir, cli_container_name, mounts_for,
 };
 use crate::mcp::{McpGatekeeper, McpToolSchema, WriteScope, tool_result_text};
 use crate::plan::PlanStep;
@@ -985,6 +990,194 @@ impl AgentDriver for HttpChatDriver {
                 return Ok(report);
             }
         }
+    }
+}
+
+pub struct CliContainerDriver {
+    backend: Arc<dyn ContainerBackend>,
+    secrets: Arc<dyn SecretStore>,
+    project_root: PathBuf,
+}
+
+impl CliContainerDriver {
+    pub fn new(
+        backend: Arc<dyn ContainerBackend>,
+        secrets: Arc<dyn SecretStore>,
+        project_root: PathBuf,
+    ) -> Self {
+        Self {
+            backend,
+            secrets,
+            project_root,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentDriver for CliContainerDriver {
+    async fn run_turn(
+        &self,
+        inv: &AgentInvocation,
+        _mcp: &McpGatekeeper,
+        stream: &LiveStreamHub,
+    ) -> Result<AgentReport> {
+        let AgentBackend::AgentCli {
+            image,
+            command,
+            workspace_mount,
+            memory_limit_mb,
+            timeout_secs,
+            keychain_service,
+            keychain_account,
+            secret_env,
+        } = &inv.agent.backend
+        else {
+            return Err(Error::Validation {
+                field: "backend".to_string(),
+                message: format!(
+                    "agent '{}' does not use AgentCli backend",
+                    inv.agent.agent_id
+                ),
+            });
+        };
+
+        let dir = agent_io_dir(&self.project_root, &inv.run_id, &inv.agent.agent_id);
+        let in_dir = dir.join("in");
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&in_dir).map_err(|source| Error::Io {
+            path: in_dir.clone(),
+            source,
+        })?;
+        std::fs::create_dir_all(&out_dir).map_err(|source| Error::Io {
+            path: out_dir.clone(),
+            source,
+        })?;
+        if *workspace_mount != WorkspaceMount::None {
+            let mask_dir = dir.join("mask");
+            if mask_dir.exists() {
+                std::fs::remove_dir_all(&mask_dir).map_err(|source| Error::Io {
+                    path: mask_dir.clone(),
+                    source,
+                })?;
+            }
+            std::fs::create_dir_all(&mask_dir).map_err(|source| Error::Io {
+                path: mask_dir,
+                source,
+            })?;
+        }
+
+        let base_prompt = format!("{}\n\n{}", inv.system_prompt, inv.user_prompt);
+        let mut current_prompt = base_prompt.clone();
+        let prompt_path = in_dir.join("prompt.md");
+        let report_path = out_dir.join("report.toml");
+        let name = cli_container_name(&inv.run_id, &inv.agent.agent_id);
+        let mounts = mounts_for(&inv.agent, &self.project_root, &dir);
+
+        let mut last_error = Error::Report {
+            message: "report not produced".to_string(),
+        };
+
+        for _attempt in 0..2 {
+            // A report left from an earlier turn (or a crash) must never be
+            // read as this run's output.
+            match std::fs::remove_file(&report_path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: report_path.clone(),
+                        source,
+                    });
+                }
+            }
+            atomic_write(&prompt_path, current_prompt.as_bytes())?;
+
+            let mut env = Vec::new();
+            if let (Some(env_key), Some(service), Some(account)) =
+                (secret_env, keychain_service, keychain_account)
+            {
+                let secret = self.secrets.get(service, account)?;
+                env.push((env_key.clone(), EnvValue::Secret(secret)));
+            }
+
+            let spec = ContainerSpec {
+                name: name.clone(),
+                image: image.clone(),
+                cmd: command.clone(),
+                env,
+                mounts: mounts.clone(),
+                memory_limit_mb: *memory_limit_mb,
+                auto_remove: false,
+            };
+
+            let on_output = |line: String| {
+                let _ = stream.emit(StreamEvent {
+                    timestamp: Utc::now(),
+                    step_number: Some(inv.step_number),
+                    stage_index: Some(inv.stage_index),
+                    agent_id: Some(inv.agent.agent_id.clone()),
+                    kind: StreamEventKind::Output,
+                    text: line,
+                });
+            };
+
+            let run_res = tokio::time::timeout(
+                Duration::from_secs(*timeout_secs),
+                self.backend.run_to_completion(
+                    &spec,
+                    current_prompt.as_bytes().to_vec(),
+                    &on_output,
+                ),
+            )
+            .await;
+
+            let exit_res = match run_res {
+                Ok(res) => res,
+                Err(_) => {
+                    let _ = self.backend.remove(&name).await;
+                    return Err(Error::Agent {
+                        agent_id: inv.agent.agent_id.clone(),
+                        message: format!("timed out after {timeout_secs}s"),
+                    });
+                }
+            };
+
+            self.backend.remove(&name).await?;
+            let _exit_status = exit_res?;
+
+            let parsed_report = match std::fs::read_to_string(&report_path) {
+                Ok(raw) => toml::from_str::<AgentReport>(&raw)
+                    .map_err(|err| Error::Report {
+                        message: format!("invalid report TOML: {err}"),
+                    })
+                    .and_then(|report| {
+                        report.validate_for_role(&inv.role, inv.stage_count)?;
+                        Ok(report)
+                    }),
+                // Container path only: this message goes into the retry prompt
+                // and the live stream, so the host path must not appear.
+                Err(err) => Err(Error::Report {
+                    message: format!("missing report at {CLI_REPORT_PATH}: {}", err.kind()),
+                }),
+            };
+
+            match parsed_report {
+                Ok(report) => return Ok(report),
+                Err(err) => {
+                    let _ = std::fs::remove_file(&report_path);
+                    current_prompt =
+                        format!("{base_prompt}\n\n# Previous report was invalid\n{err}");
+                    last_error = match err {
+                        Error::Report { .. } => err,
+                        other => Error::Report {
+                            message: other.to_string(),
+                        },
+                    };
+                }
+            }
+        }
+
+        Err(last_error)
     }
 }
 
@@ -2572,5 +2765,514 @@ mod tests {
         let msgs = state.messages();
         assert_eq!(msgs[4]["tool_calls"][0]["id"], "orrery_call_2");
         assert_eq!(msgs[5]["tool_call_id"], "orrery_call_2");
+    }
+
+    fn sample_cli_invocation(
+        agent_id: &str,
+        workspace_mount: WorkspaceMount,
+        timeout_secs: u64,
+        secret: Option<(&str, &str, &str)>,
+    ) -> AgentInvocation {
+        let (keychain_service, keychain_account, secret_env) = match secret {
+            Some((svc, acct, env_key)) => (
+                Some(svc.to_string()),
+                Some(acct.to_string()),
+                Some(env_key.to_string()),
+            ),
+            None => (None, None, None),
+        };
+        let role = sample_role(RoleKind::Implementer);
+        let backend = AgentBackend::AgentCli {
+            image: "orrery/cli-agent:1.0".to_string(),
+            command: vec!["agent-cli".to_string(), "--stdin".to_string()],
+            workspace_mount,
+            memory_limit_mb: 1024,
+            timeout_secs,
+            keychain_service,
+            keychain_account,
+            secret_env,
+        };
+        let agent = AgentConfig {
+            agent_id: agent_id.to_string(),
+            display_name: format!("CLI {agent_id}"),
+            backend: backend.clone(),
+        };
+        let step = sample_step();
+        let system_prompt = build_system_prompt(&role, "Write clean code.", &backend);
+        let user_prompt = build_user_prompt(&step, None, &[], &[]);
+        AgentInvocation {
+            run_id: Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0),
+            step_number: 1,
+            stage_index: 1,
+            stage_count: 3,
+            round: 1,
+            role,
+            agent,
+            system_prompt,
+            user_prompt,
+            tools: Vec::new(),
+            write_scope: WriteScope::anywhere(),
+        }
+    }
+
+    fn find_mount_host<'a>(spec: &'a ContainerSpec, container_target: &str) -> &'a std::path::Path {
+        spec.mounts
+            .iter()
+            .find_map(|m| match m {
+                crate::docker::MountSpec::Bind {
+                    host, container, ..
+                } if container == container_target => Some(host.as_path()),
+                crate::docker::MountSpec::Bind { .. } => None,
+            })
+            .expect("expected mount target not found")
+    }
+
+    #[tokio::test]
+    async fn valid_report_accepted() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        backend.set_run_script(Box::new(|spec, _stdin| {
+            let out_host = find_mount_host(spec, "/orrery/out");
+            let report = AgentReport {
+                status: ReportStatus::Complete,
+                summary: "Implemented CLI container driver.".to_string(),
+                feedback: None,
+                artifacts: vec!["src/llm.rs".to_string()],
+                target_stage: None,
+                allocations: Vec::new(),
+            };
+            let toml_str = toml::to_string(&report).unwrap();
+            std::fs::write(out_host.join("report.toml"), toml_str).unwrap();
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let expected_prompt = format!("{}\n\n{}", inv.system_prompt, inv.user_prompt);
+
+        let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+        assert_eq!(report.status, ReportStatus::Complete);
+        assert_eq!(report.summary, "Implemented CLI container driver.");
+
+        let io_dir = agent_io_dir(tmp.path(), &inv.run_id, &inv.agent.agent_id);
+        let prompt_file = io_dir.join("in").join("prompt.md");
+        assert!(prompt_file.is_file());
+        let written_prompt = std::fs::read_to_string(&prompt_file).unwrap();
+        assert_eq!(written_prompt, expected_prompt);
+
+        let calls = backend.calls();
+        assert_eq!(calls.len(), 2);
+        match &calls[0] {
+            crate::docker::MockCall::RunToCompletion {
+                name, stdin_len, ..
+            } => {
+                assert_eq!(name, &cli_container_name(&inv.run_id, &inv.agent.agent_id));
+                assert_eq!(*stdin_len, written_prompt.len());
+            }
+            other => panic!("expected RunToCompletion, got {other:?}"),
+        }
+        assert_eq!(
+            calls[1],
+            crate::docker::MockCall::Remove(cli_container_name(&inv.run_id, &inv.agent.agent_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn output_lines_streamed() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        backend.set_run_script(Box::new(|spec, _stdin| {
+            let out_host = find_mount_host(spec, "/orrery/out");
+            let report = AgentReport {
+                status: ReportStatus::Complete,
+                summary: "Streamed output lines.".to_string(),
+                feedback: None,
+                artifacts: Vec::new(),
+                target_stage: None,
+                allocations: Vec::new(),
+            };
+            std::fs::write(
+                out_host.join("report.toml"),
+                toml::to_string(&report).unwrap(),
+            )
+            .unwrap();
+            (
+                vec!["compiling crate".to_string(), "all tests green".to_string()],
+                0,
+            )
+        }));
+
+        let driver = CliContainerDriver::new(backend, secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::None, 30, None);
+        let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+        assert_eq!(report.status, ReportStatus::Complete);
+
+        let events = hub.recent(10).unwrap();
+        let output_texts: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == StreamEventKind::Output)
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(output_texts, vec!["compiling crate", "all tests green"]);
+    }
+
+    #[tokio::test]
+    async fn missing_report_reprompted_then_error() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        backend.set_run_script(Box::new(|_spec, _stdin| {
+            (vec!["ran without report".into()], 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        assert!(matches!(err, Error::Report { .. }));
+
+        let run_calls = backend
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, crate::docker::MockCall::RunToCompletion { .. }))
+            .count();
+        assert_eq!(run_calls, 2);
+    }
+
+    #[tokio::test]
+    async fn stale_report_not_reused() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+        backend.set_run_script(Box::new(|_spec, _stdin| (Vec::new(), 0)));
+
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let out_dir = agent_io_dir(tmp.path(), &inv.run_id, &inv.agent.agent_id).join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let stale = AgentReport {
+            status: ReportStatus::Complete,
+            summary: "stale report from an earlier turn".to_string(),
+            feedback: None,
+            artifacts: Vec::new(),
+            target_stage: None,
+            allocations: Vec::new(),
+        };
+        std::fs::write(
+            out_dir.join("report.toml"),
+            toml::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let driver = CliContainerDriver::new(backend, secrets, tmp.path().to_path_buf());
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        assert!(matches!(err, Error::Report { .. }));
+        assert!(!out_dir.join("report.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_report_error_uses_container_path() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+        let prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let prompts_clone = prompts.clone();
+        backend.set_run_script(Box::new(move |_spec, stdin| {
+            prompts_clone
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(stdin).into_owned());
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend, secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+
+        let host_root = tmp.path().to_string_lossy().into_owned();
+        let prompts = prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts[1].contains(CLI_REPORT_PATH));
+        assert!(!prompts[1].contains(&host_root));
+        assert!(!err.to_string().contains(&host_root));
+        for ev in hub.recent(100).unwrap() {
+            assert!(!ev.text.contains(&host_root));
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_then_valid_report_accepted() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let recorded_prompts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let counter_clone = counter.clone();
+        let prompts_clone = recorded_prompts.clone();
+
+        backend.set_run_script(Box::new(move |spec, stdin| {
+            let call_idx = counter_clone.fetch_add(1, Ordering::SeqCst);
+            prompts_clone
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(stdin).into_owned());
+
+            let out_host = find_mount_host(spec, "/orrery/out");
+            if call_idx == 0 {
+                std::fs::write(out_host.join("report.toml"), "not = [valid toml").unwrap();
+            } else {
+                let report = AgentReport {
+                    status: ReportStatus::Complete,
+                    summary: "Fixed report on second attempt.".to_string(),
+                    feedback: None,
+                    artifacts: Vec::new(),
+                    target_stage: None,
+                    allocations: Vec::new(),
+                };
+                std::fs::write(
+                    out_host.join("report.toml"),
+                    toml::to_string(&report).unwrap(),
+                )
+                .unwrap();
+            }
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend, secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+        assert_eq!(report.status, ReportStatus::Complete);
+        assert_eq!(report.summary, "Fixed report on second attempt.");
+
+        let prompts = recorded_prompts.lock().unwrap().clone();
+        assert_eq!(prompts.len(), 2);
+        assert!(!prompts[0].contains("Previous report was invalid"));
+        assert!(prompts[1].contains("Previous report was invalid"));
+
+        let io_dir = agent_io_dir(tmp.path(), &inv.run_id, &inv.agent.agent_id);
+        let disk_prompt = std::fs::read_to_string(io_dir.join("in").join("prompt.md")).unwrap();
+        assert!(disk_prompt.contains("Previous report was invalid"));
+    }
+
+    #[tokio::test]
+    async fn timeout_is_agent_error_and_removes_container() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+        backend.set_run_delay(Duration::from_secs(2));
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 1, None);
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "cli-coder");
+                assert!(message.contains("timed out after 1s"));
+            }
+            other => panic!("expected Error::Agent, got {other:?}"),
+        }
+
+        let expected_name = cli_container_name(&inv.run_id, &inv.agent.agent_id);
+        assert!(
+            backend
+                .calls()
+                .contains(&crate::docker::MockCall::Remove(expected_name))
+        );
+    }
+
+    #[tokio::test]
+    async fn secret_env_injected_as_secret() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        secrets
+            .set(
+                "orrery.test",
+                "testuser",
+                &SecretValue::new("sk-ant-test-secret-value-1234"),
+            )
+            .unwrap();
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        backend.set_run_script(Box::new(|spec, _stdin| {
+            let out_host = find_mount_host(spec, "/orrery/out");
+            let report = AgentReport {
+                status: ReportStatus::Complete,
+                summary: "Used secret env.".to_string(),
+                feedback: None,
+                artifacts: Vec::new(),
+                target_stage: None,
+                allocations: Vec::new(),
+            };
+            std::fs::write(
+                out_host.join("report.toml"),
+                toml::to_string(&report).unwrap(),
+            )
+            .unwrap();
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation(
+            "cli-coder",
+            WorkspaceMount::ReadOnly,
+            30,
+            Some(("orrery.test", "testuser", "ANTHROPIC_API_KEY")),
+        );
+        let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+        assert_eq!(report.status, ReportStatus::Complete);
+
+        let calls = backend.calls();
+        match &calls[0] {
+            crate::docker::MockCall::RunToCompletion {
+                secret_env,
+                plain_env,
+                ..
+            } => {
+                assert_eq!(secret_env, &vec!["ANTHROPIC_API_KEY".to_string()]);
+                assert!(
+                    !plain_env
+                        .iter()
+                        .any(|entry| entry.contains("ANTHROPIC_API_KEY"))
+                );
+            }
+            other => panic!("expected RunToCompletion, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_secret_fails_before_run() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation(
+            "cli-coder",
+            WorkspaceMount::ReadOnly,
+            30,
+            Some(("orrery.test", "testuser", "ANTHROPIC_API_KEY")),
+        );
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        assert!(matches!(err, Error::Keychain(_)));
+
+        let run_calls = backend
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, crate::docker::MockCall::RunToCompletion { .. }))
+            .count();
+        assert_eq!(run_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn mask_dir_exists_and_empty_during_run() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        let mask_verified = Arc::new(AtomicUsize::new(0));
+        let mask_verified_clone = mask_verified.clone();
+
+        backend.set_run_script(Box::new(move |spec, _stdin| {
+            let mask_host = find_mount_host(spec, "/workspace/.orrery");
+            assert!(mask_host.is_dir());
+            assert!(std::fs::read_dir(mask_host).unwrap().next().is_none());
+            mask_verified_clone.fetch_add(1, Ordering::SeqCst);
+
+            let out_host = find_mount_host(spec, "/orrery/out");
+            let report = AgentReport {
+                status: ReportStatus::Complete,
+                summary: "Verified mask mount.".to_string(),
+                feedback: None,
+                artifacts: Vec::new(),
+                target_stage: None,
+                allocations: Vec::new(),
+            };
+            std::fs::write(
+                out_host.join("report.toml"),
+                toml::to_string(&report).unwrap(),
+            )
+            .unwrap();
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend, secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadWrite, 30, None);
+        let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+        assert_eq!(report.status, ReportStatus::Complete);
+        assert_eq!(mask_verified.load(Ordering::SeqCst), 1);
     }
 }
