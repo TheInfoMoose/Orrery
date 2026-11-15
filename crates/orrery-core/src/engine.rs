@@ -12,19 +12,21 @@ use crate::checkpoint::{
 };
 use crate::config::{
     AgentBackend, AgentConfig, ExecutionMode, McpServerConfig, ProjectConfig, RoleConfig, RoleKind,
+    ValidationMode, validate_concrete_tool_ref,
 };
 use crate::docker::{ResourceManager, StageLease};
 use crate::llm::{
     AgentDriver, AgentInvocation, StageSummary, build_orchestrator_prompt, build_system_prompt,
     build_user_prompt,
 };
-use crate::mcp::{McpGatekeeper, WriteScope};
+use crate::mcp::{McpGatekeeper, WriteScope, tool_result_is_error, tool_result_text};
 use crate::plan::{ImplementationPlan, PlanStep};
 use crate::stream_log::{LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const OPERATOR_CHANNEL_CAPACITY: usize = 8;
+const PASS_CHECK_AWAITING_REASON: &str = "awaiting operator approval for step pass";
 
 pub struct DriverSet {
     pub chat: Arc<dyn AgentDriver>,
@@ -208,6 +210,28 @@ enum StageTurnOutcome {
     ProtocolViolation(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AwaitingContext {
+    PassCheck,
+    HaltOrEscalation,
+}
+
+enum AwaitResolution {
+    PassStep,
+    ContinueOrchestrator,
+    HaltRun(RunOutcome),
+}
+
+struct StepRunState {
+    step_idx: usize,
+    step_number: usize,
+    notes: Vec<String>,
+    history: Vec<StageTurnRecord>,
+    last_stage_run: Option<usize>,
+    consecutive_violations: usize,
+    stage_ran_since_gate_failure: bool,
+}
+
 pub struct WorkflowEngine {
     ctx: EngineContext,
     events: broadcast::Sender<EngineEvent>,
@@ -239,10 +263,9 @@ impl WorkflowEngine {
     }
 
     pub async fn run(&self, opts: RunOptions, _cancel: CancellationToken) -> Result<RunOutcome> {
-        let _ = &self.operator_rx;
-
         let mode = opts.mode.unwrap_or(self.ctx.project.execution_mode);
         let cycles = opts.cycles.unwrap_or(self.ctx.project.cycle_count);
+        let validation_mode = self.ctx.project.effective_validation_mode(&self.ctx.roles);
         let mut requested_start = opts.start_step;
 
         let mut state = match self.ctx.checkpoints.load_state()? {
@@ -279,20 +302,91 @@ impl WorkflowEngine {
 
             let step = &self.ctx.plan.steps[step_idx];
             state.current_step_index = step_idx;
-            state.step_statuses[step_idx] = StepStatus::InProgress;
-            state.round = 0;
-            state.active_stage_index = None;
-            state.retry_count = 0;
-            state.awaiting_reason = None;
-            self.emit_event(EngineEvent::StepStatusChanged {
-                step_number: step.number,
-                status: StepStatus::InProgress,
-            });
 
-            let mut notes: Vec<String> = Vec::new();
-            let mut history: Vec<StageTurnRecord> = Vec::new();
-            let mut last_stage_run: Option<usize> = None;
-            let mut consecutive_violations: usize = 0;
+            let mut step_state = if state.step_statuses[step_idx] == StepStatus::AwaitingOperator {
+                let (history, last_stage_run, last_is_step_passed) =
+                    self.reconstruct_step_history(step.number)?;
+                let mut resumed = StepRunState {
+                    step_idx,
+                    step_number: step.number,
+                    notes: Vec::new(),
+                    history,
+                    last_stage_run,
+                    consecutive_violations: 0,
+                    stage_ran_since_gate_failure: true,
+                };
+                let context = if validation_mode == ValidationMode::GateAndOperator
+                    && last_is_step_passed
+                    && state.awaiting_reason.as_deref() == Some(PASS_CHECK_AWAITING_REASON)
+                {
+                    AwaitingContext::PassCheck
+                } else {
+                    AwaitingContext::HaltOrEscalation
+                };
+                let resolution = match state.operator_decision.take() {
+                    Some(decision) => {
+                        self.apply_operator_decision(&mut state, &mut resumed, context, decision)?
+                    }
+                    None => {
+                        let reason = state
+                            .awaiting_reason
+                            .clone()
+                            .unwrap_or_else(|| "awaiting operator".to_string());
+                        self.enter_awaiting_operator(
+                            &mut state,
+                            &mut resumed,
+                            reason,
+                            context,
+                            opts.wait_for_operator,
+                        )
+                        .await?
+                    }
+                };
+                match resolution {
+                    AwaitResolution::PassStep => {
+                        if let Some(outcome) = self.complete_step_pass(
+                            &mut state,
+                            step_idx,
+                            step.number,
+                            mode,
+                            cycles,
+                        )? {
+                            return Ok(outcome);
+                        }
+                        continue;
+                    }
+                    AwaitResolution::ContinueOrchestrator => resumed,
+                    AwaitResolution::HaltRun(outcome) => return Ok(outcome),
+                }
+            } else {
+                state.step_statuses[step_idx] = StepStatus::InProgress;
+                state.round = 0;
+                state.active_stage_index = None;
+                state.retry_count = 0;
+                state.awaiting_reason = None;
+                self.emit_event(EngineEvent::StepStatusChanged {
+                    step_number: step.number,
+                    status: StepStatus::InProgress,
+                });
+                let mut fresh = StepRunState {
+                    step_idx,
+                    step_number: step.number,
+                    notes: Vec::new(),
+                    history: Vec::new(),
+                    last_stage_run: None,
+                    consecutive_violations: 0,
+                    stage_ran_since_gate_failure: true,
+                };
+                if let Some(decision) = state.operator_decision.take() {
+                    let _ = self.apply_operator_decision(
+                        &mut state,
+                        &mut fresh,
+                        AwaitingContext::HaltOrEscalation,
+                        decision,
+                    )?;
+                }
+                fresh
+            };
 
             loop {
                 state.round += 1;
@@ -305,19 +399,24 @@ impl WorkflowEngine {
                 });
                 self.ctx.checkpoints.save_state(&state)?;
 
-                let turn_notes = std::mem::take(&mut notes);
+                let turn_notes = std::mem::take(&mut step_state.notes);
                 let orch_report = match self
                     .run_orchestrator_turn(&state, step, &stage_summaries, &turn_notes)
                     .await
                 {
                     Ok(report) => report,
                     Err(Error::Report { message }) => {
-                        Self::record_violation(
-                            step.number,
-                            &mut consecutive_violations,
-                            &mut notes,
-                            &message,
-                        )?;
+                        if let Some(outcome) = self
+                            .record_violation(
+                                &mut state,
+                                &mut step_state,
+                                &message,
+                                opts.wait_for_operator,
+                            )
+                            .await?
+                        {
+                            return Ok(outcome);
+                        }
                         continue;
                     }
                     Err(err) => return Err(err),
@@ -326,40 +425,82 @@ impl WorkflowEngine {
                 match orch_report.status {
                     ReportStatus::Dispatch => {
                         let Some(target_stage) = orch_report.target_stage else {
-                            Self::record_violation(
-                                step.number,
-                                &mut consecutive_violations,
-                                &mut notes,
-                                "Dispatch report requires target_stage",
-                            )?;
+                            if let Some(outcome) = self
+                                .record_violation(
+                                    &mut state,
+                                    &mut step_state,
+                                    "Dispatch report requires target_stage",
+                                    opts.wait_for_operator,
+                                )
+                                .await?
+                            {
+                                return Ok(outcome);
+                            }
                             continue;
                         };
 
-                        if let Err(err) = check_dispatch(target_stage, last_stage_run, &stage_kinds)
-                        {
-                            let msg = match err {
-                                Error::Engine { message, .. } => message,
-                                other => return Err(other),
-                            };
-                            Self::record_violation(
-                                step.number,
-                                &mut consecutive_violations,
-                                &mut notes,
-                                &msg,
-                            )?;
-                            continue;
-                        }
+                        let dispatch_kind = match check_dispatch(
+                            target_stage,
+                            step_state.last_stage_run,
+                            &stage_kinds,
+                        ) {
+                            Ok(kind) => kind,
+                            Err(Error::Engine { message, .. }) => {
+                                if let Some(outcome) = self
+                                    .record_violation(
+                                        &mut state,
+                                        &mut step_state,
+                                        &message,
+                                        opts.wait_for_operator,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(outcome);
+                                }
+                                continue;
+                            }
+                            Err(other) => return Err(other),
+                        };
 
                         if let Err(msg) =
                             self.validate_stage_allocations(target_stage, &orch_report.allocations)
                         {
-                            Self::record_violation(
-                                step.number,
-                                &mut consecutive_violations,
-                                &mut notes,
-                                &msg,
-                            )?;
+                            if let Some(outcome) = self
+                                .record_violation(
+                                    &mut state,
+                                    &mut step_state,
+                                    &msg,
+                                    opts.wait_for_operator,
+                                )
+                                .await?
+                            {
+                                return Ok(outcome);
+                            }
                             continue;
+                        }
+
+                        if dispatch_kind == DispatchKind::Retry {
+                            state.retry_count += 1;
+                            if state.retry_count > self.ctx.project.max_step_retries {
+                                let reason = format!(
+                                    "max step retries ({}) exhausted",
+                                    self.ctx.project.max_step_retries
+                                );
+                                match self
+                                    .enter_awaiting_operator(
+                                        &mut state,
+                                        &mut step_state,
+                                        reason,
+                                        AwaitingContext::HaltOrEscalation,
+                                        opts.wait_for_operator,
+                                    )
+                                    .await?
+                                {
+                                    AwaitResolution::ContinueOrchestrator
+                                    | AwaitResolution::PassStep => continue,
+                                    AwaitResolution::HaltRun(outcome) => return Ok(outcome),
+                                }
+                            }
                         }
 
                         state.phase = EnginePhase::StageTurn;
@@ -371,73 +512,176 @@ impl WorkflowEngine {
                             .await?
                         {
                             StageTurnOutcome::Completed(record) => {
-                                consecutive_violations = 0;
-                                last_stage_run = Some(target_stage);
-                                history.push(record);
+                                step_state.consecutive_violations = 0;
+                                step_state.stage_ran_since_gate_failure = true;
+                                step_state.last_stage_run = Some(target_stage);
+                                step_state.history.push(record);
                                 state.active_stage_index = None;
                                 self.ctx.checkpoints.save_state(&state)?;
                             }
                             StageTurnOutcome::ProtocolViolation(msg) => {
-                                Self::record_violation(
-                                    step.number,
-                                    &mut consecutive_violations,
-                                    &mut notes,
-                                    &msg,
-                                )?;
+                                if let Some(outcome) = self
+                                    .record_violation(
+                                        &mut state,
+                                        &mut step_state,
+                                        &msg,
+                                        opts.wait_for_operator,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(outcome);
+                                }
                                 continue;
                             }
                         }
                     }
-                    ReportStatus::StepPassed => match agents_pass_rule(&history, true) {
-                        Ok(()) => {
-                            state.step_statuses[step_idx] = StepStatus::Passed;
-                            state.steps_passed_this_run += 1;
-                            state.active_stage_index = None;
-
-                            let should_stop = match mode {
-                                ExecutionMode::Run => true,
-                                ExecutionMode::Loop => {
-                                    (cycles > 0 && state.steps_passed_this_run >= cycles)
-                                        || !state.step_statuses.contains(&StepStatus::Pending)
-                                }
-                            };
-                            if should_stop {
-                                state.phase = EnginePhase::Done;
+                    ReportStatus::Escalate => {
+                        step_state.consecutive_violations = 0;
+                        let reason = orch_report
+                            .feedback
+                            .unwrap_or_else(|| orch_report.summary.clone());
+                        match self
+                            .enter_awaiting_operator(
+                                &mut state,
+                                &mut step_state,
+                                reason,
+                                AwaitingContext::HaltOrEscalation,
+                                opts.wait_for_operator,
+                            )
+                            .await?
+                        {
+                            AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {
+                                continue;
                             }
-
-                            self.ctx.checkpoints.save_state(&state)?;
-                            self.emit_event(EngineEvent::StepStatusChanged {
-                                step_number: step.number,
-                                status: StepStatus::Passed,
-                            });
-
-                            if should_stop {
-                                let outcome = RunOutcome::Completed {
-                                    steps_passed: state.steps_passed_this_run,
-                                };
-                                self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
-                                self.emit_event(EngineEvent::RunFinished(outcome.clone()));
-                                return Ok(outcome);
-                            }
-                            break;
+                            AwaitResolution::HaltRun(outcome) => return Ok(outcome),
                         }
-                        Err(reason) => {
-                            Self::record_violation(
-                                step.number,
-                                &mut consecutive_violations,
-                                &mut notes,
-                                &reason,
-                            )?;
-                            continue;
+                    }
+                    ReportStatus::StepPassed => match validation_mode {
+                        ValidationMode::Agents | ValidationMode::Auto => {
+                            if let Err(reason) = agents_pass_rule(&step_state.history, true) {
+                                if let Some(outcome) = self
+                                    .record_violation(
+                                        &mut state,
+                                        &mut step_state,
+                                        &reason,
+                                        opts.wait_for_operator,
+                                    )
+                                    .await?
+                                {
+                                    return Ok(outcome);
+                                }
+                                continue;
+                            }
+
+                            let (gate_ok, gate_note) = self.run_gates(&mut state, step).await?;
+                            match agents_pass_rule(&step_state.history, gate_ok) {
+                                Ok(()) => {
+                                    if let Some(outcome) = self.complete_step_pass(
+                                        &mut state,
+                                        step_idx,
+                                        step.number,
+                                        mode,
+                                        cycles,
+                                    )? {
+                                        return Ok(outcome);
+                                    }
+                                    break;
+                                }
+                                Err(reason) => {
+                                    let note = match gate_note {
+                                        Some(detail) => format!("{reason}: {detail}"),
+                                        None => reason,
+                                    };
+                                    if !step_state.stage_ran_since_gate_failure {
+                                        let msg = format!(
+                                            "StepPassed again without new work after a failed gate: {note}"
+                                        );
+                                        if let Some(outcome) = self
+                                            .record_violation(
+                                                &mut state,
+                                                &mut step_state,
+                                                &msg,
+                                                opts.wait_for_operator,
+                                            )
+                                            .await?
+                                        {
+                                            return Ok(outcome);
+                                        }
+                                        continue;
+                                    }
+                                    step_state.stage_ran_since_gate_failure = false;
+                                    step_state.notes.push(note);
+                                    continue;
+                                }
+                            }
+                        }
+                        ValidationMode::GateAndOperator => {
+                            let (gate_ok, gate_note) = self.run_gates(&mut state, step).await?;
+                            if !gate_ok {
+                                let note =
+                                    gate_note.unwrap_or_else(|| "gate check failed".to_string());
+                                if !step_state.stage_ran_since_gate_failure {
+                                    let msg = format!(
+                                        "StepPassed again without new work after a failed gate: {note}"
+                                    );
+                                    if let Some(outcome) = self
+                                        .record_violation(
+                                            &mut state,
+                                            &mut step_state,
+                                            &msg,
+                                            opts.wait_for_operator,
+                                        )
+                                        .await?
+                                    {
+                                        return Ok(outcome);
+                                    }
+                                    continue;
+                                }
+                                step_state.stage_ran_since_gate_failure = false;
+                                step_state.notes.push(note);
+                                continue;
+                            }
+
+                            step_state.consecutive_violations = 0;
+                            match self
+                                .enter_awaiting_operator(
+                                    &mut state,
+                                    &mut step_state,
+                                    PASS_CHECK_AWAITING_REASON.to_string(),
+                                    AwaitingContext::PassCheck,
+                                    opts.wait_for_operator,
+                                )
+                                .await?
+                            {
+                                AwaitResolution::PassStep => {
+                                    if let Some(outcome) = self.complete_step_pass(
+                                        &mut state,
+                                        step_idx,
+                                        step.number,
+                                        mode,
+                                        cycles,
+                                    )? {
+                                        return Ok(outcome);
+                                    }
+                                    break;
+                                }
+                                AwaitResolution::ContinueOrchestrator => continue,
+                                AwaitResolution::HaltRun(outcome) => return Ok(outcome),
+                            }
                         }
                     },
                     other => {
-                        Self::record_violation(
-                            step.number,
-                            &mut consecutive_violations,
-                            &mut notes,
-                            &format!("unexpected orchestrator status {other:?}"),
-                        )?;
+                        if let Some(outcome) = self
+                            .record_violation(
+                                &mut state,
+                                &mut step_state,
+                                &format!("unexpected orchestrator status {other:?}"),
+                                opts.wait_for_operator,
+                            )
+                            .await?
+                        {
+                            return Ok(outcome);
+                        }
                         continue;
                     }
                 }
@@ -449,21 +693,326 @@ impl WorkflowEngine {
         let _ = self.events.send(event);
     }
 
-    fn record_violation(
-        step_number: usize,
-        consecutive_violations: &mut usize,
-        notes: &mut Vec<String>,
+    async fn record_violation(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_state: &mut StepRunState,
         msg: &str,
-    ) -> Result<()> {
-        *consecutive_violations += 1;
-        if *consecutive_violations >= 2 {
-            return Err(Error::Engine {
-                step_number,
-                message: format!("protocol violation: {msg}"),
-            });
+        wait_for_operator: bool,
+    ) -> Result<Option<RunOutcome>> {
+        step_state.consecutive_violations += 1;
+        let reason = format!("protocol violation: {msg}");
+        if step_state.consecutive_violations < 2 {
+            step_state.notes.push(reason);
+            return Ok(None);
         }
-        notes.push(format!("protocol violation: {msg}"));
-        Ok(())
+
+        match self
+            .enter_awaiting_operator(
+                state,
+                step_state,
+                reason,
+                AwaitingContext::HaltOrEscalation,
+                wait_for_operator,
+            )
+            .await?
+        {
+            AwaitResolution::HaltRun(outcome) => Ok(Some(outcome)),
+            AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => Ok(None),
+        }
+    }
+
+    async fn enter_awaiting_operator(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_state: &mut StepRunState,
+        reason: String,
+        context: AwaitingContext,
+        wait_for_operator: bool,
+    ) -> Result<AwaitResolution> {
+        state.phase = EnginePhase::AwaitingOperator;
+        state.step_statuses[step_state.step_idx] = StepStatus::AwaitingOperator;
+        state.active_stage_index = None;
+        state.awaiting_reason = Some(reason.clone());
+        self.emit_event(EngineEvent::PhaseChanged(EnginePhase::AwaitingOperator));
+        self.emit_event(EngineEvent::StepStatusChanged {
+            step_number: step_state.step_number,
+            status: StepStatus::AwaitingOperator,
+        });
+        self.emit_event(EngineEvent::AwaitingOperator {
+            step_number: step_state.step_number,
+            reason: reason.clone(),
+        });
+        self.ctx.checkpoints.save_state(state)?;
+
+        if !wait_for_operator {
+            let outcome = RunOutcome::AwaitingOperator {
+                step_number: step_state.step_number,
+                reason,
+            };
+            self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+            return Ok(AwaitResolution::HaltRun(outcome));
+        }
+
+        let decision = {
+            let mut rx = self.operator_rx.lock().await;
+            rx.recv().await.ok_or_else(|| Error::Engine {
+                step_number: step_state.step_number,
+                message: "operator channel closed while awaiting decision".to_string(),
+            })?
+        };
+
+        self.apply_operator_decision(state, step_state, context, decision)
+    }
+
+    fn apply_operator_decision(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_state: &mut StepRunState,
+        context: AwaitingContext,
+        decision: OperatorDecision,
+    ) -> Result<AwaitResolution> {
+        state.operator_decision = None;
+        state.awaiting_reason = None;
+        step_state.consecutive_violations = 0;
+
+        match (context, decision) {
+            (AwaitingContext::PassCheck, OperatorDecision::Approve) => {
+                Ok(AwaitResolution::PassStep)
+            }
+            (AwaitingContext::PassCheck, OperatorDecision::Reject { feedback }) => {
+                state.retry_count += 1;
+                step_state.last_stage_run = None;
+                step_state
+                    .notes
+                    .push(format!("operator rejected: {feedback}"));
+                state.step_statuses[step_state.step_idx] = StepStatus::InProgress;
+                self.emit_event(EngineEvent::StepStatusChanged {
+                    step_number: step_state.step_number,
+                    status: StepStatus::InProgress,
+                });
+                self.ctx.checkpoints.save_state(state)?;
+                Ok(AwaitResolution::ContinueOrchestrator)
+            }
+            (AwaitingContext::HaltOrEscalation, OperatorDecision::Approve) => {
+                state.retry_count = 0;
+                state.step_statuses[step_state.step_idx] = StepStatus::InProgress;
+                self.emit_event(EngineEvent::StepStatusChanged {
+                    step_number: step_state.step_number,
+                    status: StepStatus::InProgress,
+                });
+                self.ctx.checkpoints.save_state(state)?;
+                Ok(AwaitResolution::ContinueOrchestrator)
+            }
+            (AwaitingContext::HaltOrEscalation, OperatorDecision::Reject { feedback }) => {
+                state.retry_count = 0;
+                step_state
+                    .notes
+                    .push(format!("operator rejected: {feedback}"));
+                state.step_statuses[step_state.step_idx] = StepStatus::InProgress;
+                self.emit_event(EngineEvent::StepStatusChanged {
+                    step_number: step_state.step_number,
+                    status: StepStatus::InProgress,
+                });
+                self.ctx.checkpoints.save_state(state)?;
+                Ok(AwaitResolution::ContinueOrchestrator)
+            }
+        }
+    }
+
+    fn complete_step_pass(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_idx: usize,
+        step_number: usize,
+        mode: ExecutionMode,
+        cycles: usize,
+    ) -> Result<Option<RunOutcome>> {
+        state.step_statuses[step_idx] = StepStatus::Passed;
+        state.steps_passed_this_run += 1;
+        state.active_stage_index = None;
+        state.awaiting_reason = None;
+
+        let should_stop = match mode {
+            ExecutionMode::Run => true,
+            ExecutionMode::Loop => {
+                (cycles > 0 && state.steps_passed_this_run >= cycles)
+                    || !state.step_statuses.contains(&StepStatus::Pending)
+            }
+        };
+        if should_stop {
+            state.phase = EnginePhase::Done;
+        }
+
+        self.ctx.checkpoints.save_state(state)?;
+        self.emit_event(EngineEvent::StepStatusChanged {
+            step_number,
+            status: StepStatus::Passed,
+        });
+
+        if should_stop {
+            let outcome = RunOutcome::Completed {
+                steps_passed: state.steps_passed_this_run,
+            };
+            self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
+            self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+            return Ok(Some(outcome));
+        }
+
+        Ok(None)
+    }
+
+    async fn run_gates(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step: &PlanStep,
+    ) -> Result<(bool, Option<String>)> {
+        if self.ctx.project.gate_tools.is_empty() {
+            return Ok((true, None));
+        }
+
+        state.phase = EnginePhase::Gate;
+        state.active_stage_index = None;
+        self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Gate));
+
+        let gate_role = RoleConfig {
+            role_id: "__orrery_gate".to_string(),
+            display_name: "__orrery_gate".to_string(),
+            kind: RoleKind::Validator,
+            rules_file: String::new(),
+            allowed_mcp_tools: self.ctx.project.gate_tools.clone(),
+        };
+        let args = serde_json::json!({
+            "orrery": {
+                "project_name": self.ctx.project.project_name,
+                "run_id": state.run_id.to_string(),
+                "step_number": step.number,
+                "step_title": step.title,
+                "plan_step_sha256": step.sha256_hex,
+                "event": "gate",
+            }
+        });
+
+        for (idx, tool_ref) in self.ctx.project.gate_tools.iter().enumerate() {
+            let (server_id, tool) =
+                validate_concrete_tool_ref(tool_ref, &format!("gate_tools[{idx}]"))?;
+            let exec_res = self
+                .ctx
+                .gatekeeper
+                .execute_for_role(
+                    &gate_role,
+                    &WriteScope::anywhere(),
+                    server_id,
+                    tool,
+                    args.clone(),
+                )
+                .await;
+
+            match exec_res {
+                Ok(val) if !tool_result_is_error(&val) => {
+                    let text = tool_result_text(&val);
+                    let event_text = if text.is_empty() {
+                        format!("{server_id}:{tool} passed")
+                    } else {
+                        format!("{server_id}:{tool} passed: {text}")
+                    };
+                    self.ctx.stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(step.number),
+                        stage_index: None,
+                        agent_id: None,
+                        kind: StreamEventKind::GateResult,
+                        text: event_text,
+                    })?;
+                }
+                Ok(val) => {
+                    let text = tool_result_text(&val);
+                    let detail = if text.is_empty() {
+                        "tool returned isError=true".to_string()
+                    } else {
+                        text
+                    };
+                    let msg = format!("gate '{server_id}:{tool}' failed: {detail}");
+                    self.ctx.stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(step.number),
+                        stage_index: None,
+                        agent_id: None,
+                        kind: StreamEventKind::GateResult,
+                        text: msg.clone(),
+                    })?;
+                    return Ok((false, Some(msg)));
+                }
+                Err(err) => {
+                    let detail = match std::error::Error::source(&err) {
+                        Some(src) => format!("{err}: {src}"),
+                        None => err.to_string(),
+                    };
+                    let msg = format!("gate '{server_id}:{tool}' failed: {detail}");
+                    self.ctx.stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(step.number),
+                        stage_index: None,
+                        agent_id: None,
+                        kind: StreamEventKind::GateResult,
+                        text: msg.clone(),
+                    })?;
+                    return Ok((false, Some(msg)));
+                }
+            }
+        }
+
+        Ok((true, None))
+    }
+
+    fn reconstruct_step_history(
+        &self,
+        step_number: usize,
+    ) -> Result<(Vec<StageTurnRecord>, Option<usize>, bool)> {
+        let reports = self.ctx.checkpoints.load_reports(step_number, None)?;
+        let last_is_step_passed = reports
+            .last()
+            .is_some_and(|r| r.stage_index == 0 && r.report.status == ReportStatus::StepPassed);
+        let mut history: Vec<StageTurnRecord> = Vec::new();
+        let mut current_group: Option<(usize, StageTurnRecord)> = None;
+
+        for stamped in reports {
+            if stamped.stage_index == 0 {
+                continue;
+            }
+            let same_group = current_group.as_ref().is_some_and(|(r, rec)| {
+                *r == stamped.round && rec.stage_index == stamped.stage_index
+            });
+            if !same_group {
+                if let Some((_, record)) = current_group.take() {
+                    history.push(record);
+                }
+                let Some(stage_cfg) = self.ctx.project.stages.get(stamped.stage_index) else {
+                    continue;
+                };
+                let role = self.find_role(&stage_cfg.role_id)?;
+                current_group = Some((
+                    stamped.round,
+                    StageTurnRecord {
+                        stage_index: stamped.stage_index,
+                        kind: role.kind,
+                        expected_agents: stage_cfg.agent_ids.clone(),
+                        statuses: vec![(stamped.agent_id, stamped.report.status)],
+                    },
+                ));
+            } else if let Some((_, ref mut record)) = current_group {
+                record
+                    .statuses
+                    .push((stamped.agent_id, stamped.report.status));
+            }
+        }
+
+        if let Some((_, record)) = current_group {
+            history.push(record);
+        }
+
+        let last_stage_run = history.last().map(|r| r.stage_index);
+        Ok((history, last_stage_run, last_is_step_passed))
     }
 
     fn pick_next_step_index(
@@ -490,6 +1039,18 @@ impl WorkflowEngine {
                     message: format!("step {step_number} is not Pending"),
                 });
             }
+            return Ok(Some(idx));
+        }
+
+        if state.step_statuses.get(state.current_step_index) == Some(&StepStatus::AwaitingOperator)
+        {
+            return Ok(Some(state.current_step_index));
+        }
+        if let Some(idx) = state
+            .step_statuses
+            .iter()
+            .position(|&status| status == StepStatus::AwaitingOperator)
+        {
             return Ok(Some(idx));
         }
 
@@ -794,7 +1355,7 @@ mod tests {
     };
     use crate::Error;
     use crate::checkpoint::{
-        AgentReport, CheckpointManager, OperatorDecision, ReportStatus, StepStatus,
+        AgentReport, CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StepStatus,
         SubtaskAllocation,
     };
     use crate::config::{
@@ -803,7 +1364,7 @@ mod tests {
     };
     use crate::docker::{MockContainerBackend, MockInferenceControl, ResourceManager};
     use crate::llm::{AgentDriver, MockAgentDriver};
-    use crate::mcp::McpGatekeeper;
+    use crate::mcp::{McpGatekeeper, MockMcpTransport};
     use crate::plan::ImplementationPlan;
     use crate::security::SecretRedactor;
     use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEventKind};
@@ -978,6 +1539,17 @@ mod tests {
         AgentReport {
             status: ReportStatus::Denied,
             summary: "Validation denied".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: Some(feedback.to_string()),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn escalate_report(feedback: &str) -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Escalate,
+            summary: "Escalating to operator".to_string(),
             target_stage: None,
             allocations: Vec::new(),
             feedback: Some(feedback.to_string()),
@@ -1483,7 +2055,7 @@ mod tests {
         assert_eq!(orch_prompts.len(), 4);
         assert!(orch_prompts[1].contains("protocol violation"));
 
-        // Second consecutive violation returns Err(Error::Engine { .. })
+        // Second consecutive violation enters AwaitingOperator
         let dir2 = tempfile::tempdir().unwrap();
         let mut ctx2 = test_context(
             dir2.path(),
@@ -1498,11 +2070,14 @@ mod tests {
         mock2.push("orch", Ok(dispatch_report(2, "val", "Skip 2")));
 
         let engine2 = WorkflowEngine::new(ctx2).unwrap();
-        let err = engine2
+        let outcome2 = engine2
             .run(RunOptions::default(), CancellationToken::new())
             .await
-            .unwrap_err();
-        assert!(matches!(err, Error::Engine { step_number: 1, .. }));
+            .unwrap();
+        assert!(matches!(
+            outcome2,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
     }
 
     #[tokio::test]
@@ -1719,7 +2294,7 @@ mod tests {
             &["src".to_string()]
         );
 
-        // Two consecutive stage Error::Report violations return Err(Error::Engine { .. })
+        // Two consecutive stage Error::Report violations enter AwaitingOperator
         let dir2 = tempfile::tempdir().unwrap();
         let mut ctx2 = test_context(
             dir2.path(),
@@ -1746,10 +2321,723 @@ mod tests {
         );
 
         let engine2 = WorkflowEngine::new(ctx2).unwrap();
-        let err2 = engine2
+        let outcome2 = engine2
             .run(RunOptions::default(), CancellationToken::new())
             .await
-            .unwrap_err();
-        assert!(matches!(err2, Error::Engine { step_number: 1, .. }));
+            .unwrap();
+        assert!(matches!(
+            outcome2,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deny_revise_confirm_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Initial implement")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Initial validate")));
+        mock.push("val", Ok(denied_report("Missing test")));
+        mock.push(
+            "orch",
+            Ok(dispatch_report(1, "imp", "Revise implementation")),
+        );
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Re-validate")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+        assert_eq!(state.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn retries_exhausted_awaits_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.max_step_retries = 1;
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Attempt 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate 1")));
+        mock.push("val", Ok(denied_report("Denial 1")));
+        // Retry 1 (allowed, retry_count == 1 <= max_step_retries)
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate 2")));
+        mock.push("val", Ok(denied_report("Denial 2")));
+        // Retry 2 (exceeds max_step_retries == 1 -> AwaitingOperator)
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 2")));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.phase, EnginePhase::AwaitingOperator);
+        assert!(state.awaiting_reason.is_some());
+        assert_eq!(state.retry_count, 2);
+    }
+
+    #[tokio::test]
+    async fn escalate_awaits_operator_headless() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push(
+            "orch",
+            Ok(escalate_report("Requirement conflict in step 1")),
+        );
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "Requirement conflict in step 1".to_string(),
+            }
+        );
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.phase, EnginePhase::AwaitingOperator);
+        assert_eq!(
+            state.awaiting_reason.as_deref(),
+            Some("Requirement conflict in step 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn stored_approve_resumes_after_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        // First run: denial -> retry (retry_count = 1) -> Escalate -> AwaitingOperator
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate")));
+        mock.push("val", Ok(denied_report("Needs clarification")));
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(escalate_report("Need operator decision")));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let first_outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            first_outcome,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
+
+        let mut saved = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(saved.retry_count, 1);
+        assert_eq!(saved.step_statuses[0], StepStatus::AwaitingOperator);
+        saved.operator_decision = Some(OperatorDecision::Approve);
+        checkpoints.save_state(&saved).unwrap();
+
+        let invocations_before = mock.invocations().len();
+
+        // Second run: stored Approve resets retry_count to 0 and runs orchestrator turn
+        mock.push(
+            "orch",
+            Ok(dispatch_report(2, "val", "Validate after approve")),
+        );
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let second_outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(second_outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert!(mock.invocations().len() > invocations_before);
+        assert_eq!(mock.invocations()[invocations_before].stage_index, 0);
+
+        let final_state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(final_state.retry_count, 0);
+        assert_eq!(final_state.operator_decision, None);
+        assert_eq!(final_state.step_statuses[0], StepStatus::Passed);
+
+        // Also verify stored Reject after escalation resets retry_count to 0 and feeds feedback note,
+        // and stored Approve in GateAndOperator mode passes the step on resume.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        let cp2 = ctx2.checkpoints.clone();
+        let mock2 = attach_mock_driver(&mut ctx2);
+        mock2.push("orch", Ok(escalate_report("Escalated in 2-stage")));
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let out_esc = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(out_esc, RunOutcome::AwaitingOperator { .. }));
+
+        let mut st2 = cp2.load_state().unwrap().unwrap();
+        st2.retry_count = 2;
+        st2.operator_decision = Some(OperatorDecision::Reject {
+            feedback: "try approach B".to_string(),
+        });
+        cp2.save_state(&st2).unwrap();
+
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Implement B")));
+        mock2.push("imp", Ok(complete_report()));
+        mock2.push("orch", Ok(step_passed_report()));
+
+        let out_gate = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(out_gate, RunOutcome::AwaitingOperator { .. }));
+        assert!(
+            mock2.invocations()[1]
+                .user_prompt
+                .contains("try approach B")
+        );
+
+        let mut st3 = cp2.load_state().unwrap().unwrap();
+        assert_eq!(st3.retry_count, 0);
+        st3.operator_decision = Some(OperatorDecision::Approve);
+        cp2.save_state(&st3).unwrap();
+
+        let out_done = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(out_done, RunOutcome::Completed { steps_passed: 1 });
+
+        // Verify that in Agents mode, escalating with PASS_CHECK_AWAITING_REASON after a validator
+        // denial cannot spoof AwaitingContext::PassCheck on resume and still enforces validator confirmation.
+        let dir3 = tempfile::tempdir().unwrap();
+        let mut ctx3 = test_context(
+            dir3.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let cp3 = ctx3.checkpoints.clone();
+        let mock3 = attach_mock_driver(&mut ctx3);
+        mock3.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock3.push("imp", Ok(complete_report()));
+        mock3.push("orch", Ok(dispatch_report(2, "val", "Validate")));
+        mock3.push("val", Ok(denied_report("Still broken")));
+        mock3.push(
+            "orch",
+            Ok(escalate_report(super::PASS_CHECK_AWAITING_REASON)),
+        );
+
+        let engine3 = WorkflowEngine::new(ctx3).unwrap();
+        let out3_esc = engine3
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(out3_esc, RunOutcome::AwaitingOperator { .. }));
+
+        let mut st3_res = cp3.load_state().unwrap().unwrap();
+        st3_res.operator_decision = Some(OperatorDecision::Approve);
+        cp3.save_state(&st3_res).unwrap();
+
+        // Premature StepPassed after resume is rejected because reconstructed history has Denied
+        mock3.push("orch", Ok(step_passed_report()));
+        mock3.push("orch", Ok(dispatch_report(1, "imp", "Fix after denial")));
+        mock3.push("imp", Ok(complete_report()));
+        mock3.push("orch", Ok(dispatch_report(2, "val", "Re-validate")));
+        mock3.push("val", Ok(confirmed_report()));
+        mock3.push("orch", Ok(step_passed_report()));
+
+        let out3_done = engine3
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(out3_done, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(cp3.load_state().unwrap().unwrap().retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn gate_failure_blocks_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.gate_tools = vec!["cargo:test".to_string(), "cargo:clippy".to_string()];
+
+        let transport = Arc::new(
+            MockMcpTransport::new("cargo")
+                .with_failing_tool("test", "assertion failed in unit test")
+                .with_tool(
+                    "clippy",
+                    serde_json::json!({ "content": [{ "type": "text", "text": "clean" }] }),
+                ),
+        );
+        let mut gk = McpGatekeeper::new();
+        gk.register("cargo", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let stream = Arc::clone(&ctx.stream);
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate")));
+        mock.push("val", Ok(confirmed_report()));
+        // StepPassed triggers gate -> first gate tool fails -> stops at first failure and returns to orchestrator with gate note
+        mock.push("orch", Ok(step_passed_report()));
+        mock.push(
+            "orch",
+            Ok(escalate_report("Gate failed; awaiting operator")),
+        );
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
+
+        // Stopped at the first failure: cargo:clippy was never called
+        assert_eq!(transport.calls().len(), 1);
+        assert_eq!(transport.calls()[0].0, "test");
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_ne!(state.step_statuses[0], StepStatus::Passed);
+
+        let orch_prompts: Vec<String> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.stage_index == 0)
+            .map(|inv| inv.user_prompt)
+            .collect();
+        assert_eq!(orch_prompts.len(), 4);
+        assert!(orch_prompts[3].contains("gate"));
+        assert!(orch_prompts[3].contains("assertion failed in unit test"));
+
+        let gate_events: Vec<_> = stream
+            .recent(50)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == StreamEventKind::GateResult)
+            .collect();
+        assert_eq!(gate_events.len(), 1);
+        assert!(gate_events[0].text.contains("cargo:test"));
+
+        // Also verify isError=true gate result in GateAndOperator mode blocks pass and increments retry on Retry dispatch
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        ctx2.project.gate_tools = vec!["cargo:lint".to_string()];
+        let mut gk2 = McpGatekeeper::new();
+        gk2.register(
+            "cargo",
+            Arc::new(MockMcpTransport::new("cargo").with_tool(
+                "lint",
+                serde_json::json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "unused variable" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx2.gatekeeper = Arc::new(gk2);
+        let cp2 = ctx2.checkpoints.clone();
+        let mock2 = attach_mock_driver(&mut ctx2);
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock2.push("imp", Ok(complete_report()));
+        mock2.push("orch", Ok(step_passed_report()));
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Fix lint")));
+        mock2.push("imp", Ok(complete_report()));
+        mock2.push("orch", Ok(escalate_report("Stop after retry")));
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let _ = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        let st2 = cp2.load_state().unwrap().unwrap();
+        assert_eq!(st2.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn gate_and_operator_approve_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        ctx.project.gate_tools = vec!["cargo:check".to_string()];
+
+        let mut gk = McpGatekeeper::new();
+        gk.register(
+            "cargo",
+            Arc::new(MockMcpTransport::new("cargo").with_tool(
+                "check",
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": "ok" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        engine
+            .operator_sender()
+            .send(OperatorDecision::Approve)
+            .await
+            .unwrap();
+
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: true,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn gate_and_operator_reject_feeds_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Initial work")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(step_passed_report()));
+        // After operator Reject { feedback: "fix the README" }, orchestrator runs again
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Update README")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let tx = engine.operator_sender();
+        tx.send(OperatorDecision::Reject {
+            feedback: "fix the README".to_string(),
+        })
+        .await
+        .unwrap();
+        tx.send(OperatorDecision::Approve).await.unwrap();
+
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: true,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let orch_prompts: Vec<String> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.stage_index == 0)
+            .map(|inv| inv.user_prompt)
+            .collect();
+        assert_eq!(orch_prompts.len(), 4);
+        assert!(orch_prompts[2].contains("fix the README"));
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.retry_count, 1);
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn protocol_violation_twice_awaits_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(2, "val", "Violation 1")));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Violation 2")));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        match outcome {
+            RunOutcome::AwaitingOperator {
+                step_number,
+                reason,
+            } => {
+                assert_eq!(step_number, 1);
+                assert!(reason.contains("protocol violation"));
+            }
+            other => panic!("expected AwaitingOperator, got {other:?}"),
+        }
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.phase, EnginePhase::AwaitingOperator);
+    }
+
+    #[tokio::test]
+    async fn retry_without_denial_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.max_step_retries = 1;
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Attempt 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 2")));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.retry_count, 2);
+    }
+
+    #[tokio::test]
+    async fn repeated_failed_gate_without_work_awaits_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.gate_tools = vec!["cargo:test".to_string()];
+
+        let mut gk = McpGatekeeper::new();
+        gk.register(
+            "cargo",
+            Arc::new(MockMcpTransport::new("cargo").with_failing_tool("test", "unit test failure")),
+            Vec::new(),
+        );
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        match outcome {
+            RunOutcome::AwaitingOperator {
+                step_number,
+                reason,
+            } => {
+                assert_eq!(step_number, 1);
+                assert!(reason.contains("without new work"));
+            }
+            other => panic!("expected AwaitingOperator, got {other:?}"),
+        }
+
+        let orch_prompts: Vec<String> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.stage_index == 0)
+            .map(|inv| inv.user_prompt)
+            .collect();
+        assert_eq!(orch_prompts.len(), 5);
+        assert!(orch_prompts[4].contains("without new work"));
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+
+        // Also cover GateAndOperator repeated failed gate without new work
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        ctx2.project.gate_tools = vec!["cargo:test".to_string()];
+        let mut gk2 = McpGatekeeper::new();
+        gk2.register(
+            "cargo",
+            Arc::new(MockMcpTransport::new("cargo").with_failing_tool("test", "unit test failure")),
+            Vec::new(),
+        );
+        ctx2.gatekeeper = Arc::new(gk2);
+        let mock2 = attach_mock_driver(&mut ctx2);
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Implement")));
+        mock2.push("imp", Ok(complete_report()));
+        mock2.push("orch", Ok(step_passed_report()));
+        mock2.push("orch", Ok(step_passed_report()));
+        mock2.push("orch", Ok(step_passed_report()));
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let outcome2 = engine2
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome2,
+            RunOutcome::AwaitingOperator { step_number: 1, .. }
+        ));
     }
 }

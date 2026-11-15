@@ -461,7 +461,7 @@ stateDiagram-v2
 
 - A round = one orchestrator turn + the dispatched stage turn. After every stage turn, control returns to the orchestrator.
 - `Dispatch.target_stage` must be either the next stage after the last one run in this plan step, or an earlier non-orchestrator, non-validator stage (a **retry**). Anything else is a protocol violation.
-- A retry is counted when the orchestrator dispatches back to an earlier stage after a `Denied` report or a failed gate. `retry_count > max_step_retries` → `AwaitingOperator`. The `on_step_retry` hook runs before each retry.
+- Every dispatch back to an earlier stage counts as a retry (amended 2026-11-15: counting only retries after a `Denied` report or a failed gate let a step loop forever). A `StepPassed` whose gate fails with no stage turn since the previous failed gate is a protocol violation, so every path through a step is bounded. `retry_count > max_step_retries` → `AwaitingOperator`. The `on_step_retry` hook runs before each retry.
 - `Blocked` from an implementer is passed to the orchestrator; the orchestrator decides (re-dispatch, or `Escalate`).
 
 #### 5.10.2 Pass rule (enforced by Orrery, not the orchestrator)
