@@ -7,8 +7,8 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::{
-    AgentReport, CheckpointManager, EnginePhase, HookResult, OperatorDecision, ReportStatus,
-    StampedReport, StepStatus, SubtaskAllocation, WorkflowCheckpoint,
+    AgentReport, CheckpointManager, EnginePhase, HookResult, OperatorDecision, ReconcileOutcome,
+    ReportStatus, StampedReport, StepStatus, SubtaskAllocation, WorkflowCheckpoint,
 };
 use crate::config::{
     AgentBackend, AgentConfig, ExecutionMode, HookEvent, HookFailure, HooksConfig, McpServerConfig,
@@ -295,6 +295,18 @@ pub struct WorkflowEngine {
     current_lease: tokio::sync::Mutex<Option<Arc<StageLease>>>,
 }
 
+macro_rules! race_cancel {
+    ($self:expr, $cancel:expr, $state:expr, $step_idx:expr, $step:expr, $fut:expr) => {
+        tokio::select! {
+            biased;
+            () = $cancel.cancelled() => {
+                return $self.handle_cancel(&mut $state, $step_idx, $step).await;
+            }
+            res = $fut => res,
+        }
+    };
+}
+
 impl WorkflowEngine {
     pub fn new(ctx: EngineContext) -> Result<Self> {
         ctx.project.validate_for_run(&ctx.roles, &ctx.agents)?;
@@ -317,14 +329,38 @@ impl WorkflowEngine {
         self.operator_tx.clone()
     }
 
-    pub async fn run(&self, opts: RunOptions, _cancel: CancellationToken) -> Result<RunOutcome> {
+    pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
         let mode = opts.mode.unwrap_or(self.ctx.project.execution_mode);
         let cycles = opts.cycles.unwrap_or(self.ctx.project.cycle_count);
         let validation_mode = self.ctx.project.effective_validation_mode(&self.ctx.roles);
         let mut requested_start = opts.start_step;
 
         let mut state = match self.ctx.checkpoints.load_state()? {
-            Some(loaded) => loaded,
+            Some(mut loaded) => {
+                if let ReconcileOutcome::Updated {
+                    changed_steps,
+                    appended,
+                    removed,
+                } = loaded.reconcile(&self.ctx.plan)?
+                {
+                    let changed_numbers: Vec<usize> = changed_steps
+                        .iter()
+                        .map(|&i| self.ctx.plan.steps.get(i).map_or(i + 1, |s| s.number))
+                        .collect();
+                    self.ctx.stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: None,
+                        stage_index: None,
+                        agent_id: None,
+                        kind: StreamEventKind::SystemNotice,
+                        text: format!(
+                            "plan reconciled: changed steps {changed_numbers:?}, appended {appended}, removed {removed}"
+                        ),
+                    })?;
+                    self.ctx.checkpoints.save_state(&loaded)?;
+                }
+                loaded
+            }
             None => WorkflowCheckpoint::new(&self.ctx.plan),
         };
 
@@ -387,20 +423,31 @@ impl WorkflowEngine {
                             .awaiting_reason
                             .clone()
                             .unwrap_or_else(|| "awaiting operator".to_string());
-                        self.enter_awaiting_operator(
-                            &mut state,
-                            &mut resumed,
-                            reason,
-                            context,
-                            opts.wait_for_operator,
-                        )
-                        .await?
+                        race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.enter_awaiting_operator(
+                                &mut state,
+                                &mut resumed,
+                                reason,
+                                context,
+                                opts.wait_for_operator,
+                            )
+                        )?
                     }
                 };
                 match resolution {
                     AwaitResolution::PassStep => {
-                        match self
-                            .complete_step_pass(
+                        match race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.complete_step_pass(
                                 &mut state,
                                 &mut resumed,
                                 step,
@@ -408,8 +455,7 @@ impl WorkflowEngine {
                                 cycles,
                                 opts.wait_for_operator,
                             )
-                            .await?
-                        {
+                        )? {
                             StepPassOutcome::FinishedRun(outcome) => return Ok(outcome),
                             StepPassOutcome::NextStep => continue,
                             StepPassOutcome::ContinueRound => resumed,
@@ -418,6 +464,32 @@ impl WorkflowEngine {
                     AwaitResolution::ContinueOrchestrator => resumed,
                     AwaitResolution::HaltRun(outcome) => return Ok(outcome),
                 }
+            } else if state.step_statuses[step_idx] == StepStatus::InProgress {
+                self.ctx
+                    .checkpoints
+                    .delete_reports(step.number, state.round)?;
+                let (history, last_stage_run, _) = self.reconstruct_step_history(step.number)?;
+                state.round = state.round.saturating_sub(1);
+                state.active_stage_index = None;
+                state.awaiting_reason = None;
+                let mut resumed = StepRunState {
+                    step_idx,
+                    step_number: step.number,
+                    notes: Vec::new(),
+                    history,
+                    last_stage_run,
+                    consecutive_violations: 0,
+                    stage_ran_since_gate_failure: true,
+                };
+                if let Some(decision) = state.operator_decision.take() {
+                    let _ = self.apply_operator_decision(
+                        &mut state,
+                        &mut resumed,
+                        AwaitingContext::HaltOrEscalation,
+                        decision,
+                    )?;
+                }
+                resumed
             } else {
                 state.step_statuses[step_idx] = StepStatus::InProgress;
                 state.round = 0;
@@ -445,20 +517,28 @@ impl WorkflowEngine {
                         decision,
                     )?;
                 }
-                if let HookOutcome::Halt(reason) = self
-                    .run_hook(&mut state, step, HookEvent::StepStart)
-                    .await?
-                {
-                    match self
-                        .enter_awaiting_operator(
+                if let HookOutcome::Halt(reason) = race_cancel!(
+                    self,
+                    cancel,
+                    state,
+                    step_idx,
+                    step,
+                    self.run_hook(&mut state, step, HookEvent::StepStart)
+                )? {
+                    match race_cancel!(
+                        self,
+                        cancel,
+                        state,
+                        step_idx,
+                        step,
+                        self.enter_awaiting_operator(
                             &mut state,
                             &mut fresh,
                             reason,
                             AwaitingContext::HaltOrEscalation,
                             opts.wait_for_operator,
                         )
-                        .await?
-                    {
+                    )? {
                         AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {}
                         AwaitResolution::HaltRun(outcome) => return Ok(outcome),
                     }
@@ -478,21 +558,29 @@ impl WorkflowEngine {
                 self.ctx.checkpoints.save_state(&state)?;
 
                 let turn_notes = std::mem::take(&mut step_state.notes);
-                let orch_report = match self
-                    .run_orchestrator_turn(&state, step, &stage_summaries, &turn_notes)
-                    .await
-                {
+                let orch_report = match race_cancel!(
+                    self,
+                    cancel,
+                    state,
+                    step_idx,
+                    step,
+                    self.run_orchestrator_turn(&state, step, &stage_summaries, &turn_notes)
+                ) {
                     Ok(report) => report,
                     Err(Error::Report { message }) => {
-                        if let Some(outcome) = self
-                            .record_violation(
+                        if let Some(outcome) = race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.record_violation(
                                 &mut state,
                                 &mut step_state,
                                 &message,
                                 opts.wait_for_operator,
                             )
-                            .await?
-                        {
+                        )? {
                             return Ok(outcome);
                         }
                         continue;
@@ -503,15 +591,19 @@ impl WorkflowEngine {
                 match orch_report.status {
                     ReportStatus::Dispatch => {
                         let Some(target_stage) = orch_report.target_stage else {
-                            if let Some(outcome) = self
-                                .record_violation(
+                            if let Some(outcome) = race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.record_violation(
                                     &mut state,
                                     &mut step_state,
                                     "Dispatch report requires target_stage",
                                     opts.wait_for_operator,
                                 )
-                                .await?
-                            {
+                            )? {
                                 return Ok(outcome);
                             }
                             continue;
@@ -524,15 +616,19 @@ impl WorkflowEngine {
                         ) {
                             Ok(kind) => kind,
                             Err(Error::Engine { message, .. }) => {
-                                if let Some(outcome) = self
-                                    .record_violation(
+                                if let Some(outcome) = race_cancel!(
+                                    self,
+                                    cancel,
+                                    state,
+                                    step_idx,
+                                    step,
+                                    self.record_violation(
                                         &mut state,
                                         &mut step_state,
                                         &message,
                                         opts.wait_for_operator,
                                     )
-                                    .await?
-                                {
+                                )? {
                                     return Ok(outcome);
                                 }
                                 continue;
@@ -543,15 +639,19 @@ impl WorkflowEngine {
                         if let Err(msg) =
                             self.validate_stage_allocations(target_stage, &orch_report.allocations)
                         {
-                            if let Some(outcome) = self
-                                .record_violation(
+                            if let Some(outcome) = race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.record_violation(
                                     &mut state,
                                     &mut step_state,
                                     &msg,
                                     opts.wait_for_operator,
                                 )
-                                .await?
-                            {
+                            )? {
                                 return Ok(outcome);
                             }
                             continue;
@@ -564,36 +664,48 @@ impl WorkflowEngine {
                                     "max step retries ({}) exhausted",
                                     self.ctx.project.max_step_retries
                                 );
-                                match self
-                                    .enter_awaiting_operator(
+                                match race_cancel!(
+                                    self,
+                                    cancel,
+                                    state,
+                                    step_idx,
+                                    step,
+                                    self.enter_awaiting_operator(
                                         &mut state,
                                         &mut step_state,
                                         reason,
                                         AwaitingContext::HaltOrEscalation,
                                         opts.wait_for_operator,
                                     )
-                                    .await?
-                                {
+                                )? {
                                     AwaitResolution::ContinueOrchestrator
                                     | AwaitResolution::PassStep => continue,
                                     AwaitResolution::HaltRun(outcome) => return Ok(outcome),
                                 }
                             }
 
-                            if let HookOutcome::Halt(reason) = self
-                                .run_hook(&mut state, step, HookEvent::StepRetry)
-                                .await?
-                            {
-                                match self
-                                    .enter_awaiting_operator(
+                            if let HookOutcome::Halt(reason) = race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.run_hook(&mut state, step, HookEvent::StepRetry)
+                            )? {
+                                match race_cancel!(
+                                    self,
+                                    cancel,
+                                    state,
+                                    step_idx,
+                                    step,
+                                    self.enter_awaiting_operator(
                                         &mut state,
                                         &mut step_state,
                                         reason,
                                         AwaitingContext::HaltOrEscalation,
                                         opts.wait_for_operator,
                                     )
-                                    .await?
-                                {
+                                )? {
                                     AwaitResolution::ContinueOrchestrator
                                     | AwaitResolution::PassStep => continue,
                                     AwaitResolution::HaltRun(outcome) => return Ok(outcome),
@@ -605,10 +717,19 @@ impl WorkflowEngine {
                         state.active_stage_index = Some(target_stage);
                         self.emit_event(EngineEvent::PhaseChanged(EnginePhase::StageTurn));
 
-                        match self
-                            .run_stage_turn(&state, step, target_stage, &orch_report.allocations)
-                            .await?
-                        {
+                        match race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.run_stage_turn(
+                                &state,
+                                step,
+                                target_stage,
+                                &orch_report.allocations
+                            )
+                        )? {
                             StageTurnOutcome::Completed(record) => {
                                 step_state.consecutive_violations = 0;
                                 step_state.stage_ran_since_gate_failure = true;
@@ -618,15 +739,19 @@ impl WorkflowEngine {
                                 self.ctx.checkpoints.save_state(&state)?;
                             }
                             StageTurnOutcome::ProtocolViolation(msg) => {
-                                if let Some(outcome) = self
-                                    .record_violation(
+                                if let Some(outcome) = race_cancel!(
+                                    self,
+                                    cancel,
+                                    state,
+                                    step_idx,
+                                    step,
+                                    self.record_violation(
                                         &mut state,
                                         &mut step_state,
                                         &msg,
                                         opts.wait_for_operator,
                                     )
-                                    .await?
-                                {
+                                )? {
                                     return Ok(outcome);
                                 }
                                 continue;
@@ -638,16 +763,20 @@ impl WorkflowEngine {
                         let reason = orch_report
                             .feedback
                             .unwrap_or_else(|| orch_report.summary.clone());
-                        match self
-                            .enter_awaiting_operator(
+                        match race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.enter_awaiting_operator(
                                 &mut state,
                                 &mut step_state,
                                 reason,
                                 AwaitingContext::HaltOrEscalation,
                                 opts.wait_for_operator,
                             )
-                            .await?
-                        {
+                        )? {
                             AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {
                                 continue;
                             }
@@ -657,25 +786,41 @@ impl WorkflowEngine {
                     ReportStatus::StepPassed => match validation_mode {
                         ValidationMode::Agents | ValidationMode::Auto => {
                             if let Err(reason) = agents_pass_rule(&step_state.history, true) {
-                                if let Some(outcome) = self
-                                    .record_violation(
+                                if let Some(outcome) = race_cancel!(
+                                    self,
+                                    cancel,
+                                    state,
+                                    step_idx,
+                                    step,
+                                    self.record_violation(
                                         &mut state,
                                         &mut step_state,
                                         &reason,
                                         opts.wait_for_operator,
                                     )
-                                    .await?
-                                {
+                                )? {
                                     return Ok(outcome);
                                 }
                                 continue;
                             }
 
-                            let (gate_ok, gate_note) = self.run_gates(&mut state, step).await?;
+                            let (gate_ok, gate_note) = race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.run_gates(&mut state, step)
+                            )?;
                             match agents_pass_rule(&step_state.history, gate_ok) {
                                 Ok(()) => {
-                                    match self
-                                        .complete_step_pass(
+                                    match race_cancel!(
+                                        self,
+                                        cancel,
+                                        state,
+                                        step_idx,
+                                        step,
+                                        self.complete_step_pass(
                                             &mut state,
                                             &mut step_state,
                                             step,
@@ -683,8 +828,7 @@ impl WorkflowEngine {
                                             cycles,
                                             opts.wait_for_operator,
                                         )
-                                        .await?
-                                    {
+                                    )? {
                                         StepPassOutcome::FinishedRun(outcome) => {
                                             return Ok(outcome);
                                         }
@@ -701,15 +845,19 @@ impl WorkflowEngine {
                                         let msg = format!(
                                             "StepPassed again without new work after a failed gate: {note}"
                                         );
-                                        if let Some(outcome) = self
-                                            .record_violation(
+                                        if let Some(outcome) = race_cancel!(
+                                            self,
+                                            cancel,
+                                            state,
+                                            step_idx,
+                                            step,
+                                            self.record_violation(
                                                 &mut state,
                                                 &mut step_state,
                                                 &msg,
                                                 opts.wait_for_operator,
                                             )
-                                            .await?
-                                        {
+                                        )? {
                                             return Ok(outcome);
                                         }
                                         continue;
@@ -721,7 +869,14 @@ impl WorkflowEngine {
                             }
                         }
                         ValidationMode::GateAndOperator => {
-                            let (gate_ok, gate_note) = self.run_gates(&mut state, step).await?;
+                            let (gate_ok, gate_note) = race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.run_gates(&mut state, step)
+                            )?;
                             if !gate_ok {
                                 let note =
                                     gate_note.unwrap_or_else(|| "gate check failed".to_string());
@@ -729,15 +884,19 @@ impl WorkflowEngine {
                                     let msg = format!(
                                         "StepPassed again without new work after a failed gate: {note}"
                                     );
-                                    if let Some(outcome) = self
-                                        .record_violation(
+                                    if let Some(outcome) = race_cancel!(
+                                        self,
+                                        cancel,
+                                        state,
+                                        step_idx,
+                                        step,
+                                        self.record_violation(
                                             &mut state,
                                             &mut step_state,
                                             &msg,
                                             opts.wait_for_operator,
                                         )
-                                        .await?
-                                    {
+                                    )? {
                                         return Ok(outcome);
                                     }
                                     continue;
@@ -748,19 +907,28 @@ impl WorkflowEngine {
                             }
 
                             step_state.consecutive_violations = 0;
-                            match self
-                                .enter_awaiting_operator(
+                            match race_cancel!(
+                                self,
+                                cancel,
+                                state,
+                                step_idx,
+                                step,
+                                self.enter_awaiting_operator(
                                     &mut state,
                                     &mut step_state,
                                     PASS_CHECK_AWAITING_REASON.to_string(),
                                     AwaitingContext::PassCheck,
                                     opts.wait_for_operator,
                                 )
-                                .await?
-                            {
+                            )? {
                                 AwaitResolution::PassStep => {
-                                    match self
-                                        .complete_step_pass(
+                                    match race_cancel!(
+                                        self,
+                                        cancel,
+                                        state,
+                                        step_idx,
+                                        step,
+                                        self.complete_step_pass(
                                             &mut state,
                                             &mut step_state,
                                             step,
@@ -768,8 +936,7 @@ impl WorkflowEngine {
                                             cycles,
                                             opts.wait_for_operator,
                                         )
-                                        .await?
-                                    {
+                                    )? {
                                         StepPassOutcome::FinishedRun(outcome) => {
                                             return Ok(outcome);
                                         }
@@ -783,15 +950,20 @@ impl WorkflowEngine {
                         }
                     },
                     other => {
-                        if let Some(outcome) = self
-                            .record_violation(
+                        let msg = format!("unexpected orchestrator status {other:?}");
+                        if let Some(outcome) = race_cancel!(
+                            self,
+                            cancel,
+                            state,
+                            step_idx,
+                            step,
+                            self.record_violation(
                                 &mut state,
                                 &mut step_state,
-                                &format!("unexpected orchestrator status {other:?}"),
+                                &msg,
                                 opts.wait_for_operator,
                             )
-                            .await?
-                        {
+                        )? {
                             return Ok(outcome);
                         }
                         continue;
@@ -799,6 +971,48 @@ impl WorkflowEngine {
                 }
             }
         }
+    }
+
+    async fn handle_cancel(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_idx: usize,
+        step: &PlanStep,
+    ) -> Result<RunOutcome> {
+        if let Some(lease_arc) = self.current_lease.lock().await.take() {
+            match Arc::try_unwrap(lease_arc) {
+                Ok(lease) => self.ctx.resources.end_stage(lease).await?,
+                Err(_) => {
+                    return Err(Error::Engine {
+                        step_number: step.number,
+                        message: "stage lease still shared on cancel".into(),
+                    });
+                }
+            }
+        }
+
+        if state.step_statuses[step_idx] == StepStatus::AwaitingOperator {
+            state.phase = EnginePhase::AwaitingOperator;
+            state.active_stage_index = None;
+            self.ctx.checkpoints.save_state(state)?;
+            self.emit_event(EngineEvent::RunFinished(RunOutcome::Interrupted));
+            return Ok(RunOutcome::Interrupted);
+        }
+
+        state.step_statuses[step_idx] = StepStatus::InProgress;
+        state.phase = EnginePhase::OrchestratorTurn;
+        state.active_stage_index = None;
+        state.awaiting_reason = None;
+        self.ctx.checkpoints.save_state(state)?;
+
+        self.run_halt_hook(state, step).await?;
+        if state.phase != EnginePhase::OrchestratorTurn {
+            state.phase = EnginePhase::OrchestratorTurn;
+            self.ctx.checkpoints.save_state(state)?;
+        }
+
+        self.emit_event(EngineEvent::RunFinished(RunOutcome::Interrupted));
+        Ok(RunOutcome::Interrupted)
     }
 
     fn emit_event(&self, event: EngineEvent) {
@@ -1284,15 +1498,18 @@ impl WorkflowEngine {
             return Ok(Some(idx));
         }
 
-        if state.step_statuses.get(state.current_step_index) == Some(&StepStatus::AwaitingOperator)
-        {
+        if matches!(
+            state.step_statuses.get(state.current_step_index),
+            Some(StepStatus::InProgress | StepStatus::AwaitingOperator)
+        ) {
             return Ok(Some(state.current_step_index));
         }
-        if let Some(idx) = state
-            .step_statuses
-            .iter()
-            .position(|&status| status == StepStatus::AwaitingOperator)
-        {
+        if let Some(idx) = state.step_statuses.iter().position(|&status| {
+            matches!(
+                status,
+                StepStatus::InProgress | StepStatus::AwaitingOperator
+            )
+        }) {
             return Ok(Some(idx));
         }
 
@@ -1629,10 +1846,12 @@ mod tests {
     use crate::config::{
         AgentBackend, AgentConfig, ExecutionMode, HookConfig, HookEvent, HookFailure, HooksConfig,
         InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig, McpTransportConfig,
-        ProjectConfig, RoleConfig, RoleKind, StageConfig, WriteToolSpec,
+        ProjectConfig, RoleConfig, RoleKind, StageConfig, WorkspaceMount, WriteToolSpec,
     };
-    use crate::docker::{MockContainerBackend, MockInferenceControl, ResourceManager};
-    use crate::llm::{AgentDriver, MockAgentDriver};
+    use crate::docker::{
+        MockCall, MockContainerBackend, MockInferenceControl, ResourceManager, cli_container_name,
+    };
+    use crate::llm::{AgentDriver, AgentInvocation, MockAgentDriver};
     use crate::mcp::{McpGatekeeper, MockMcpTransport, WriteScope};
     use crate::plan::ImplementationPlan;
     use crate::security::{SecretRedactor, SecretValue};
@@ -4249,5 +4468,570 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    struct StageDelayedMockDriver {
+        orch: Arc<MockAgentDriver>,
+        stages: Arc<MockAgentDriver>,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentDriver for StageDelayedMockDriver {
+        async fn run_turn(
+            &self,
+            inv: &AgentInvocation,
+            mcp: &McpGatekeeper,
+            stream: &LiveStreamHub,
+        ) -> crate::Result<AgentReport> {
+            if inv.stage_index == 0 {
+                self.orch.run_turn(inv, mcp, stream).await
+            } else {
+                self.stages.run_turn(inv, mcp, stream).await
+            }
+        }
+    }
+
+    fn attach_stage_delayed_driver(
+        ctx: &mut EngineContext,
+        stage_delay: Duration,
+    ) -> (Arc<MockAgentDriver>, Arc<MockAgentDriver>) {
+        let orch = Arc::new(MockAgentDriver::new());
+        let stages = Arc::new(MockAgentDriver::new());
+        stages.set_delay(stage_delay);
+        let combined: Arc<dyn AgentDriver> = Arc::new(StageDelayedMockDriver {
+            orch: Arc::clone(&orch),
+            stages: Arc::clone(&stages),
+        });
+        ctx.drivers = DriverSet {
+            chat: Arc::clone(&combined),
+            cli: combined,
+        };
+        (orch, stages)
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_stage_saves_checkpoint_and_closes_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let resources = Arc::clone(&ctx.resources);
+        let stage_agents = vec![ctx.agents[1].clone()];
+
+        let (orch_mock, stage_mock) =
+            attach_stage_delayed_driver(&mut ctx, Duration::from_millis(500));
+        orch_mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step 1")));
+        stage_mock.push("imp", Ok(complete_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_trigger.cancel();
+        });
+
+        let outcome = engine.run(RunOptions::default(), cancel).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Interrupted);
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::InProgress);
+        assert_eq!(state.phase, EnginePhase::OrchestratorTurn);
+        assert_eq!(state.round, 1);
+
+        let new_lease = resources
+            .begin_stage(state.run_id, &stage_agents, true, &[])
+            .await
+            .expect("new begin_stage must succeed after cancel closed the previous lease");
+        resources.end_stage(new_lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancel_runs_halt_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_halt = Some(HookConfig {
+            tool: "notify:halt".to_string(),
+            on_failure: HookFailure::Warn,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("notify").with_tool(
+            "halt",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "halted on cancel" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("notify", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let (orch_mock, stage_mock) =
+            attach_stage_delayed_driver(&mut ctx, Duration::from_millis(500));
+        orch_mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step 1")));
+        stage_mock.push("imp", Ok(complete_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_trigger.cancel();
+        });
+
+        let outcome = engine.run(RunOptions::default(), cancel).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Interrupted);
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "halt");
+        assert_eq!(calls[0].1["orrery"]["event"], "halt");
+        assert_eq!(calls[0].1["orrery"]["step_number"], 1);
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::InProgress);
+        assert_eq!(state.phase, EnginePhase::OrchestratorTurn);
+        assert_eq!(state.hook_results.len(), 1);
+        assert_eq!(state.hook_results[0].event, HookEvent::Halt);
+        assert_eq!(state.hook_results[0].output, "halted on cancel");
+    }
+
+    #[tokio::test]
+    async fn resume_restarts_interrupted_round_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+
+        let (orch_mock, stage_mock) =
+            attach_stage_delayed_driver(&mut ctx, Duration::from_millis(500));
+        orch_mock.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::Dispatch,
+                summary: "Stale round 1 dispatch before interrupt".to_string(),
+                target_stage: Some(1),
+                allocations: vec![SubtaskAllocation {
+                    target_agent_id: "imp".to_string(),
+                    instructions: "Initial interrupted task".to_string(),
+                    write_scope: Vec::new(),
+                }],
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        stage_mock.push("imp", Ok(complete_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_trigger.cancel();
+        });
+
+        let first_outcome = engine.run(RunOptions::default(), cancel).await.unwrap();
+        assert_eq!(first_outcome, RunOutcome::Interrupted);
+
+        // Before resume, round 1's stale orchestrator report exists on disk
+        let stale_reports = checkpoints.load_reports(1, Some(1)).unwrap();
+        assert_eq!(stale_reports.len(), 1);
+        assert_eq!(
+            stale_reports[0].report.summary,
+            "Stale round 1 dispatch before interrupt"
+        );
+
+        // Clear the delay and script a clean pass for the resumed run
+        stage_mock.set_delay(Duration::ZERO);
+        orch_mock.push(
+            "orch",
+            Ok(dispatch_report(1, "imp", "Fresh round 1 dispatch")),
+        );
+        stage_mock.push("imp", Ok(complete_report()));
+        orch_mock.push("orch", Ok(dispatch_report(2, "val", "Validate step 1")));
+        stage_mock.push("val", Ok(confirmed_report()));
+        orch_mock.push("orch", Ok(step_passed_report()));
+
+        let orch_count_before = orch_mock.invocations().len();
+        assert_eq!(orch_count_before, 1);
+
+        let second_outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(second_outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let orch_invocations = orch_mock.invocations();
+        let resumed_first = &orch_invocations[orch_count_before];
+        assert_eq!(resumed_first.stage_index, 0);
+        assert_eq!(resumed_first.agent.agent_id, "orch");
+        assert_eq!(resumed_first.round, 1);
+        assert!(
+            !resumed_first
+                .user_prompt
+                .contains("Stale round 1 dispatch before interrupt")
+        );
+
+        let round1_reports = checkpoints.load_reports(1, Some(1)).unwrap();
+        assert!(
+            round1_reports
+                .iter()
+                .all(|r| r.report.summary != "Stale round 1 dispatch before interrupt")
+        );
+    }
+
+    #[tokio::test]
+    async fn edited_passed_step_blocks_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx1 = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock1 = attach_mock_driver(&mut ctx1);
+        script_passing_step(&mock1, "orch", "imp", "val");
+
+        let engine1 = WorkflowEngine::new(ctx1).unwrap();
+        let outcome1 = engine1
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome1, RunOutcome::Completed { steps_passed: 1 });
+
+        let mut ctx2 = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx2.plan = ImplementationPlan::parse(
+            "## Step 1: First\nEdited step 1 body\n## Step 2: Second\nStep 2 body\n## Step 3: Third\nStep 3 body\n",
+            "## Step ",
+        )
+        .unwrap();
+        let mock2 = attach_mock_driver(&mut ctx2);
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let err = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        match err {
+            Error::Engine {
+                step_number,
+                message,
+            } => {
+                assert_eq!(step_number, 1);
+                assert!(message.contains("orrery reset --step 1"));
+            }
+            other => panic!("expected Error::Engine for step 1, got {other:?}"),
+        }
+        assert!(mock2.invocations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn appended_step_accepted_on_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx1 = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock1 = attach_mock_driver(&mut ctx1);
+        script_passing_step(&mock1, "orch", "imp", "val");
+
+        let engine1 = WorkflowEngine::new(ctx1).unwrap();
+        let outcome1 = engine1
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome1, RunOutcome::Completed { steps_passed: 1 });
+
+        let mut ctx2 = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx2.plan = ImplementationPlan::parse(
+            "## Step 1: First\nStep 1 body\n## Step 2: Second\nEdited step 2 body\n## Step 3: Third\nStep 3 body\n## Step 4: Fourth\nStep 4 body\n",
+            "## Step ",
+        )
+        .unwrap();
+        let checkpoints = ctx2.checkpoints.clone();
+        let mock2 = attach_mock_driver(&mut ctx2);
+        script_passing_step(&mock2, "orch", "imp", "val");
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let outcome2 = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome2, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses.len(), 4);
+        assert_eq!(
+            state.step_statuses,
+            vec![
+                StepStatus::Passed,
+                StepStatus::Passed,
+                StepStatus::Pending,
+                StepStatus::Pending,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn start_step_must_be_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    start_step: Some(2),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.current_step_index, 1);
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Passed, StepStatus::Pending]
+        );
+
+        let invocations_before = mock.invocations().len();
+        let err = engine
+            .run(
+                RunOptions {
+                    start_step: Some(2),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            Error::Engine { step_number, .. } => assert_eq!(step_number, 2),
+            other => panic!("expected Error::Engine for non-Pending step 2, got {other:?}"),
+        }
+        assert_eq!(mock.invocations().len(), invocations_before);
+
+        let missing_err = engine
+            .run(
+                RunOptions {
+                    start_step: Some(99),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        match missing_err {
+            Error::Engine { step_number, .. } => assert_eq!(step_number, 99),
+            other => panic!("expected Error::Engine for missing step 99, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_cli_stage_removes_container() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+
+        let imp_agent = ctx
+            .agents
+            .iter_mut()
+            .find(|a| a.agent_id == "imp")
+            .expect("stage-1 agent imp must exist");
+        imp_agent.backend = AgentBackend::AgentCli {
+            image: "alpine:3.20".to_string(),
+            command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+            workspace_mount: WorkspaceMount::ReadWrite,
+            timeout_secs: 60,
+            memory_limit_mb: 512,
+            secret_env: None,
+            keychain_service: None,
+            keychain_account: None,
+        };
+
+        let container_backend = Arc::new(MockContainerBackend::new());
+        ctx.resources = Arc::new(ResourceManager::new(
+            Arc::clone(&container_backend) as _,
+            Arc::new(MockInferenceControl::new()),
+            ctx.project.inference.clone(),
+            ctx.project.max_concurrent_agents,
+            dir.path().to_path_buf(),
+        ));
+
+        let chat_mock = Arc::new(MockAgentDriver::new());
+        chat_mock.push("orch", Ok(dispatch_report(1, "imp", "Run CLI implementer")));
+
+        let cli_mock = Arc::new(MockAgentDriver::new());
+        cli_mock.set_delay(Duration::from_millis(500));
+        cli_mock.push("imp", Ok(complete_report()));
+
+        ctx.drivers = DriverSet {
+            chat: chat_mock,
+            cli: cli_mock,
+        };
+
+        let checkpoints = ctx.checkpoints.clone();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_trigger.cancel();
+        });
+
+        let outcome = engine.run(RunOptions::default(), cancel).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Interrupted);
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::InProgress);
+        assert!(
+            container_backend
+                .calls()
+                .contains(&MockCall::Remove(cli_container_name(&state.run_id, "imp")))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_while_awaiting_operator_keeps_awaiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_halt = Some(HookConfig {
+            tool: "notify:halt".to_string(),
+            on_failure: HookFailure::Warn,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("notify").with_tool(
+            "halt",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "halted on escalate" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("notify", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        mock.push("orch", Ok(escalate_report("Need operator guidance")));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let cancel = CancellationToken::new();
+        let cancel_trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_trigger.cancel();
+        });
+
+        let first_outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: true,
+                    ..Default::default()
+                },
+                cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_outcome, RunOutcome::Interrupted);
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.phase, EnginePhase::AwaitingOperator);
+        assert_eq!(
+            state.awaiting_reason.as_deref(),
+            Some("Need operator guidance")
+        );
+        assert_eq!(state.hook_results.len(), 1);
+        assert_eq!(state.hook_results[0].event, HookEvent::Halt);
+        assert_eq!(transport.calls().len(), 1);
+
+        let invocations_after_first = mock.invocations().len();
+        assert_eq!(invocations_after_first, 1);
+
+        let second_outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            second_outcome,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "Need operator guidance".to_string(),
+            }
+        );
+        assert_eq!(mock.invocations().len(), invocations_after_first);
+        assert_eq!(transport.calls().len(), 1);
     }
 }
