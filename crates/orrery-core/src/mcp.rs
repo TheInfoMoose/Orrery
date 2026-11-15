@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -339,6 +340,105 @@ impl McpTransport for MockMcpTransport {
     }
 }
 
+fn is_executable_regular_file(meta: &std::fs::Metadata) -> bool {
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+pub fn resolve_stdio_command(
+    command: &str,
+    project_root: &Path,
+    search_path: Option<&OsStr>,
+) -> Result<PathBuf> {
+    if command.trim().is_empty() {
+        return Err(Error::Validation {
+            field: "transport.command".to_string(),
+            message: "command must not be empty".to_string(),
+        });
+    }
+
+    let canonical_cmd = if !command.contains('/') && !command.contains('\\') {
+        let mut found = None;
+        if let Some(paths) = search_path {
+            for entry in std::env::split_paths(paths) {
+                if entry.as_os_str().is_empty() || !entry.is_absolute() {
+                    continue;
+                }
+                let candidate = entry.join(command);
+                if let Ok(meta) = std::fs::metadata(&candidate)
+                    && is_executable_regular_file(&meta)
+                {
+                    let canonical =
+                        std::fs::canonicalize(&candidate).map_err(|source| Error::Io {
+                            path: candidate,
+                            source,
+                        })?;
+                    found = Some(canonical);
+                    break;
+                }
+            }
+        }
+        match found {
+            Some(path) => path,
+            None => {
+                return Err(Error::Validation {
+                    field: "transport.command".to_string(),
+                    message: format!("'{command}' not found on PATH"),
+                });
+            }
+        }
+    } else {
+        let cmd_path = Path::new(command);
+        if !cmd_path.is_absolute() {
+            return Err(Error::Validation {
+                field: "transport.command".to_string(),
+                message: format!("relative stdio command '{command}' is not allowed"),
+            });
+        }
+        let canonical = std::fs::canonicalize(cmd_path).map_err(|source| Error::Io {
+            path: cmd_path.to_path_buf(),
+            source,
+        })?;
+        let meta = std::fs::metadata(&canonical).map_err(|source| Error::Io {
+            path: canonical.clone(),
+            source,
+        })?;
+        if !is_executable_regular_file(&meta) {
+            return Err(Error::Validation {
+                field: "transport.command".to_string(),
+                message: format!(
+                    "stdio command '{}' must be an executable regular file",
+                    canonical.display()
+                ),
+            });
+        }
+        canonical
+    };
+
+    let canonical_root = std::fs::canonicalize(project_root).map_err(|source| Error::Io {
+        path: project_root.to_path_buf(),
+        source,
+    })?;
+    let canonical_orrery = canonical_root.join(".orrery");
+    if canonical_cmd.starts_with(&canonical_root) && !canonical_cmd.starts_with(&canonical_orrery) {
+        return Err(Error::Security {
+            message: "stdio command is inside the agent-writable workspace".to_string(),
+        });
+    }
+
+    Ok(canonical_cmd)
+}
+
 pub struct RmcpTransport {
     server_id: String,
     service: rmcp::service::RunningService<rmcp::RoleClient, ()>,
@@ -346,11 +446,19 @@ pub struct RmcpTransport {
 
 impl RmcpTransport {
     pub async fn connect(server: &McpServerConfig, secrets: &dyn SecretStore) -> Result<Self> {
+        Self::connect_in(server, secrets, Path::new(".")).await
+    }
+
+    pub async fn connect_in(
+        server: &McpServerConfig,
+        secrets: &dyn SecretStore,
+        workdir: &Path,
+    ) -> Result<Self> {
         let server_id = server.server_id.clone();
         let service = match &server.transport {
             McpTransportConfig::Stdio { command, args } => {
                 let mut cmd = tokio::process::Command::new(command);
-                cmd.args(args);
+                cmd.args(args).current_dir(workdir);
                 let transport =
                     rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| Error::Mcp {
                         server_id: server_id.clone(),
@@ -450,12 +558,39 @@ impl McpTransport for RmcpTransport {
 
 pub struct RmcpConnector {
     pub secrets: Arc<dyn SecretStore>,
+    pub project_root: PathBuf,
+    pub search_path: Option<OsString>,
 }
 
 #[async_trait]
 impl McpConnector for RmcpConnector {
     async fn connect(&self, server: &McpServerConfig) -> Result<Arc<dyn McpTransport>> {
-        let transport = RmcpTransport::connect(server, self.secrets.as_ref()).await?;
+        let transport = match &server.transport {
+            McpTransportConfig::Stdio { command, args } => {
+                let resolved = resolve_stdio_command(
+                    command,
+                    &self.project_root,
+                    self.search_path.as_deref(),
+                )?;
+                let command_str =
+                    resolved
+                        .into_os_string()
+                        .into_string()
+                        .map_err(|_| Error::Validation {
+                            field: "transport.command".to_string(),
+                            message: "resolved stdio command path is not valid UTF-8".to_string(),
+                        })?;
+                let mut clone = server.clone();
+                clone.transport = McpTransportConfig::Stdio {
+                    command: command_str,
+                    args: args.clone(),
+                };
+                RmcpTransport::connect_in(&clone, self.secrets.as_ref(), &self.project_root).await?
+            }
+            McpTransportConfig::StreamableHttp { .. } => {
+                RmcpTransport::connect(server, self.secrets.as_ref()).await?
+            }
+        };
         Ok(Arc::new(transport))
     }
 }
@@ -491,8 +626,8 @@ mod tests {
 
     use super::{
         McpConnector, McpGatekeeper, McpTransport, MockMcpConnector, MockMcpTransport,
-        RmcpConnector, RmcpTransport, WriteScope, scopes_overlap, tool_result_is_error,
-        tool_result_text,
+        RmcpConnector, RmcpTransport, WriteScope, resolve_stdio_command, scopes_overlap,
+        tool_result_is_error, tool_result_text,
     };
     use crate::Error;
     use crate::config::{McpServerConfig, McpTransportConfig, RoleConfig, RoleKind, WriteToolSpec};
@@ -892,8 +1027,11 @@ mod tests {
             "expected Error::Keychain, got {err:?}"
         );
 
+        let dir = tempfile::tempdir().unwrap();
         let connector = RmcpConnector {
             secrets: Arc::new(InMemorySecretStore::new()),
+            project_root: dir.path().to_path_buf(),
+            search_path: None,
         };
         let conn_err = match connector.connect(&server).await {
             Ok(_) => panic!("expected Error::Keychain from RmcpConnector"),
@@ -915,6 +1053,15 @@ mod tests {
         let secrets = InMemorySecretStore::new();
         let res = RmcpTransport::connect(&server, &secrets).await;
         assert!(res.is_err(), "missing binary should return Err");
+
+        let dir = tempfile::tempdir().unwrap();
+        let connector = RmcpConnector {
+            secrets: Arc::new(InMemorySecretStore::new()),
+            project_root: dir.path().to_path_buf(),
+            search_path: None,
+        };
+        let conn_res = connector.connect(&server).await;
+        assert!(matches!(conn_res, Err(Error::Validation { .. })));
     }
 
     #[tokio::test]
@@ -946,5 +1093,125 @@ mod tests {
         assert!(matches!(err_string, Error::Security { .. }));
 
         assert!(mock.calls().is_empty());
+    }
+
+    fn write_executable(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn resolve_stdio_bare_name_on_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+
+        let bin_dir = tmp.path().join("bin");
+        let fake_mcp = bin_dir.join("fake-mcp");
+        write_executable(&fake_mcp);
+
+        let search_path = std::env::join_paths([&bin_dir]).unwrap();
+        let resolved =
+            resolve_stdio_command("fake-mcp", &project_root, Some(&search_path)).unwrap();
+        let expected = std::fs::canonicalize(&fake_mcp).unwrap();
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_stdio_only_relative_entries_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        write_executable(&bin_dir.join("fake-mcp"));
+
+        let search_path = std::env::join_paths(["bin", ""]).unwrap();
+        let err = resolve_stdio_command("fake-mcp", tmp.path(), Some(&search_path)).unwrap_err();
+        match err {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "transport.command");
+                assert!(message.contains("fake-mcp"));
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_stdio_rejects_workspace_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let ws_bin = root.join("bin");
+        let ws_exec = ws_bin.join("fake-mcp");
+        write_executable(&ws_exec);
+
+        let ws_search = std::env::join_paths([&ws_bin]).unwrap();
+        let err = resolve_stdio_command("fake-mcp", &root, Some(&ws_search)).unwrap_err();
+        match err {
+            Error::Security { message } => {
+                assert_eq!(
+                    message,
+                    "stdio command is inside the agent-writable workspace"
+                );
+            }
+            other => panic!("expected Error::Security, got {other:?}"),
+        }
+
+        let orrery_bin = root.join(".orrery").join("bin");
+        let orrery_exec = orrery_bin.join("fake-mcp");
+        write_executable(&orrery_exec);
+
+        let orrery_search = std::env::join_paths([&orrery_bin]).unwrap();
+        let ok_path = resolve_stdio_command("fake-mcp", &root, Some(&orrery_search)).unwrap();
+        assert_eq!(ok_path, std::fs::canonicalize(&orrery_exec).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_stdio_absolute_requires_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let ext_bin = tmp.path().join("ext").join("fake-mcp");
+        std::fs::create_dir_all(ext_bin.parent().unwrap()).unwrap();
+        std::fs::write(&ext_bin, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&ext_bin).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&ext_bin, perms).unwrap();
+
+        let cmd_str = ext_bin.to_str().unwrap();
+        let err = resolve_stdio_command(cmd_str, &root, None).unwrap_err();
+        match err {
+            Error::Validation { field, .. } => assert_eq!(field, "transport.command"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let mut exec_perms = std::fs::metadata(&ext_bin).unwrap().permissions();
+        exec_perms.set_mode(0o755);
+        std::fs::set_permissions(&ext_bin, exec_perms).unwrap();
+
+        let resolved = resolve_stdio_command(cmd_str, &root, None).unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&ext_bin).unwrap());
+    }
+
+    #[test]
+    fn resolve_stdio_relative_with_separator_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_stdio_command("bin/fake-mcp", tmp.path(), None).unwrap_err();
+        match err {
+            Error::Validation { field, .. } => assert_eq!(field, "transport.command"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
     }
 }

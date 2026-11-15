@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -11,17 +11,24 @@ use crate::checkpoint::{
     ReportStatus, StampedReport, StepStatus, SubtaskAllocation, WorkflowCheckpoint,
 };
 use crate::config::{
-    AgentBackend, AgentConfig, ExecutionMode, HookEvent, HookFailure, HooksConfig, McpServerConfig,
-    ProjectConfig, RoleConfig, RoleKind, ValidationMode, validate_concrete_tool_ref,
+    AgentBackend, AgentConfig, ConfigStore, ExecutionMode, HookEvent, HookFailure, HooksConfig,
+    McpServerConfig, McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, ValidationMode,
+    validate_concrete_tool_ref,
 };
-use crate::docker::{ResourceManager, StageLease};
+use crate::docker::{
+    BollardContainerBackend, ContainerBackend, DockerComposeCli, DockerInferenceControl,
+    InferenceControl, ResourceManager, StageLease,
+};
 use crate::llm::{
-    AgentDriver, AgentInvocation, StageSummary, build_orchestrator_prompt, build_system_prompt,
-    build_user_prompt,
+    AgentDriver, AgentInvocation, CliContainerDriver, HttpChatDriver, StageSummary,
+    build_orchestrator_prompt, build_system_prompt, build_user_prompt,
 };
-use crate::mcp::{McpGatekeeper, WriteScope, tool_result_is_error, tool_result_text};
+use crate::mcp::{
+    McpConnector, McpGatekeeper, RmcpConnector, WriteScope, tool_result_is_error, tool_result_text,
+};
 use crate::plan::{ImplementationPlan, PlanStep};
-use crate::stream_log::{LiveStreamHub, StreamEvent, StreamEventKind};
+use crate::security::{OsKeyringStore, SecretRedactor, SecretStore};
+use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -1825,6 +1832,155 @@ impl WorkflowEngine {
     }
 }
 
+pub struct Backends {
+    pub secrets: Arc<dyn SecretStore>,
+    pub containers: Arc<dyn ContainerBackend>,
+    pub inference_control: Arc<dyn InferenceControl>,
+    pub connector: Arc<dyn McpConnector>,
+    pub drivers: DriverSet,
+}
+
+impl Backends {
+    pub fn real(project_root: &Path) -> Result<Self> {
+        let store = ConfigStore::new(project_root, None)?;
+        let inference = store.load_inference()?;
+        let secrets: Arc<dyn SecretStore> = Arc::new(OsKeyringStore::new()?);
+        let containers: Arc<dyn ContainerBackend> = Arc::new(BollardContainerBackend::connect()?);
+        let inference_control: Arc<dyn InferenceControl> = Arc::new(DockerInferenceControl::new(
+            Arc::clone(&containers),
+            Arc::new(DockerComposeCli),
+        ));
+        let connector: Arc<dyn McpConnector> = Arc::new(RmcpConnector {
+            secrets: Arc::clone(&secrets),
+            project_root: store.project_root().to_path_buf(),
+            search_path: std::env::var_os("PATH"),
+        });
+        let drivers = DriverSet {
+            chat: Arc::new(HttpChatDriver::new(Arc::clone(&secrets), inference)),
+            cli: Arc::new(CliContainerDriver::new(
+                Arc::clone(&containers),
+                Arc::clone(&secrets),
+                store.project_root().to_path_buf(),
+            )),
+        };
+        Ok(Self {
+            secrets,
+            containers,
+            inference_control,
+            connector,
+            drivers,
+        })
+    }
+}
+
+pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<WorkflowEngine> {
+    let project = store.load_project()?;
+    let roles = store.load_roles()?;
+    let mut role_rules = HashMap::with_capacity(roles.len());
+    for role in &roles {
+        let rules = store.load_role_rules(&role.role_id)?;
+        role_rules.insert(role.role_id.clone(), rules);
+    }
+    let agents = store.load_agents()?;
+    let servers = store.load_mcp_servers()?;
+    let inference = store.load_inference()?;
+
+    let plan_path = store.resolve_safe_path(&project.plan_path)?;
+    let plan = ImplementationPlan::from_file(&plan_path, &project.step_marker)?;
+
+    let redactor = Arc::new(SecretRedactor::new());
+    for agent in &agents {
+        let pair = match &agent.backend {
+            AgentBackend::LocalModel { .. } => None,
+            AgentBackend::AgentCli {
+                keychain_service,
+                keychain_account,
+                ..
+            } => keychain_service.as_deref().zip(keychain_account.as_deref()),
+            AgentBackend::CloudApi {
+                keychain_service,
+                keychain_account,
+                ..
+            } => Some((keychain_service.as_str(), keychain_account.as_str())),
+        };
+        if let Some((service, account)) = pair
+            && let Ok(secret) = backends.secrets.get(service, account)
+        {
+            redactor.register(&secret)?;
+        }
+    }
+    for server in &servers {
+        if let McpTransportConfig::StreamableHttp {
+            keychain_service: Some(service),
+            keychain_account: Some(account),
+            ..
+        } = &server.transport
+            && let Ok(secret) = backends.secrets.get(service, account)
+        {
+            redactor.register(&secret)?;
+        }
+    }
+
+    let orrery_dir = store.orrery_dir();
+    let stream = Arc::new(LiveStreamHub::new(
+        orrery_dir.join("logs"),
+        LiveStreamConfig::default(),
+        redactor,
+    )?);
+
+    let mut gatekeeper = McpGatekeeper::new();
+    for server in &servers {
+        let transport = backends.connector.connect(server).await?;
+        gatekeeper.register(
+            server.server_id.clone(),
+            transport,
+            server.write_tools.clone(),
+        );
+    }
+    for role in &roles {
+        for pattern in &role.allowed_mcp_tools {
+            if let Some((server_id, _)) = pattern.split_once(':')
+                && !servers.iter().any(|s| s.server_id == server_id)
+            {
+                return Err(Error::Validation {
+                    field: "allowed_mcp_tools".to_string(),
+                    message: format!(
+                        "role '{}' references unknown MCP server '{server_id}'",
+                        role.role_id
+                    ),
+                });
+            }
+        }
+    }
+    gatekeeper.refresh_catalog().await?;
+
+    let resources = Arc::new(ResourceManager::new(
+        backends.containers,
+        backends.inference_control,
+        inference,
+        project.max_concurrent_agents,
+        store.project_root().to_path_buf(),
+    ));
+    let checkpoints = CheckpointManager::new(orrery_dir.join("checkpoints"));
+
+    let ctx = EngineContext {
+        project_root: store.project_root().to_path_buf(),
+        project,
+        roles,
+        role_rules,
+        agents,
+        servers,
+        plan,
+        checkpoints,
+        stream,
+        gatekeeper: Arc::new(gatekeeper),
+        resources,
+        drivers: backends.drivers,
+    };
+
+    WorkflowEngine::new(ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1832,11 +1988,13 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use chrono::Utc;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
-        StageTurnRecord, WorkflowEngine, agents_pass_rule, build_hook_role, check_dispatch,
+        Backends, DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
+        StageTurnRecord, WorkflowEngine, agents_pass_rule, build_engine, build_hook_role,
+        check_dispatch,
     };
     use crate::Error;
     use crate::checkpoint::{
@@ -1844,18 +2002,19 @@ mod tests {
         SubtaskAllocation,
     };
     use crate::config::{
-        AgentBackend, AgentConfig, ExecutionMode, HookConfig, HookEvent, HookFailure, HooksConfig,
-        InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig, McpTransportConfig,
-        ProjectConfig, RoleConfig, RoleKind, StageConfig, WorkspaceMount, WriteToolSpec,
+        AgentBackend, AgentConfig, ConfigStore, ExecutionMode, HookConfig, HookEvent, HookFailure,
+        HooksConfig, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
+        McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, StageConfig, WorkspaceMount,
+        WriteToolSpec,
     };
     use crate::docker::{
         MockCall, MockContainerBackend, MockInferenceControl, ResourceManager, cli_container_name,
     };
     use crate::llm::{AgentDriver, AgentInvocation, MockAgentDriver};
-    use crate::mcp::{McpGatekeeper, MockMcpTransport, WriteScope};
+    use crate::mcp::{McpGatekeeper, MockMcpConnector, MockMcpTransport, WriteScope};
     use crate::plan::ImplementationPlan;
-    use crate::security::{SecretRedactor, SecretValue};
-    use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEventKind};
+    use crate::security::{InMemorySecretStore, SecretRedactor, SecretStore, SecretValue};
+    use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEvent, StreamEventKind};
 
     pub(super) fn test_context(dir: &Path, stages: &[(RoleKind, &[&str])]) -> EngineContext {
         let orrery_dir = dir.join(".orrery");
@@ -5033,5 +5192,197 @@ mod tests {
         );
         assert_eq!(mock.invocations().len(), invocations_after_first);
         assert_eq!(transport.calls().len(), 1);
+    }
+
+    fn init_project_with_agents(
+        dir: &Path,
+        write_plan: bool,
+    ) -> (
+        ConfigStore,
+        Backends,
+        Arc<MockAgentDriver>,
+        Arc<InMemorySecretStore>,
+    ) {
+        let root = dir.join("project");
+        let xdg = dir.join("xdg");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&xdg).unwrap();
+
+        let store = ConfigStore::new(&root, Some(xdg)).unwrap();
+        store.init_project("test-project").unwrap();
+
+        store
+            .save_inference(&InferenceConfig {
+                inference_id: "router".to_string(),
+                endpoint_url: "http://192.0.2.1:8080".to_string(),
+                mode: InferenceMode::Router,
+                lifecycle: InferenceLifecycle::External,
+                unload_after_stage: true,
+                startup_timeout_secs: 30,
+            })
+            .unwrap();
+        let mut project = store.load_project().unwrap();
+
+        for (stage_idx, id) in ["orch", "imp", "val"].into_iter().enumerate() {
+            store
+                .save_agent(&AgentConfig {
+                    agent_id: id.to_string(),
+                    display_name: id.to_string(),
+                    backend: AgentBackend::LocalModel {
+                        inference_id: "router".to_string(),
+                        model: "test-model".to_string(),
+                        temperature: 0.0,
+                        max_context_tokens: 4096,
+                    },
+                })
+                .unwrap();
+            project.assign_agent(stage_idx, id).unwrap();
+        }
+        store.save_project(&project).unwrap();
+
+        if write_plan {
+            std::fs::write(
+                store.project_root().join(&project.plan_path),
+                "## Step 1: First\nStep 1 body\n## Step 2: Second\nStep 2 body\n",
+            )
+            .unwrap();
+        }
+
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let mock_driver = Arc::new(MockAgentDriver::new());
+        let dyn_driver: Arc<dyn AgentDriver> = Arc::clone(&mock_driver) as Arc<dyn AgentDriver>;
+        let backends = Backends {
+            secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            containers: Arc::new(MockContainerBackend::new()),
+            inference_control: Arc::new(MockInferenceControl::new()),
+            connector: Arc::new(MockMcpConnector::default()),
+            drivers: DriverSet {
+                chat: Arc::clone(&dyn_driver),
+                cli: dyn_driver,
+            },
+        };
+
+        (store, backends, mock_driver, secrets)
+    }
+
+    #[tokio::test]
+    async fn build_engine_from_initialized_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, mock_driver, _secrets) = init_project_with_agents(dir.path(), true);
+
+        script_passing_step(&mock_driver, "orch", "imp", "val");
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = engine.ctx.checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Pending]
+        );
+    }
+
+    #[tokio::test]
+    async fn build_engine_registers_secrets_with_redactor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, _mock_driver, secrets) = init_project_with_agents(dir.path(), true);
+
+        let cloud_secret = "s3cr3t-cloud-api-token-987654";
+        secrets
+            .set(
+                "orrery.cloud",
+                "testuser",
+                &SecretValue::new(cloud_secret.to_string()),
+            )
+            .unwrap();
+
+        store
+            .save_agent(&AgentConfig {
+                agent_id: "imp".to_string(),
+                display_name: "Cloud Implementer".to_string(),
+                backend: AgentBackend::CloudApi {
+                    endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                    model: "cloud-model".to_string(),
+                    temperature: 0.0,
+                    max_context_tokens: 8192,
+                    keychain_service: "orrery.cloud".to_string(),
+                    keychain_account: "testuser".to_string(),
+                },
+            })
+            .unwrap();
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        engine
+            .ctx
+            .stream
+            .emit(StreamEvent {
+                timestamp: Utc::now(),
+                step_number: Some(1),
+                stage_index: Some(1),
+                agent_id: Some("imp".to_string()),
+                kind: StreamEventKind::Output,
+                text: format!("leaked={cloud_secret}"),
+            })
+            .unwrap();
+
+        let events = engine.ctx.stream.recent(10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].text, "leaked=[REDACTED]");
+        assert!(!events[0].text.contains(cloud_secret));
+    }
+
+    #[tokio::test]
+    async fn build_engine_missing_plan_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, _mock_driver, _secrets) = init_project_with_agents(dir.path(), false);
+
+        let err = match build_engine(&store, backends).await {
+            Ok(_) => panic!("expected Error::Io for missing plan file"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, Error::Io { .. }),
+            "expected Error::Io, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_engine_unknown_mcp_server_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, _mock_driver, _secrets) = init_project_with_agents(dir.path(), true);
+
+        let mut coder_role = store
+            .load_roles()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .unwrap();
+        let coder_rules = store.load_role_rules("coder").unwrap();
+        coder_role.allowed_mcp_tools = vec!["unknown_srv:*".to_string()];
+        store.save_role(&coder_role, &coder_rules).unwrap();
+
+        store
+            .save_mcp_server(&McpServerConfig {
+                server_id: "unknown_srv".to_string(),
+                transport: McpTransportConfig::Stdio {
+                    command: "fake-mcp".to_string(),
+                    args: Vec::new(),
+                },
+                write_tools: Vec::new(),
+            })
+            .unwrap();
+
+        let err = match build_engine(&store, backends).await {
+            Ok(_) => panic!("expected error when MCP connector does not know server"),
+            Err(err) => err,
+        };
+        match err {
+            Error::Mcp { server_id, .. } => assert_eq!(server_id, "unknown_srv"),
+            other => panic!("expected Error::Mcp, got {other:?}"),
+        }
     }
 }
