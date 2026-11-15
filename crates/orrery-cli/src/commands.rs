@@ -3,14 +3,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use orrery_core::config::{
-    ConfigStore, ExecutionMode, HookConfig, HookEvent, HookFailure, ProjectConfig,
+    AgentBackend, AgentConfig, ConfigScope, ConfigStore, ExecutionMode, HookConfig, HookEvent,
+    HookFailure, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
+    McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, WorkspaceMount, WriteToolSpec,
+    resolve_compose_file,
 };
 use orrery_core::engine::Backends;
 use orrery_core::plan::ImplementationPlan;
-use orrery_core::security::SecretStore;
+use orrery_core::security::{KeyringBackend, OsKeyringStore, SecretStore, SecretValue};
 use orrery_core::{Error, Result};
 
-use crate::args::{Command, GateCmd, HookCmd, WorkflowCmd};
+use crate::args::{
+    AgentCmd, Command, GateCmd, HookCmd, InferenceCmd, McpCmd, RoleCmd, SecretCmd, WorkflowCmd,
+};
 
 pub type ReadSecretFn = Box<dyn FnMut() -> Result<String>>;
 pub type MakeBackendsFn = Box<dyn Fn(&Path) -> Result<Backends> + Send + Sync>;
@@ -78,14 +83,14 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             Ok(0)
         }
         Command::Workflow { command } => dispatch_workflow(command, project, ctx),
+        Command::Agent { command } => dispatch_agent(command, project, ctx),
+        Command::Inference { command } => dispatch_inference(command, project, ctx),
+        Command::Secret { command } => dispatch_secret(command, ctx),
+        Command::Role { command } => dispatch_role(command, project, ctx),
+        Command::Mcp { command } => dispatch_mcp(command, project, ctx).await,
         Command::Gate { command } => dispatch_gate(command, project, ctx),
         Command::Hook { command } => dispatch_hook(command, project, ctx),
         Command::Tui { .. }
-        | Command::Agent { .. }
-        | Command::Inference { .. }
-        | Command::Secret { .. }
-        | Command::Role { .. }
-        | Command::Mcp { .. }
         | Command::Run { .. }
         | Command::Approve
         | Command::Reject { .. }
@@ -265,8 +270,417 @@ where
     Ok(cfg)
 }
 
+fn dispatch_agent(command: AgentCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    match command {
+        AgentCmd::AddLocalModel {
+            id,
+            name,
+            inference,
+            model,
+            temperature,
+            context,
+        } => {
+            let agent = AgentConfig {
+                agent_id: id,
+                display_name: name,
+                backend: AgentBackend::LocalModel {
+                    inference_id: inference,
+                    model,
+                    temperature,
+                    max_context_tokens: context,
+                },
+            };
+            store.save_agent(&agent)?;
+            write_stdout_line(ctx, &format!("Saved agent '{}'", agent.agent_id))?;
+            Ok(0)
+        }
+        AgentCmd::AddCli {
+            id,
+            name,
+            image,
+            command,
+            mount,
+            memory_mb,
+            timeout,
+            secret_env,
+            keychain_service,
+            keychain_account,
+        } => {
+            let agent = AgentConfig {
+                agent_id: id,
+                display_name: name,
+                backend: AgentBackend::AgentCli {
+                    image,
+                    command,
+                    workspace_mount: WorkspaceMount::from(mount),
+                    memory_limit_mb: memory_mb,
+                    timeout_secs: timeout,
+                    keychain_service,
+                    keychain_account,
+                    secret_env,
+                },
+            };
+            store.save_agent(&agent)?;
+            write_stdout_line(ctx, &format!("Saved agent '{}'", agent.agent_id))?;
+            write_stdout_line(
+                ctx,
+                "Residual risk: anyone with Docker socket access can read container env while it runs (that access is already root-equivalent).",
+            )?;
+            write_stdout_line(
+                ctx,
+                "Residual risk: a ReadWrite mount can write .git/hooks, which the host runs at the next git command.",
+            )?;
+            Ok(0)
+        }
+        AgentCmd::AddCloud {
+            id,
+            name,
+            endpoint,
+            model,
+            keychain_service,
+            keychain_account,
+        } => {
+            let agent = AgentConfig {
+                agent_id: id,
+                display_name: name,
+                backend: AgentBackend::CloudApi {
+                    endpoint_url: endpoint,
+                    model,
+                    temperature: 0.0,
+                    max_context_tokens: 65536,
+                    keychain_service,
+                    keychain_account,
+                },
+            };
+            store.save_agent(&agent)?;
+            write_stdout_line(ctx, &format!("Saved agent '{}'", agent.agent_id))?;
+            Ok(0)
+        }
+        AgentCmd::List { json } => {
+            let agents = store.load_agents()?;
+            if json {
+                let rendered = serde_json::to_string_pretty(&agents)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                for agent in &agents {
+                    write_stdout_line(
+                        ctx,
+                        &format!(
+                            "{}: {} ({:?})",
+                            agent.agent_id, agent.display_name, agent.backend
+                        ),
+                    )?;
+                }
+            }
+            Ok(0)
+        }
+        AgentCmd::Show { id } => {
+            let agents = store.load_agents()?;
+            let agent = agents
+                .into_iter()
+                .find(|a| a.agent_id == id)
+                .ok_or_else(|| Error::Validation {
+                    field: "agent_id".into(),
+                    message: format!("unknown agent_id '{id}'"),
+                })?;
+            write_stdout_line(ctx, &format!("agent_id: {}", agent.agent_id))?;
+            write_stdout_line(ctx, &format!("display_name: {}", agent.display_name))?;
+            write_stdout_line(ctx, &format!("backend: {:?}", agent.backend))?;
+            if matches!(agent.backend, AgentBackend::AgentCli { .. }) {
+                write_stdout_line(
+                    ctx,
+                    "Guardrails: The MCP gatekeeper does not see a CLI's built-in tools. Guardrails are: workspace_mount, container isolation, memory/time limits, and whatever tool config the image ships.",
+                )?;
+            }
+            Ok(0)
+        }
+        AgentCmd::Remove { id } => {
+            store.remove_agent(&id)?;
+            write_stdout_line(ctx, &format!("Removed agent '{id}'"))?;
+            Ok(0)
+        }
+    }
+}
+
+fn dispatch_inference(command: InferenceCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    match command {
+        InferenceCmd::Add {
+            id,
+            endpoint,
+            mode,
+            container,
+            compose,
+            service,
+            no_unload,
+            startup_timeout,
+        } => {
+            let lifecycle = if let Some(name) = container {
+                InferenceLifecycle::Container { name }
+            } else if let Some(file) = compose {
+                let _ =
+                    resolve_compose_file(&file, ConfigScope::Project, store.project_root(), None)?;
+                InferenceLifecycle::Compose { file, service }
+            } else {
+                InferenceLifecycle::External
+            };
+            let inf = InferenceConfig {
+                inference_id: id,
+                endpoint_url: endpoint,
+                mode: InferenceMode::from(mode),
+                lifecycle,
+                unload_after_stage: !no_unload,
+                startup_timeout_secs: startup_timeout,
+            };
+            store.save_inference(&inf)?;
+            write_stdout_line(ctx, &format!("Saved inference '{}'", inf.inference_id))?;
+            Ok(0)
+        }
+        InferenceCmd::List { json } => {
+            let list = store.load_inference()?;
+            if json {
+                let rendered = serde_json::to_string_pretty(&list)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                for inf in &list {
+                    write_stdout_line(
+                        ctx,
+                        &format!(
+                            "{}: {} ({:?}, {:?})",
+                            inf.inference_id, inf.endpoint_url, inf.mode, inf.lifecycle
+                        ),
+                    )?;
+                }
+            }
+            Ok(0)
+        }
+        InferenceCmd::Remove { id } => {
+            store.remove_inference(&id)?;
+            write_stdout_line(ctx, &format!("Removed inference '{id}'"))?;
+            Ok(0)
+        }
+    }
+}
+
+fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    match command {
+        RoleCmd::Add {
+            id,
+            name,
+            kind,
+            rules_file,
+            allow_tools,
+        } => {
+            let source_path = store.resolve_safe_path(&rules_file)?;
+            let rules_markdown =
+                std::fs::read_to_string(&source_path).map_err(|source| Error::Io {
+                    path: source_path,
+                    source,
+                })?;
+            let role = RoleConfig {
+                role_id: id.clone(),
+                display_name: name,
+                kind: RoleKind::from(kind),
+                rules_file: format!("{id}.md"),
+                allowed_mcp_tools: allow_tools,
+            };
+            store.save_role(&role, &rules_markdown)?;
+            write_stdout_line(ctx, &format!("Saved role '{}'", role.role_id))?;
+            Ok(0)
+        }
+        RoleCmd::List { json } => {
+            let roles = store.load_roles()?;
+            if json {
+                let rendered = serde_json::to_string_pretty(&roles)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                for role in &roles {
+                    write_stdout_line(
+                        ctx,
+                        &format!("{}: {} ({:?})", role.role_id, role.display_name, role.kind),
+                    )?;
+                }
+            }
+            Ok(0)
+        }
+        RoleCmd::Show { id } => {
+            let roles = store.load_roles()?;
+            let role =
+                roles
+                    .into_iter()
+                    .find(|r| r.role_id == id)
+                    .ok_or_else(|| Error::Validation {
+                        field: "role_id".into(),
+                        message: format!("unknown role_id '{id}'"),
+                    })?;
+            let rules = store.load_role_rules(&id)?;
+            write_stdout_line(ctx, &format!("role_id: {}", role.role_id))?;
+            write_stdout_line(ctx, &format!("display_name: {}", role.display_name))?;
+            write_stdout_line(ctx, &format!("kind: {:?}", role.kind))?;
+            write_stdout_line(
+                ctx,
+                &format!("allowed_mcp_tools: {:?}", role.allowed_mcp_tools),
+            )?;
+            write_stdout_line(ctx, &rules)?;
+            Ok(0)
+        }
+        RoleCmd::Remove { id } => {
+            store.remove_role(&id)?;
+            write_stdout_line(ctx, &format!("Removed role '{id}'"))?;
+            Ok(0)
+        }
+    }
+}
+
+fn parse_write_tool_specs(specs: &[String]) -> Result<Vec<WriteToolSpec>> {
+    let mut out = Vec::with_capacity(specs.len());
+    for raw in specs {
+        let (tool, args_part) = raw.split_once(':').ok_or_else(|| Error::Validation {
+            field: "write_tools".into(),
+            message: format!("expected '<tool>:<arg>[,<arg>]' in '{raw}'"),
+        })?;
+        let tool = tool.trim().to_string();
+        let path_args: Vec<String> = args_part.split(',').map(|s| s.trim().to_string()).collect();
+        if tool.is_empty() || path_args.is_empty() || path_args.iter().any(String::is_empty) {
+            return Err(Error::Validation {
+                field: "write_tools".into(),
+                message: format!("expected '<tool>:<arg>[,<arg>]' in '{raw}'"),
+            });
+        }
+        out.push(WriteToolSpec { tool, path_args });
+    }
+    Ok(out)
+}
+
+async fn validate_connect_and_save_mcp(
+    store: &ConfigStore,
+    project: &Path,
+    ctx: &mut CliContext,
+    server: McpServerConfig,
+) -> Result<u8> {
+    server.validate()?;
+    server.validate_project_scope()?;
+    let backends = (ctx.make_backends)(project)?;
+    let transport = backends.connector.connect(&server).await?;
+    let tools = transport.list_tools().await?;
+    store.save_mcp_server(&server)?;
+    write_stdout_line(ctx, &format!("{}: {} tools", server.server_id, tools.len()))?;
+    Ok(0)
+}
+
+async fn dispatch_mcp(command: McpCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    match command {
+        McpCmd::AddStdio {
+            id,
+            command,
+            args,
+            write_tools,
+        } => {
+            let server = McpServerConfig {
+                server_id: id,
+                transport: McpTransportConfig::Stdio { command, args },
+                write_tools: parse_write_tool_specs(&write_tools)?,
+            };
+            validate_connect_and_save_mcp(&store, project, ctx, server).await
+        }
+        McpCmd::AddHttp {
+            id,
+            endpoint,
+            keychain_service,
+            keychain_account,
+            write_tools,
+        } => {
+            let server = McpServerConfig {
+                server_id: id,
+                transport: McpTransportConfig::StreamableHttp {
+                    endpoint_url: endpoint,
+                    keychain_service,
+                    keychain_account,
+                },
+                write_tools: parse_write_tool_specs(&write_tools)?,
+            };
+            validate_connect_and_save_mcp(&store, project, ctx, server).await
+        }
+        McpCmd::List { json } => {
+            let servers = store.load_mcp_servers()?;
+            if json {
+                let rendered = serde_json::to_string_pretty(&servers)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                for server in &servers {
+                    write_stdout_line(
+                        ctx,
+                        &format!("{}: {:?}", server.server_id, server.transport),
+                    )?;
+                }
+            }
+            Ok(0)
+        }
+        McpCmd::Tools { id } => {
+            let servers = store.load_mcp_servers()?;
+            let server = servers
+                .into_iter()
+                .find(|s| s.server_id == id)
+                .ok_or_else(|| Error::Validation {
+                    field: "server_id".into(),
+                    message: format!("unknown MCP server '{id}'"),
+                })?;
+            let backends = (ctx.make_backends)(project)?;
+            let transport = backends.connector.connect(&server).await?;
+            let tools = transport.list_tools().await?;
+            for tool in &tools {
+                write_stdout_line(
+                    ctx,
+                    &format!("{}:{} - {}", server.server_id, tool.name, tool.description),
+                )?;
+            }
+            Ok(0)
+        }
+        McpCmd::Remove { id } => {
+            store.remove_mcp_server(&id)?;
+            write_stdout_line(ctx, &format!("Removed MCP server '{id}'"))?;
+            Ok(0)
+        }
+    }
+}
+
+fn dispatch_secret(command: SecretCmd, ctx: &mut CliContext) -> Result<u8> {
+    match command {
+        SecretCmd::Set { service, account } => {
+            let raw = (ctx.read_secret)()?;
+            let secret = SecretValue::new(raw);
+            ctx.secrets.set(&service, &account, &secret)?;
+            write_stdout_line(
+                ctx,
+                &format!("Stored secret for service '{service}' account '{account}'"),
+            )?;
+            if let Ok(os_store) = OsKeyringStore::new()
+                && os_store.backend() == KeyringBackend::Keyutils
+            {
+                write_stdout_line(
+                    ctx,
+                    "Note: kernel keyutils keyring does not survive reboot; re-run `orrery secret set` after reboot.",
+                )?;
+            }
+            Ok(0)
+        }
+        SecretCmd::Delete { service, account } => {
+            ctx.secrets.delete(&service, &account)?;
+            write_stdout_line(
+                ctx,
+                &format!("Deleted secret for service '{service}' account '{account}'"),
+            )?;
+            Ok(0)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::io::{self, Write};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
@@ -274,11 +688,17 @@ mod tests {
     use orrery_core::config::{
         ConfigStore, ExecutionMode, HookConfig, HookFailure, ValidationMode,
     };
+    use orrery_core::docker::{MockContainerBackend, MockInferenceControl};
+    use orrery_core::engine::DriverSet;
+    use orrery_core::llm::{AgentDriver, MockAgentDriver};
+    use orrery_core::mcp::{McpTransport, MockMcpConnector, MockMcpTransport};
     use orrery_core::security::InMemorySecretStore;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::args::{HookEventArg, HookFailureArg, ModeArg};
+    use crate::args::{
+        HookEventArg, HookFailureArg, InferenceModeArg, ModeArg, MountArg, RoleKindArg,
+    };
 
     #[derive(Clone, Default)]
     struct SharedVec(Arc<Mutex<Vec<u8>>>);
@@ -919,5 +1339,959 @@ mod tests {
             stub_err.to_string(),
             "invalid command: not implemented until Step 35/36"
         );
+    }
+
+    fn mock_backends_with_transports(
+        transports: HashMap<String, Arc<dyn McpTransport>>,
+    ) -> MakeBackendsFn {
+        Box::new(move |_root: &Path| {
+            let chat: Arc<dyn AgentDriver> = Arc::new(MockAgentDriver::new());
+            let cli: Arc<dyn AgentDriver> = Arc::new(MockAgentDriver::new());
+            Ok(Backends {
+                secrets: Arc::new(InMemorySecretStore::new()),
+                containers: Arc::new(MockContainerBackend::new()),
+                inference_control: Arc::new(MockInferenceControl::new()),
+                connector: Arc::new(MockMcpConnector {
+                    transports: transports.clone(),
+                }),
+                drivers: DriverSet { chat, cli },
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn agent_add_each_backend_and_list_json() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("agents-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::AddLocalModel {
+                    id: "local-coder".to_string(),
+                    name: "Local Coder".to_string(),
+                    inference: "coder-14b".to_string(),
+                    model: "qwen-coder".to_string(),
+                    temperature: 0.2,
+                    context: 32768,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add-local-model");
+
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::AddCli {
+                    id: "cli-val".to_string(),
+                    name: "CLI Validator".to_string(),
+                    image: "registry.example.com/agents/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                    command: vec!["agent-cli".to_string(), "run".to_string()],
+                    mount: MountArg::Ro,
+                    memory_mb: 4096,
+                    timeout: 1800,
+                    secret_env: Some("AGENT_TOKEN".to_string()),
+                    keychain_service: Some("orrery.agent".to_string()),
+                    keychain_account: Some("testuser".to_string()),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add-cli");
+
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::AddCloud {
+                    id: "cloud-val".to_string(),
+                    name: "Cloud Validator".to_string(),
+                    endpoint: "https://api.example.com/v1/chat/completions".to_string(),
+                    model: "example-model".to_string(),
+                    keychain_service: "orrery.cloud".to_string(),
+                    keychain_account: "testuser".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add-cloud");
+
+        out.clear();
+        let code = dispatch(
+            Command::Agent {
+                command: AgentCmd::List { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("agent list --json");
+        assert_eq!(code, 0);
+
+        let listed: Vec<AgentConfig> =
+            serde_json::from_str(&out.as_string()).expect("parse AgentConfig array");
+        assert_eq!(listed.len(), 3);
+        assert!(
+            listed.iter().any(|a| a.agent_id == "local-coder"
+                && matches!(a.backend, AgentBackend::LocalModel { .. }))
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|a| a.agent_id == "cli-val"
+                    && matches!(a.backend, AgentBackend::AgentCli { .. }))
+        );
+        assert!(listed.iter().any(
+            |a| a.agent_id == "cloud-val" && matches!(a.backend, AgentBackend::CloudApi { .. })
+        ));
+
+        out.clear();
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("agent list plain");
+        let text = out.as_string();
+        assert!(text.contains("local-coder"));
+        assert!(text.contains("cli-val"));
+        assert!(text.contains("cloud-val"));
+    }
+
+    #[tokio::test]
+    async fn agent_add_cli_prints_residual_risk() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("risk-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+        out.clear();
+
+        let code = dispatch(
+            Command::Agent {
+                command: AgentCmd::AddCli {
+                    id: "cli-coder".to_string(),
+                    name: "CLI Coder".to_string(),
+                    image: "registry.example.com/agents/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+                    command: vec!["agent-cli".to_string()],
+                    mount: MountArg::Rw,
+                    memory_mb: 4096,
+                    timeout: 1800,
+                    secret_env: None,
+                    keychain_service: None,
+                    keychain_account: None,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add-cli");
+        assert_eq!(code, 0);
+
+        let printed = out.as_string();
+        assert!(
+            printed.contains("Docker socket"),
+            "missing Docker socket note: {printed}"
+        );
+        assert!(
+            printed.contains(".git/hooks"),
+            "missing .git/hooks note: {printed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_add_with_embedded_secret_exits_1() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("secret-reject-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let err = dispatch(
+            Command::Agent {
+                command: AgentCmd::AddLocalModel {
+                    id: "bad-agent".to_string(),
+                    name: "Bad Agent".to_string(),
+                    inference: "coder-14b".to_string(),
+                    model: "sk-ABCDEFGH12345678".to_string(),
+                    temperature: 0.1,
+                    context: 32768,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("embedded secret must fail");
+        assert_eq!(exit_code_for(&err), 1);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert!(store.load_agents().expect("load_agents").is_empty());
+    }
+
+    #[tokio::test]
+    async fn agent_show_and_remove() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("show-remove-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::AddCli {
+                    id: "cli-agent".to_string(),
+                    name: "CLI Agent".to_string(),
+                    image: "registry.example.com/agents/cli:1.0.0".to_string(),
+                    command: vec!["agent-cli".to_string()],
+                    mount: MountArg::Ro,
+                    memory_mb: 2048,
+                    timeout: 600,
+                    secret_env: None,
+                    keychain_service: None,
+                    keychain_account: None,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add-cli");
+        out.clear();
+
+        let code = dispatch(
+            Command::Agent {
+                command: AgentCmd::Show {
+                    id: "cli-agent".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("agent show");
+        assert_eq!(code, 0);
+        let shown = out.as_string();
+        assert!(shown.contains("cli-agent"), "got: {shown}");
+        assert!(
+            shown.contains("MCP gatekeeper") && shown.contains("workspace_mount"),
+            "missing guardrail note: {shown}"
+        );
+
+        let rm_code = dispatch(
+            Command::Agent {
+                command: AgentCmd::Remove {
+                    id: "cli-agent".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("agent remove");
+        assert_eq!(rm_code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert!(store.load_agents().expect("load_agents").is_empty());
+
+        let missing_err = dispatch(
+            Command::Agent {
+                command: AgentCmd::Show {
+                    id: "cli-agent".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("show removed agent must fail");
+        assert_eq!(exit_code_for(&missing_err), 1);
+    }
+
+    #[tokio::test]
+    async fn inference_add_defaults_external_single() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("inf-defaults-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let code = dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "ext-model".to_string(),
+                    endpoint: "http://192.0.2.10:8080".to_string(),
+                    mode: InferenceModeArg::Single,
+                    container: None,
+                    compose: None,
+                    service: None,
+                    no_unload: false,
+                    startup_timeout: 300,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference add defaults");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let list = store.load_inference().expect("load_inference");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].inference_id, "ext-model");
+        assert_eq!(list[0].mode, InferenceMode::Single);
+        assert_eq!(list[0].lifecycle, InferenceLifecycle::External);
+        assert!(list[0].unload_after_stage);
+        assert_eq!(list[0].startup_timeout_secs, 300);
+    }
+
+    #[tokio::test]
+    async fn inference_add_container_and_compose() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("inf-lifecycle-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "coder-container".to_string(),
+                    endpoint: "http://192.0.2.11:8080".to_string(),
+                    mode: InferenceModeArg::Single,
+                    container: Some("llama-coder-14b".to_string()),
+                    compose: None,
+                    service: None,
+                    no_unload: false,
+                    startup_timeout: 300,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference add container");
+
+        let compose_rel = PathBuf::from("docker-models/router/compose.yaml");
+        let compose_disk = dir.path().join(".orrery").join(&compose_rel);
+        std::fs::create_dir_all(compose_disk.parent().expect("parent")).expect("mkdirs");
+        std::fs::write(&compose_disk, "services:\n  llama:\n    image: app:1.0\n")
+            .expect("write compose");
+
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "router-compose".to_string(),
+                    endpoint: "http://192.0.2.12:8080".to_string(),
+                    mode: InferenceModeArg::Router,
+                    container: None,
+                    compose: Some(compose_rel.clone()),
+                    service: Some("llama".to_string()),
+                    no_unload: true,
+                    startup_timeout: 120,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference add compose");
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let raw_project = store.load_project().expect("load_project");
+        assert_eq!(raw_project.inference.len(), 2);
+        assert_eq!(
+            raw_project.inference[0].lifecycle,
+            InferenceLifecycle::Container {
+                name: "llama-coder-14b".to_string()
+            }
+        );
+        assert_eq!(raw_project.inference[1].mode, InferenceMode::Router);
+        assert!(!raw_project.inference[1].unload_after_stage);
+        assert_eq!(raw_project.inference[1].startup_timeout_secs, 120);
+        assert_eq!(
+            raw_project.inference[1].lifecycle,
+            InferenceLifecycle::Compose {
+                file: compose_rel,
+                service: Some("llama".to_string()),
+            }
+        );
+
+        let loaded = store.load_inference().expect("load_inference");
+        assert_eq!(loaded.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn inference_add_compose_absolute_rejected() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("inf-abs-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let abs_compose = dir.path().join(".orrery").join("compose.yaml");
+        std::fs::write(&abs_compose, "services: {}\n").expect("write compose");
+
+        let err = dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "bad-compose".to_string(),
+                    endpoint: "http://192.0.2.13:8080".to_string(),
+                    mode: InferenceModeArg::Single,
+                    container: None,
+                    compose: Some(abs_compose),
+                    service: None,
+                    no_unload: false,
+                    startup_timeout: 300,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("absolute compose path must fail");
+        assert_eq!(exit_code_for(&err), 1);
+
+        out.clear();
+        let code = dispatch(
+            Command::Inference {
+                command: InferenceCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference list");
+        assert_eq!(code, 0);
+        assert!(out.as_string().is_empty(), "got: {}", out.as_string());
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert!(store.load_inference().expect("load_inference").is_empty());
+    }
+
+    #[tokio::test]
+    async fn inference_list_remove() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("inf-list-rm-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "coder-14b".to_string(),
+                    endpoint: "http://192.0.2.10:8080".to_string(),
+                    mode: InferenceModeArg::Single,
+                    container: None,
+                    compose: None,
+                    service: None,
+                    no_unload: false,
+                    startup_timeout: 300,
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference add");
+        out.clear();
+
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::List { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference list --json");
+        let parsed: Vec<InferenceConfig> =
+            serde_json::from_str(&out.as_string()).expect("parse InferenceConfig array");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].inference_id, "coder-14b");
+
+        out.clear();
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference list plain");
+        assert!(out.as_string().contains("coder-14b"));
+
+        let rm_code = dispatch(
+            Command::Inference {
+                command: InferenceCmd::Remove {
+                    id: "coder-14b".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("inference remove");
+        assert_eq!(rm_code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert!(store.load_inference().expect("load_inference").is_empty());
+    }
+
+    #[tokio::test]
+    async fn role_add_reads_rules_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("role-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let rules_body = "# Reviewer Rules\n\nVerify all gates pass.\n";
+        std::fs::write(dir.path().join("reviewer.md"), rules_body).expect("write reviewer.md");
+
+        let code = dispatch(
+            Command::Role {
+                command: RoleCmd::Add {
+                    id: "reviewer".to_string(),
+                    name: "Reviewer".to_string(),
+                    kind: RoleKindArg::Validator,
+                    rules_file: PathBuf::from("reviewer.md"),
+                    allow_tools: vec!["fs:read_file".to_string(), "git:diff".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role add");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let loaded_rules = store.load_role_rules("reviewer").expect("load_role_rules");
+        assert_eq!(loaded_rules, rules_body);
+
+        out.clear();
+        dispatch(
+            Command::Role {
+                command: RoleCmd::List { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role list --json");
+        let roles: Vec<RoleConfig> =
+            serde_json::from_str(&out.as_string()).expect("parse RoleConfig array");
+        assert!(roles.iter().any(|r| r.role_id == "reviewer"
+            && r.kind == RoleKind::Validator
+            && r.allowed_mcp_tools == vec!["fs:read_file".to_string(), "git:diff".to_string()]));
+
+        out.clear();
+        dispatch(
+            Command::Role {
+                command: RoleCmd::Show {
+                    id: "reviewer".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role show");
+        assert!(out.as_string().contains("Verify all gates pass."));
+
+        dispatch(
+            Command::Role {
+                command: RoleCmd::Remove {
+                    id: "reviewer".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role remove");
+        assert!(
+            !store
+                .load_roles()
+                .expect("load_roles")
+                .iter()
+                .any(|r| r.role_id == "reviewer")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_add_stdio_and_http_list() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert(
+            "fs".to_string(),
+            Arc::new(
+                MockMcpTransport::new("fs")
+                    .with_tool("read_file", serde_json::json!({}))
+                    .with_tool("write_file", serde_json::json!({})),
+            ),
+        );
+        transports.insert(
+            "remote".to_string(),
+            Arc::new(MockMcpTransport::new("remote").with_tool("put_file", serde_json::json!({}))),
+        );
+        ctx.make_backends = mock_backends_with_transports(transports);
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("mcp-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+        out.clear();
+
+        let code_stdio = dispatch(
+            Command::Mcp {
+                command: McpCmd::AddStdio {
+                    id: "fs".to_string(),
+                    command: "mcp-fs".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    write_tools: vec!["write_file:path,dest".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp add-stdio");
+        assert_eq!(code_stdio, 0);
+        assert!(
+            out.as_string().contains("fs: 2 tools"),
+            "got: {}",
+            out.as_string()
+        );
+
+        out.clear();
+        let code_http = dispatch(
+            Command::Mcp {
+                command: McpCmd::AddHttp {
+                    id: "remote".to_string(),
+                    endpoint: "https://mcp.example.com/v1".to_string(),
+                    keychain_service: Some("orrery.mcp".to_string()),
+                    keychain_account: Some("testuser".to_string()),
+                    write_tools: vec!["put_file:path".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp add-http");
+        assert_eq!(code_http, 0);
+        assert!(
+            out.as_string().contains("remote: 1 tools"),
+            "got: {}",
+            out.as_string()
+        );
+
+        out.clear();
+        dispatch(
+            Command::Mcp {
+                command: McpCmd::List { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp list --json");
+        let servers: Vec<McpServerConfig> =
+            serde_json::from_str(&out.as_string()).expect("parse McpServerConfig array");
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].server_id, "fs");
+        assert_eq!(
+            servers[0].write_tools,
+            vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string(), "dest".to_string()],
+            }]
+        );
+        assert_eq!(servers[1].server_id, "remote");
+
+        out.clear();
+        dispatch(
+            Command::Mcp {
+                command: McpCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp list plain");
+        assert!(out.as_string().contains("fs:"));
+        assert!(out.as_string().contains("remote:"));
+
+        dispatch(
+            Command::Mcp {
+                command: McpCmd::Remove {
+                    id: "remote".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp remove");
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert_eq!(store.load_mcp_servers().expect("load_mcp_servers").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_add_unreachable_server_not_saved() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+        ctx.make_backends = mock_backends_with_transports(HashMap::new());
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("mcp-unreach-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let err = dispatch(
+            Command::Mcp {
+                command: McpCmd::AddStdio {
+                    id: "unreachable".to_string(),
+                    command: "mcp-unreachable".to_string(),
+                    args: Vec::new(),
+                    write_tools: Vec::new(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("unreachable server must fail");
+        assert_eq!(exit_code_for(&err), 1);
+
+        out.clear();
+        let code = dispatch(
+            Command::Mcp {
+                command: McpCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp list");
+        assert_eq!(code, 0);
+        assert!(out.as_string().is_empty(), "got: {}", out.as_string());
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        assert!(
+            store
+                .load_mcp_servers()
+                .expect("load_mcp_servers")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_lists_mock_tools() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        let mut transports: HashMap<String, Arc<dyn McpTransport>> = HashMap::new();
+        transports.insert(
+            "fs".to_string(),
+            Arc::new(
+                MockMcpTransport::new("fs")
+                    .with_tool("read_file", serde_json::json!({}))
+                    .with_tool("list_dir", serde_json::json!({})),
+            ),
+        );
+        ctx.make_backends = mock_backends_with_transports(transports);
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("mcp-tools-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Mcp {
+                command: McpCmd::AddStdio {
+                    id: "fs".to_string(),
+                    command: "mcp-fs".to_string(),
+                    args: Vec::new(),
+                    write_tools: Vec::new(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp add-stdio");
+        out.clear();
+
+        let code = dispatch(
+            Command::Mcp {
+                command: McpCmd::Tools {
+                    id: "fs".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mcp tools");
+        assert_eq!(code, 0);
+
+        let listed = out.as_string();
+        assert!(listed.contains("fs:read_file"), "got: {listed}");
+        assert!(listed.contains("fs:list_dir"), "got: {listed}");
+    }
+
+    #[tokio::test]
+    async fn secret_set_and_delete() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, err) = test_ctx();
+        let raw_secret = "top-secret-token-value-98765";
+        ctx.read_secret = Box::new(move || Ok(raw_secret.to_string()));
+
+        let set_code = dispatch(
+            Command::Secret {
+                command: SecretCmd::Set {
+                    service: "orrery.cloud".to_string(),
+                    account: "testuser".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("secret set");
+        assert_eq!(set_code, 0);
+
+        assert!(!out.as_string().contains(raw_secret));
+        assert!(!err.as_string().contains(raw_secret));
+
+        let stored = ctx
+            .secrets
+            .get("orrery.cloud", "testuser")
+            .expect("secret must be stored in InMemorySecretStore");
+        assert_eq!(stored.len(), raw_secret.len());
+        assert_eq!(format!("{stored}"), "[REDACTED]");
+
+        let del_code = dispatch(
+            Command::Secret {
+                command: SecretCmd::Delete {
+                    service: "orrery.cloud".to_string(),
+                    account: "testuser".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("secret delete");
+        assert_eq!(del_code, 0);
+        assert!(ctx.secrets.get("orrery.cloud", "testuser").is_err());
     }
 }

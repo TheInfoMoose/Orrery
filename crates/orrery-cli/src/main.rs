@@ -1,6 +1,7 @@
 mod args;
 mod commands;
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -22,6 +23,18 @@ fn read_secret_from_stdin() -> orrery_core::Result<String> {
             source,
         })?;
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+fn read_secret_input() -> orrery_core::Result<String> {
+    if std::io::stdin().is_terminal() {
+        let value = rpassword::prompt_password("Secret: ").map_err(|source| Error::Io {
+            path: PathBuf::from("<tty>"),
+            source,
+        })?;
+        Ok(value.trim_end_matches(['\r', '\n']).to_string())
+    } else {
+        read_secret_from_stdin()
+    }
 }
 
 #[tokio::main]
@@ -46,7 +59,7 @@ async fn main() -> ExitCode {
         out: Box::new(std::io::stdout()),
         err: Box::new(std::io::stderr()),
         secrets,
-        read_secret: Box::new(read_secret_from_stdin),
+        read_secret: Box::new(read_secret_input),
         make_backends: Box::new(Backends::real),
     };
 

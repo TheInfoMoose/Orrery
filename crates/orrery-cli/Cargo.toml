@@ -13,6 +13,7 @@ path = "src/main.rs"
 clap.workspace = true
 orrery-core.workspace = true
 orrery-tui.workspace = true
+rpassword.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

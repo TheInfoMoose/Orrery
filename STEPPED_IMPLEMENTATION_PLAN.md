@@ -19,9 +19,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 2 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 3 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW), `crates/orrery-tui/src/widgets.rs` | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 2 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW), `crates/orrery-tui/src/widgets.rs` | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 32** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 33** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) |
 | **STEP 34** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) |
+| **STEP 35** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` |
 
 ---
 
@@ -2039,7 +2039,8 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/boost`
 
 Scope note: written 2026-11-13. After this step every `Command` variant is handled and the Step 34 stub text is gone.
-- Amended 2026-11-15 after Step 34's review: a plan step's `title` already includes its number (spec §5.4: the marker line minus the marker, e.g. `1: Alpha`), so `ingest` printing `Step {number}: {title}` shows `Step 1: 1: Alpha`. Item 3 makes it print the title alone.
+- Amended 2026-11-15 after Step 34's review: a plan step's `title` already includes its number (spec §5.4: the marker line minus the marker, e.g. `1: Alpha`), so `ingest` printing `Step {number}: {title}` shows `Step 1: 1: Alpha`. Item 2 makes it print the title alone.
+- Amended 2026-11-15 after Step 35's review: `secret set` stored an empty value (for example `echo "" | orrery secret set ...`), which only shows up later as a confusing auth failure. Item 3 rejects it.
 
 ```text
 [STEP_ID]
@@ -2064,8 +2065,10 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - Behaviour and exit codes per §9.10: `RunOptions { wait_for_operator: false, .. }`; Ctrl+C via `tokio::signal::ctrl_c()` cancelling a `CancellationToken`.
    - `logs` uses `stream_log::tail_log`; `--follow` polls the file every 500 ms until Ctrl+C.
    - Remove the Step 34 stub, so every `Command` variant is handled.
-3. `ingest` prints each step as `{title}` alone (no `Step {number}: ` prefix); update `ingest_sets_plan_and_prints_steps` to expect `1: Setup` and `2: Build`, and to assert the output does not contain `Step 1: 1:`.
-2. Tests (commands::tests; mock `Backends` via `make_backends`):
+2. `ingest` prints each step as `{title}` alone (no `Step {number}: ` prefix); update `ingest_sets_plan_and_prints_steps` to expect `1: Setup` and `2: Build`, and to assert the output does not contain `Step 1: 1:`.
+3. `secret set`: when `ctx.read_secret` returns an empty string, return `Err(Error::Validation { field: "secret".into(), message: "secret value is empty".into() })` (exit 1) before calling `ctx.secrets.set`.
+4. Tests (commands::tests; mock `Backends` via `make_backends`):
+   - `secret_set_empty_rejected`: `read_secret` returns `""`; exit 1, and `InMemorySecretStore::get` for that service/account finds nothing.
    - `run_mode_passes_one_step_exit_0`.
    - `run_loop_cycles_two`.
    - `escalation_exits_3_then_approve_resume_completes`.
@@ -2087,7 +2090,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
      Assert that every `Some` argv parses with `Cli::try_parse_from`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'not implemented until Step' crates/orrery-cli/src/commands.rs && grep -q 'run_tui' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(run_mode_passes_one_step_exit_0|run_loop_cycles_two|escalation_exits_3_then_approve_resume_completes|reject_records_feedback|approve_without_awaiting_step_exits_1|reset_step_one_marks_pending|status_json_shape|logs_tail_shows_redacted_lines|tui_action_parity): test$')" -eq 9
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'not implemented until Step' crates/orrery-cli/src/commands.rs && grep -q 'run_tui' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(run_mode_passes_one_step_exit_0|run_loop_cycles_two|escalation_exits_3_then_approve_resume_completes|reject_records_feedback|approve_without_awaiting_step_exits_1|reset_step_one_marks_pending|status_json_shape|logs_tail_shows_redacted_lines|tui_action_parity|secret_set_empty_rejected): test$')" -eq 10
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
