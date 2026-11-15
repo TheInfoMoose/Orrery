@@ -336,6 +336,10 @@ impl WorkflowEngine {
         self.operator_tx.clone()
     }
 
+    pub fn subscribe_stream(&self) -> tokio::sync::broadcast::Receiver<StreamEvent> {
+        self.ctx.stream.subscribe()
+    }
+
     pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
         let mode = opts.mode.unwrap_or(self.ctx.project.execution_mode);
         let cycles = opts.cycles.unwrap_or(self.ctx.project.cycle_count);

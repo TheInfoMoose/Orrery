@@ -6,8 +6,8 @@ use crossterm::event::{
 };
 use orrery_core::checkpoint::{EnginePhase, StepStatus};
 use orrery_core::config::{
-    AgentConfig, ExecutionMode, MAX_STAGE_AGENTS, MAX_STAGES, MIN_STAGES, ProjectConfig,
-    RoleConfig, ValidationMode,
+    AgentConfig, ExecutionMode, MAX_STAGE_AGENTS, MAX_STAGES, MIN_STAGES, McpServerConfig,
+    ProjectConfig, RoleConfig, ValidationMode,
 };
 use orrery_core::engine::{EngineEvent, RunOutcome};
 use orrery_core::plan::ImplementationPlan;
@@ -115,6 +115,7 @@ pub struct App {
     pub config: ProjectConfig,
     pub roles: Vec<RoleConfig>,
     pub agents: Vec<AgentConfig>,
+    pub mcp_servers: Vec<McpServerConfig>,
     pub plan: Option<ImplementationPlan>,
     pub step_statuses: Vec<StepStatus>,
     pub focus: Focus,
@@ -124,6 +125,7 @@ pub struct App {
     pub step_selected: usize,
     pub stage_selected: usize,
     pub slot_selected: usize,
+    pub step_scroll: usize,
     pub stage_scroll: usize,
     pub slot_scroll: usize,
     pub stream: VecDeque<StreamEvent>,
@@ -147,6 +149,7 @@ impl App {
             config,
             roles,
             agents,
+            mcp_servers: Vec::new(),
             plan: None,
             step_statuses: Vec::new(),
             focus: Focus::TopMenu,
@@ -156,6 +159,7 @@ impl App {
             step_selected: 0,
             stage_selected: 0,
             slot_selected: 0,
+            step_scroll: 0,
             stage_scroll: 0,
             slot_scroll: 0,
             stream: VecDeque::new(),
@@ -838,6 +842,15 @@ impl App {
         if regions.too_small || regions.stage_columns.is_empty() {
             return;
         }
+        let step_rows = usize::from(regions.steps_panel.height.saturating_sub(2));
+        if step_rows > 0 {
+            if self.step_selected < self.step_scroll {
+                self.step_scroll = self.step_selected;
+            } else if self.step_selected >= self.step_scroll + step_rows {
+                self.step_scroll = self.step_selected + 1 - step_rows;
+            }
+        }
+
         let visible_stages = regions.stage_columns.len();
         if self.stage_selected < self.stage_scroll {
             self.stage_scroll = self.stage_selected;
@@ -906,13 +919,14 @@ impl App {
                     self.focus = Focus::StepsPanel;
                     let inner_y = regions.steps_panel.y.saturating_add(1);
                     let clicked_row = usize::from(mouse.row.saturating_sub(inner_y));
+                    let target = self.step_scroll.saturating_add(clicked_row);
                     let len = self
                         .plan
                         .as_ref()
                         .map_or(0, |p| p.steps.len())
                         .max(self.step_statuses.len());
-                    if clicked_row < len {
-                        self.step_selected = clicked_row;
+                    if target < len {
+                        self.step_selected = target;
                     }
                     self.handle_steps_panel_key(KeyCode::Enter)
                 }
@@ -1978,5 +1992,47 @@ mod tests {
         );
         app.keep_selection_visible(&r_wide);
         assert_eq!(app.stage_scroll, 0);
+    }
+
+    #[test]
+    fn keep_selection_visible_scrolls_steps() {
+        let mut app = make_app();
+        app.step_statuses = vec![StepStatus::Pending; 20];
+        let regions = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        let rows = usize::from(regions.steps_panel.height.saturating_sub(2));
+        assert!(rows > 0 && rows < 20);
+
+        app.step_selected = 18;
+        app.keep_selection_visible(&regions);
+        assert_eq!(app.step_scroll + rows - 1, 18);
+
+        app.step_selected = 0;
+        app.keep_selection_visible(&regions);
+        assert_eq!(app.step_scroll, 0);
+    }
+
+    #[test]
+    fn steps_click_respects_scroll() {
+        let mut app = make_app();
+        app.step_statuses = vec![StepStatus::Pending; 20];
+        app.step_scroll = 12;
+        let regions = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        let first_inner_col = regions.steps_panel.x + 1;
+        let first_inner_row = regions.steps_panel.y + 1;
+        let actions =
+            app.handle_mouse_event(left_click(first_inner_col, first_inner_row), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app.focus, Focus::StepsPanel);
+        assert_eq!(app.step_selected, 12);
     }
 }

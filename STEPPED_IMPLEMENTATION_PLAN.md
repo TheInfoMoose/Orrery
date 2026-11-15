@@ -19,12 +19,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
-| 2 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 3 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 4 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 5 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 6 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
+| 2 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 3 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 4 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 5 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 29** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) |
 | **STEP 30** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` |
 | **STEP 31** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) |
+| **STEP 32** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-core/src/engine.rs` |
 
 ---
 
@@ -1787,6 +1787,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 Scope note: written 2026-11-13. `tokio-util` is in the TUI manifest since Step 27, for `CancellationToken`.
 - Amended 2026-11-15 after Step 29's review: after every `UiLayoutRegions::compute`, call `app.keep_selection_visible(&regions)` (added in Step 30), then recompute if `stage_scroll` or `slot_scroll` changed, so the drawn frame matches the selection.
 - Amended 2026-11-15 after Step 31's review: two fixes that need `app.rs` and `widgets.rs` move here. (1) The steps list scrolled from `step_selected` at draw time while a click mapped the clicked row straight to a step index, so clicks picked the wrong step once the list scrolled; `App` now stores `step_scroll`. (2) Settings showed `gate_tools` because `App` had no MCP server list; `App` now holds `mcp_servers`, filled by `run_tui`.
+- Amended 2026-11-15 during Step 32's correction: `WorkflowEngine` had no way to reach its `LiveStreamHub` (it lives in the private `ctx`), so `engine.rs` joins ALLOWED_FILES for one accessor, `subscribe_stream()` (§9.8). This edit lands mid-step, so `check 32` will flag the plan, the spec and `engine.rs`; Claude runs the POST_GATE directly and reviews the `engine.rs` diff by hand.
 
 ```text
 [STEP_ID]
@@ -1798,6 +1799,7 @@ ALLOWED_FILES:
   - crates/orrery-tui/src/bridge.rs
   - crates/orrery-tui/src/app.rs
   - crates/orrery-tui/src/widgets.rs
+  - crates/orrery-core/src/engine.rs (only `WorkflowEngine::subscribe_stream`)
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1106-1119 (§9.9 bridge block; binding)
   - ORRERY_TECHNICAL_SPECIFICATION.md:574-580 (§6.5 engine bridge)
@@ -1817,7 +1819,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `EngineController::handle`:
      - config-edit actions → save via `ConfigStore::save_project`;
      - `IngestPlan` → parse with `ImplementationPlan::from_file`, set `plan_path`/`step_marker`, save;
-     - `Run` → `build_engine(store, make_backends()?)`, then spawn `engine.run(RunOptions { wait_for_operator: true, ..Default }, cancel.child_token())` on a Tokio task, and forward its `EngineEvent`s and `LiveStreamHub` events into the app's channels;
+     - `Run` → `build_engine(store, make_backends()?)`, then spawn `engine.run(RunOptions { wait_for_operator: true, ..Default }, cancel.child_token())` on a Tokio task, and forward its `EngineEvent`s and its `LiveStreamHub` events (`engine.subscribe_stream()`, added to `engine.rs` as `self.ctx.stream.subscribe()`) into the app's channels;
      - `Interrupt` → `cancel()`;
      - `Approve`/`Reject` → `operator_sender().send(..)`.
    - `run_tui`:

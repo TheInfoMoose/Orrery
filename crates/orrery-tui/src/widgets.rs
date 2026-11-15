@@ -303,11 +303,7 @@ fn render_steps_panel(frame: &mut Frame, app: &App, rect: Rect) {
     }
 
     let visible_rows = usize::from(inner.height);
-    let scroll_start = if app.step_selected >= visible_rows {
-        app.step_selected + 1 - visible_rows
-    } else {
-        0
-    };
+    let scroll_start = app.step_scroll.min(step_count);
 
     let mut lines = Vec::with_capacity(visible_rows);
     for idx in scroll_start..(scroll_start + visible_rows).min(step_count) {
@@ -664,6 +660,16 @@ fn render_settings_modal(frame: &mut Frame, app: &App, modal_rect: Rect) {
             .join(", ")
     };
 
+    let mcp_list: String = if app.mcp_servers.is_empty() {
+        "(none)".to_string()
+    } else {
+        app.mcp_servers
+            .iter()
+            .map(|s| s.server_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
     let gates = if app.config.gate_tools.is_empty() {
         "(none)".to_string()
     } else {
@@ -690,7 +696,8 @@ fn render_settings_modal(frame: &mut Frame, app: &App, modal_rect: Rect) {
     let lines = vec![
         Line::from(Span::styled(format!("Roles: {role_list}"), primary)),
         Line::from(Span::styled(format!("Agents: {agent_list}"), primary)),
-        Line::from(Span::styled(format!("Gate/MCP tools: {gates}"), primary)),
+        Line::from(Span::styled(format!("MCP servers: {mcp_list}"), primary)),
+        Line::from(Span::styled(format!("Gate tools: {gates}"), primary)),
         Line::from(Span::styled(format!("Hooks: {hooks_str}"), primary)),
         Line::from(Span::styled("Press Esc, Enter, or q to close", dim)),
     ];
@@ -774,8 +781,8 @@ mod tests {
     use std::path::PathBuf;
 
     use orrery_core::config::{
-        AgentConfig, HookConfig, HookFailure, ProjectConfig, RoleConfig, RoleKind, ValidationMode,
-        WorkspaceMount,
+        AgentConfig, HookConfig, HookFailure, McpServerConfig, McpTransportConfig, ProjectConfig,
+        RoleConfig, RoleKind, ValidationMode, WorkspaceMount,
     };
     use orrery_core::plan::ImplementationPlan;
     use ratatui::Terminal;
@@ -989,6 +996,7 @@ mod tests {
         app.step_statuses = vec![StepStatus::Pending; 20];
         app.focus = Focus::StepsPanel;
         app.step_selected = 18;
+        app.step_scroll = 15;
         let (buf_scroll, regions_scroll) = draw_app(&app, 80, 24);
         let scrolled_text = rect_text(&buf_scroll, regions_scroll.steps_panel);
         assert!(scrolled_text.contains("Step 19"));
@@ -1206,5 +1214,25 @@ mod tests {
         app.modal = Modal::Settings;
         let (buf_empty, _) = draw_app(&app, 80, 24);
         assert!(buffer_text(&buf_empty).contains("(none)"));
+    }
+
+    #[test]
+    fn settings_lists_mcp_servers() {
+        let mut app = test_app();
+        app.mcp_servers = vec![McpServerConfig {
+            server_id: "fs".into(),
+            transport: McpTransportConfig::Stdio {
+                command: "mcp-fs".into(),
+                args: Vec::new(),
+            },
+            write_tools: Vec::new(),
+        }];
+        app.modal = Modal::Settings;
+        let (buf, _) = draw_app(&app, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("MCP servers: fs"),
+            "expected 'MCP servers: fs' in Settings modal, got:\n{text}"
+        );
     }
 }

@@ -1025,7 +1025,7 @@ pub struct WorkflowEngine { /* ctx, events: broadcast::Sender<EngineEvent>, oper
 impl WorkflowEngine {
     pub fn new(ctx: EngineContext) -> Result<Self>;  // project.validate_for_run(..) must pass
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent>;  // capacity 256
-    pub fn operator_sender(&self) -> tokio::sync::mpsc::Sender<OperatorDecision>;
+    pub fn operator_sender(&self) -> tokio::sync::mpsc::Sender<OperatorDecision>; pub fn subscribe_stream(&self) -> tokio::sync::broadcast::Receiver<StreamEvent>; // ctx.stream.subscribe()
     pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome>;  // opts added (overrides §5.10.6)
 }
 pub struct Backends { pub secrets: Arc<dyn SecretStore>, pub containers: Arc<dyn ContainerBackend>, pub inference_control: Arc<dyn InferenceControl>,
