@@ -511,7 +511,7 @@ At 80×24: 3 + 3 + 9 + 6 + 3 = 24. No unused rows.
 
 ### 6.2 Widgets
 - **Header:** banner or compact header; project path; status badge `IDLE | RUNNING | AWAITING OPERATOR | PASSED | ERROR`.
-- **Top menu:** `[Ingest Plan]`, `[Mode: RUN|LOOP]`, `[Cycles: N]` (dimmed in Run mode), `[Passed: X/Y]` (read-only), `[Stages: - N +]`.
+- **Top menu:** `[Ingest]`, `[Mode: RUN|LOOP]`, `[Cycles: N]` (dimmed in Run mode), `[Passed: X/Y]` (read-only), `[Stages: - N +]`.
 - **Steps panel:** plan steps with badges `[ ]` pending, `[>]` in progress, `[✓]` passed, `[?]` awaiting operator, `[!]` failed.
 - **Stage canvas:** header = role selector. Slots locked until a role is chosen. Orchestrator: 1 slot. Other roles: choosing an agent in slot k unlocks slot k+1, up to 15. Each slot shows the backend kind tag (`LM`, `CLI`, `API`).
 - **Live stream:** redacted events from `LiveStreamHub::subscribe`, newest at the bottom, scrollable; auto-follows unless the user scrolled up.
@@ -1059,7 +1059,7 @@ impl UiLayoutRegions {
 }
 ```
 - `too_small` when `width < 80 || height < 24`; then every other rect is `Rect::default()` and the item lists are empty.
-- Menu items: the inner row of each bordered menu (`x + 1`, `y + 1`, height 1). Items placed left to right with 1 column gap, each rect as wide as its fixed label. Top labels (widths fixed to the widest variant): `"[Ingest Plan]"`, `"[Mode: LOOP]"`, `"[Cycles: 999]"`, `"[Passed: 999/999]"`, `"[Stages:"` (not a region), `"[-]"` → `StagesMinus`, `" 15 "` (not a region), `"[+]"` → `StagesPlus`, `"]"` (not a region). Footer labels: `"[Stop]"` (`RunStopButton`, also used for `[Run]`), `"[Approve]"`, `"[Reject]"`, `"[Settings]"`, `"[Help]"`, `"[Mouse: OFF]"`, `"[Quit]"`. `ApproveButton`/`RejectButton` rects always exist in `footer_items` and `region_at` always returns them. Visibility is not a layout concern: widgets draw them only when `App::approve_visible()`, and the app ignores activations of them otherwise.
+- Menu items: the inner row of each bordered menu (`x + 1`, `y + 1`, height 1). Items placed left to right with 1 column gap, each rect as wide as its fixed label. Top labels (widths fixed to the widest variant; they total 77 columns with gaps, inside the 78-column inner row at 80×24 — amended 2026-11-15, "[Ingest Plan]" did not fit): `"[Ingest]"`, `"[Mode: LOOP]"`, `"[Cycles: 999]"`, `"[Passed: 999/999]"`, `"[Stages:"` (not a region), `"[-]"` → `StagesMinus`, `" 15 "` (not a region), `"[+]"` → `StagesPlus`, `"]"` (not a region). Footer labels: `"[Stop]"` (`RunStopButton`, also used for `[Run]`), `"[Approve]"`, `"[Reject]"`, `"[Settings]"`, `"[Help]"`, `"[Mouse: OFF]"`, `"[Quit]"`. `ApproveButton`/`RejectButton` rects always exist in `footer_items` and `region_at` always returns them. Visibility is not a layout concern: widgets draw them only when `App::approve_visible()`, and the app ignores activations of them otherwise.
 - Stage canvas inner area = `stage_canvas` minus its border. `visible = min(stage_count - stage_scroll, max(1, inner.width / 18))`; columns split the width evenly, the last takes the remainder. Column header = top 3 rows; slots = following rows, one per slot index `slot_scroll..15` until the column height runs out.
 
 ```rust
