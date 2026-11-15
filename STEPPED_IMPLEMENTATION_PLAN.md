@@ -19,11 +19,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 2 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 3 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 4 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 5 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 2 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 3 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 4 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 30** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` |
 | **STEP 31** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) |
 | **STEP 32** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-core/src/engine.rs` |
+| **STEP 33** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) |
 
 ---
 
@@ -1863,6 +1863,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13. **Changed from the 2026-11-12 block:** `tokio-util` is added to the CLI crate's dependencies. `orrery run` cancels the engine on Ctrl+C through a `CancellationToken`. `main` prints the parsed command in this step only (Step 34 replaces it).
+- Amended 2026-11-15 during Step 33's review: §9.10's `args_conflicts_with_subcommands = true` broke `orrery --project ./x status` under clap 4.6.7 (parsed as `path = "status"`), and without it `orrery ./x status` silently dropped `./x`. Replaced by `Cli::validate` (§9.10). This edit lands mid-step, so `check 33` will flag the plan and the spec; Claude runs the POST_GATE directly.
 
 ```text
 [STEP_ID]
@@ -1898,13 +1899,14 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `[lints] workspace = true`.
    Run `cargo fetch`.
 3. args.rs: the §9.10 args bullet, with every §7 command and flag under exactly those names.
-4. main.rs: `mod args;` and a `main` that parses `Cli` and prints `{:?}` of `into_command()`.
+4. main.rs: `mod args;` and a `main` that parses `Cli`, calls `cli.validate()` (on `Err`, `e.exit()`), and prints `{:?}` of `into_command()`.
 5. Tests (args::tests; `Cli::try_parse_from`):
    - `every_spec_row_parses`: one assertion per §7 row (table-driven `&[&[&str]]`).
    - `bare_orrery_is_tui_dot`.
    - `orrery_path_is_tui_path`.
    - `stage_count_out_of_range_rejected`: `workflow stages 1` and `16` fail; `2` and `15` parse.
    - `project_flag_is_global`: `orrery status --project ./x` and `orrery --project ./x status` both parse.
+   - `path_with_subcommand_is_usage_error`: `orrery ./x status` → `validate()` is `Err` with kind `ArgumentConflict`; `orrery ./x`, `orrery status` and `orrery --project ./x status` validate `Ok`, the last as `Status`.
    - `mount_and_inference_flags`: `--mount rw` and `--mode router` parse; `--mount bad` and `--mode other` fail; `inference add` with both `--container` and `--compose` fails.
 
 [POST_GATE]

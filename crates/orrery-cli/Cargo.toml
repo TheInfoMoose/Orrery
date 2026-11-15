@@ -1,0 +1,24 @@
+[package]
+name = "orrery-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orrery"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+orrery-core.workspace = true
+orrery-tui.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
