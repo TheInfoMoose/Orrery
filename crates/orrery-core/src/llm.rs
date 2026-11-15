@@ -1,18 +1,21 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
+use futures_util::StreamExt;
 use serde::Deserialize;
 
 use crate::checkpoint::{AgentReport, StampedReport, SubtaskAllocation, report_json_schema};
 use crate::config::{
     AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, format_mapped_tool_name,
 };
-use crate::mcp::{McpGatekeeper, McpToolSchema, WriteScope};
+use crate::mcp::{McpGatekeeper, McpToolSchema, WriteScope, tool_result_text};
 use crate::plan::PlanStep;
-use crate::stream_log::LiveStreamHub;
+use crate::security::{SecretStore, SecretValue};
+use crate::stream_log::{LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
 
 pub const SUBMIT_REPORT_TOOL: &str = "submit_report";
@@ -553,6 +556,435 @@ impl ToolCallAccumulator {
 
     pub fn finish(self) -> Vec<AssembledToolCall> {
         self.calls.into_values().collect()
+    }
+}
+
+const DEFAULT_MAX_TOOL_CALLS: usize = 50;
+const MAX_LINE_BUFFER_BYTES: usize = 4096;
+
+pub struct HttpChatDriver {
+    client: reqwest::Client,
+    secrets: Arc<dyn SecretStore>,
+    inference: Vec<InferenceConfig>,
+    max_tool_calls: usize,
+}
+
+impl HttpChatDriver {
+    pub fn new(secrets: Arc<dyn SecretStore>, inference: Vec<InferenceConfig>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            secrets,
+            inference,
+            max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+        }
+    }
+
+    pub fn with_max_tool_calls(mut self, n: usize) -> Self {
+        self.max_tool_calls = n;
+        self
+    }
+
+    fn new_turn_state(&self, inv: &AgentInvocation) -> TurnState {
+        TurnState::new(inv, self.max_tool_calls)
+    }
+}
+
+fn bearer_header(agent: &AgentConfig, secrets: &dyn SecretStore) -> Result<Option<SecretValue>> {
+    match &agent.backend {
+        AgentBackend::CloudApi {
+            keychain_service,
+            keychain_account,
+            ..
+        } => {
+            let secret = secrets.get(keychain_service, keychain_account)?;
+            Ok(Some(SecretValue::new(format!(
+                "Bearer {}",
+                secret.expose()
+            ))))
+        }
+        AgentBackend::LocalModel { .. } | AgentBackend::AgentCli { .. } => Ok(None),
+    }
+}
+
+struct LineBuffer {
+    kind: StreamEventKind,
+    buf: String,
+}
+
+impl LineBuffer {
+    fn new(kind: StreamEventKind) -> Self {
+        Self {
+            kind,
+            buf: String::new(),
+        }
+    }
+
+    fn push(&mut self, delta: &str, inv: &AgentInvocation, stream: &LiveStreamHub) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        self.buf.push_str(delta);
+
+        loop {
+            if let Some(pos) = self.buf.find('\n')
+                && pos <= MAX_LINE_BUFFER_BYTES
+            {
+                let mut line: String = self.buf.drain(..=pos).collect();
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                if !line.is_empty() {
+                    self.emit_line(line, inv, stream)?;
+                }
+                continue;
+            }
+
+            if self.buf.len() > MAX_LINE_BUFFER_BYTES {
+                let cut = self.buf.floor_char_boundary(MAX_LINE_BUFFER_BYTES);
+                let chunk: String = self.buf.drain(..cut).collect();
+                if !chunk.is_empty() {
+                    self.emit_line(chunk, inv, stream)?;
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&mut self, inv: &AgentInvocation, stream: &LiveStreamHub) -> Result<()> {
+        if !self.buf.is_empty() {
+            let remainder = std::mem::take(&mut self.buf);
+            self.emit_line(remainder, inv, stream)?;
+        }
+        Ok(())
+    }
+
+    fn emit_line(&self, text: String, inv: &AgentInvocation, stream: &LiveStreamHub) -> Result<()> {
+        stream.emit(StreamEvent {
+            timestamp: Utc::now(),
+            step_number: Some(inv.step_number),
+            stage_index: Some(inv.stage_index),
+            agent_id: Some(inv.agent.agent_id.clone()),
+            kind: self.kind,
+            text,
+        })
+    }
+}
+
+struct ResponseStreamProcessor {
+    parser: SseParser,
+    output_buf: LineBuffer,
+    reasoning_buf: LineBuffer,
+    tool_acc: ToolCallAccumulator,
+    assistant_content: String,
+    done: bool,
+}
+
+impl Default for ResponseStreamProcessor {
+    fn default() -> Self {
+        Self {
+            parser: SseParser::default(),
+            output_buf: LineBuffer::new(StreamEventKind::Output),
+            reasoning_buf: LineBuffer::new(StreamEventKind::Reasoning),
+            tool_acc: ToolCallAccumulator::default(),
+            assistant_content: String::new(),
+            done: false,
+        }
+    }
+}
+
+impl ResponseStreamProcessor {
+    fn push_sse_bytes(
+        &mut self,
+        bytes: &[u8],
+        inv: &AgentInvocation,
+        stream: &LiveStreamHub,
+    ) -> Result<bool> {
+        let items = self.parser.push(bytes)?;
+        self.push_items(&items, inv, stream)
+    }
+
+    fn push_items(
+        &mut self,
+        items: &[SseItem],
+        inv: &AgentInvocation,
+        stream: &LiveStreamHub,
+    ) -> Result<bool> {
+        for item in items {
+            match item {
+                SseItem::Chunk(chunk) => {
+                    if let Some(reasoning) = &chunk.reasoning {
+                        self.reasoning_buf.push(reasoning, inv, stream)?;
+                    }
+                    if let Some(content) = &chunk.content {
+                        self.assistant_content.push_str(content);
+                        self.output_buf.push(content, inv, stream)?;
+                    }
+                    for delta in &chunk.tool_calls {
+                        self.tool_acc.apply(delta);
+                    }
+                }
+                SseItem::Done => {
+                    self.done = true;
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn finish(
+        mut self,
+        inv: &AgentInvocation,
+        stream: &LiveStreamHub,
+    ) -> Result<(String, Vec<AssembledToolCall>)> {
+        if !self.done && !self.parser.buf.is_empty() {
+            let items = self.parser.push(b"\n")?;
+            let _ = self.push_items(&items, inv, stream)?;
+        }
+        self.reasoning_buf.flush(inv, stream)?;
+        self.output_buf.flush(inv, stream)?;
+        Ok((self.assistant_content, self.tool_acc.finish()))
+    }
+}
+
+struct TurnState {
+    messages: Vec<serde_json::Value>,
+    max_tool_calls: usize,
+    tool_calls_used: usize,
+    call_seq: usize,
+    invalid_report_reprompted: bool,
+    no_tool_call_reprompted: bool,
+}
+
+impl TurnState {
+    fn new(inv: &AgentInvocation, max_tool_calls: usize) -> Self {
+        let messages = vec![
+            serde_json::json!({
+                "role": "system",
+                "content": inv.system_prompt,
+            }),
+            serde_json::json!({
+                "role": "user",
+                "content": inv.user_prompt,
+            }),
+        ];
+        Self {
+            messages,
+            max_tool_calls,
+            tool_calls_used: 0,
+            call_seq: 0,
+            invalid_report_reprompted: false,
+            no_tool_call_reprompted: false,
+        }
+    }
+
+    fn messages(&self) -> &[serde_json::Value] {
+        &self.messages
+    }
+
+    async fn finish_response(
+        &mut self,
+        proc: ResponseStreamProcessor,
+        inv: &AgentInvocation,
+        mcp: &McpGatekeeper,
+        stream: &LiveStreamHub,
+    ) -> Result<Option<AgentReport>> {
+        let (assistant_content, mut calls) = proc.finish(inv, stream)?;
+        if calls.is_empty() {
+            if self.no_tool_call_reprompted {
+                return Err(Error::Report {
+                    message: "agent did not call submit_report after reprompt".to_string(),
+                });
+            }
+            self.no_tool_call_reprompted = true;
+            self.messages.push(serde_json::json!({
+                "role": "user",
+                "content": "You must call submit_report.",
+            }));
+            return Ok(None);
+        }
+
+        for call in &mut calls {
+            self.call_seq += 1;
+            if call.id.is_empty() {
+                call.id = format!("orrery_call_{}", self.call_seq);
+            }
+        }
+
+        let tool_calls_json: Vec<serde_json::Value> = calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                })
+            })
+            .collect();
+        let content_val = if assistant_content.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(assistant_content)
+        };
+        self.messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": content_val,
+            "tool_calls": tool_calls_json,
+        }));
+
+        for call in calls {
+            if call.name == SUBMIT_REPORT_TOOL {
+                let parsed = serde_json::from_str::<AgentReport>(&call.arguments)
+                    .map_err(|err| Error::Report {
+                        message: format!("invalid submit_report JSON: {err}"),
+                    })
+                    .and_then(|report| {
+                        report.validate_for_role(&inv.role, inv.stage_count)?;
+                        Ok(report)
+                    });
+                match parsed {
+                    Ok(report) => return Ok(Some(report)),
+                    Err(err) => {
+                        if self.invalid_report_reprompted {
+                            return Err(err);
+                        }
+                        self.invalid_report_reprompted = true;
+                        self.messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": format!("error: {err}"),
+                        }));
+                    }
+                }
+                continue;
+            }
+
+            self.tool_calls_used += 1;
+            if self.tool_calls_used > self.max_tool_calls {
+                return Err(Error::Agent {
+                    agent_id: inv.agent.agent_id.clone(),
+                    message: format!(
+                        "exceeded maximum of {} tool calls per turn",
+                        self.max_tool_calls
+                    ),
+                });
+            }
+
+            let (server_id, tool_name) = match parse_mapped_tool_name(&call.name) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(inv.step_number),
+                        stage_index: Some(inv.stage_index),
+                        agent_id: Some(inv.agent.agent_id.clone()),
+                        kind: StreamEventKind::ToolCall,
+                        text: format!("{} denied: {err}", call.name),
+                    })?;
+                    self.messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": format!("error: {err}"),
+                    }));
+                    continue;
+                }
+            };
+
+            let exec_res = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                Ok(args) => {
+                    mcp.execute_for_role(&inv.role, &inv.write_scope, &server_id, &tool_name, args)
+                        .await
+                }
+                Err(err) => Err(Error::from(err)),
+            };
+
+            match exec_res {
+                Ok(val) => {
+                    stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(inv.step_number),
+                        stage_index: Some(inv.stage_index),
+                        agent_id: Some(inv.agent.agent_id.clone()),
+                        kind: StreamEventKind::ToolCall,
+                        text: format!("{server_id}:{tool_name} ok"),
+                    })?;
+                    self.messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": tool_result_text(&val),
+                    }));
+                }
+                Err(err) => {
+                    stream.emit(StreamEvent {
+                        timestamp: Utc::now(),
+                        step_number: Some(inv.step_number),
+                        stage_index: Some(inv.stage_index),
+                        agent_id: Some(inv.agent.agent_id.clone()),
+                        kind: StreamEventKind::ToolCall,
+                        text: format!("{server_id}:{tool_name} denied: {err}"),
+                    })?;
+                    self.messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": format!("error: {err}"),
+                    }));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl AgentDriver for HttpChatDriver {
+    async fn run_turn(
+        &self,
+        inv: &AgentInvocation,
+        mcp: &McpGatekeeper,
+        stream: &LiveStreamHub,
+    ) -> Result<AgentReport> {
+        let url = endpoint_for(&inv.agent, &self.inference)?;
+        let mut state = self.new_turn_state(inv);
+
+        loop {
+            let body = build_chat_request(inv, state.messages());
+            let mut req = self.client.post(&url).json(&body);
+            if let Some(auth) = bearer_header(&inv.agent, self.secrets.as_ref())? {
+                req = req.header(reqwest::header::AUTHORIZATION, auth.expose());
+            }
+
+            let resp = req.send().await.map_err(Error::Http)?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(Error::Agent {
+                    agent_id: inv.agent.agent_id.clone(),
+                    message: format!("HTTP {status}"),
+                });
+            }
+
+            let mut proc = ResponseStreamProcessor::default();
+            let mut byte_stream = resp.bytes_stream();
+
+            while let Some(chunk_res) = byte_stream.next().await {
+                let bytes = chunk_res.map_err(Error::Http)?;
+                if proc.push_sse_bytes(&bytes, inv, stream)? {
+                    break;
+                }
+            }
+
+            if let Some(report) = state.finish_response(proc, inv, mcp, stream).await? {
+                return Ok(report);
+            }
+        }
     }
 }
 
@@ -1353,5 +1785,792 @@ mod tests {
                 },
             ]
         );
+    }
+
+    impl TurnState {
+        async fn handle_sse_response(
+            &mut self,
+            items: &[SseItem],
+            inv: &AgentInvocation,
+            mcp: &McpGatekeeper,
+            stream: &LiveStreamHub,
+        ) -> Result<Option<AgentReport>> {
+            let mut proc = ResponseStreamProcessor::default();
+            let _ = proc.push_items(items, inv, stream)?;
+            self.finish_response(proc, inv, mcp, stream).await
+        }
+    }
+
+    fn tool_call_chunk(index: usize, id: Option<&str>, name: &str, arguments: &str) -> SseItem {
+        SseItem::Chunk(ChatChunk {
+            content: None,
+            reasoning: None,
+            tool_calls: vec![ToolCallDelta {
+                index,
+                id: id.map(str::to_owned),
+                name: Some(name.to_string()),
+                arguments: arguments.to_string(),
+            }],
+            finish_reason: Some("tool_calls".to_string()),
+        })
+    }
+
+    fn content_chunk(text: &str) -> SseItem {
+        SseItem::Chunk(ChatChunk {
+            content: Some(text.to_string()),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            finish_reason: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn submit_report_ends_turn() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let items = vec![
+            tool_call_chunk(
+                0,
+                Some("call_rep_1"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"Implemented feature\",\"artifacts\":[\"src/lib.rs\"]}",
+            ),
+            SseItem::Done,
+        ];
+
+        let report = state
+            .handle_sse_response(&items, &inv, &mcp, &hub)
+            .await
+            .unwrap()
+            .expect("valid submit_report should end turn");
+
+        assert_eq!(report.status, ReportStatus::Complete);
+        assert_eq!(report.summary, "Implemented feature");
+        assert_eq!(report.artifacts, vec!["src/lib.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn invalid_report_reprompted_once_then_error() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        // First invalid report: empty summary
+        let invalid_1 = vec![
+            tool_call_chunk(
+                0,
+                Some("call_bad_1"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"   \"}",
+            ),
+            SseItem::Done,
+        ];
+        let first_res = state
+            .handle_sse_response(&invalid_1, &inv, &mcp, &hub)
+            .await
+            .unwrap();
+        assert!(first_res.is_none());
+
+        let last_msg = state.messages().last().unwrap();
+        assert_eq!(last_msg["role"], "tool");
+        assert_eq!(last_msg["tool_call_id"], "call_bad_1");
+        assert!(
+            last_msg["content"]
+                .as_str()
+                .unwrap()
+                .contains("summary must not be empty")
+        );
+
+        // Second invalid report: status not allowed for Implementer
+        let invalid_2 = vec![
+            tool_call_chunk(
+                0,
+                Some("call_bad_2"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Confirmed\",\"summary\":\"wrong status for implementer\"}",
+            ),
+            SseItem::Done,
+        ];
+        let err = state
+            .handle_sse_response(&invalid_2, &inv, &mcp, &hub)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Report { .. }),
+            "expected Error::Report on second invalid report, got {err:?}"
+        );
+
+        // Also verify: invalid JSON on first attempt followed by valid report on second attempt succeeds
+        let mut recovery_state = driver.new_turn_state(&inv);
+        let bad_json = vec![
+            tool_call_chunk(0, Some("call_bad_json"), SUBMIT_REPORT_TOOL, "{not-json"),
+            SseItem::Done,
+        ];
+        assert!(
+            recovery_state
+                .handle_sse_response(&bad_json, &inv, &mcp, &hub)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let valid_retry = vec![
+            tool_call_chunk(
+                0,
+                Some("call_valid"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"Recovered on second try\"}",
+            ),
+            SseItem::Done,
+        ];
+        let recovered = recovery_state
+            .handle_sse_response(&valid_retry, &inv, &mcp, &hub)
+            .await
+            .unwrap()
+            .expect("second attempt with valid report should succeed");
+        assert_eq!(recovered.summary, "Recovered on second try");
+    }
+
+    #[tokio::test]
+    async fn no_tool_call_reprompted_once_then_error() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let no_calls = vec![content_chunk("I am done.\n"), SseItem::Done];
+        let first_res = state
+            .handle_sse_response(&no_calls, &inv, &mcp, &hub)
+            .await
+            .unwrap();
+        assert!(first_res.is_none());
+
+        let last_msg = state.messages().last().unwrap();
+        assert_eq!(last_msg["role"], "user");
+        assert_eq!(last_msg["content"], "You must call submit_report.");
+
+        let err = state
+            .handle_sse_response(&no_calls, &inv, &mcp, &hub)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Report { .. }),
+            "expected Error::Report on second missing tool call, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_tool_returns_error_to_model_and_emits_event() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+
+        let transport = Arc::new(crate::mcp::MockMcpTransport::new("git").with_tool(
+            "status",
+            serde_json::json!({"content": [{"type": "text", "text": "clean"}]}),
+        ));
+        let mut mcp = McpGatekeeper::new();
+        mcp.register("git", transport.clone(), Vec::new());
+
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1"); // role allows only ["filesystem:*"]
+        let mut state = driver.new_turn_state(&inv);
+
+        let items = vec![
+            tool_call_chunk(0, Some("call_git_1"), "git__status", "{}"),
+            SseItem::Done,
+        ];
+        let res = state
+            .handle_sse_response(&items, &inv, &mcp, &hub)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+
+        let tool_msg = state.messages().last().unwrap();
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], "call_git_1");
+        assert!(
+            tool_msg["content"].as_str().unwrap().starts_with("error:"),
+            "expected tool message starting with 'error:', got {:?}",
+            tool_msg["content"]
+        );
+
+        let events = hub.recent(10).unwrap();
+        assert!(
+            events.iter().any(|ev| {
+                ev.kind == StreamEventKind::ToolCall
+                    && ev.text.contains("git:status")
+                    && ev.text.contains("denied")
+            }),
+            "expected ToolCall event containing 'denied', got {events:?}"
+        );
+        assert!(transport.calls().is_empty());
+
+        // Also verify unmapped tool name and malformed JSON arguments produce error tool replies and denied events
+        let bad_calls = vec![
+            tool_call_chunk(0, Some("call_unmapped"), "unmapped_tool", "{}"),
+            tool_call_chunk(
+                1,
+                Some("call_bad_args"),
+                "filesystem__read_file",
+                "{bad-json",
+            ),
+            SseItem::Done,
+        ];
+        assert!(
+            state
+                .handle_sse_response(&bad_calls, &inv, &mcp, &hub)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let msgs = state.messages();
+        assert!(
+            msgs[msgs.len() - 2]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("error:")
+        );
+        assert!(
+            msgs[msgs.len() - 1]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("error:")
+        );
+    }
+
+    #[tokio::test]
+    async fn allowed_tool_result_returned_to_model() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+
+        let transport = Arc::new(crate::mcp::MockMcpTransport::new("filesystem").with_tool(
+            "read_file",
+            serde_json::json!({
+                "content": [{"type": "text", "text": "pub fn answer() -> u32 { 42 }"}]
+            }),
+        ));
+        let mut mcp = McpGatekeeper::new();
+        mcp.register("filesystem", transport.clone(), Vec::new());
+
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let step1 = vec![
+            tool_call_chunk(
+                0,
+                Some("call_fs_1"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            SseItem::Done,
+        ];
+        assert!(
+            state
+                .handle_sse_response(&step1, &inv, &mcp, &hub)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let tool_msg = state.messages().last().unwrap();
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], "call_fs_1");
+        assert_eq!(tool_msg["content"], "pub fn answer() -> u32 { 42 }");
+        assert_eq!(transport.calls().len(), 1);
+
+        let events = hub.recent(10).unwrap();
+        assert!(
+            events.iter().any(|ev| {
+                ev.kind == StreamEventKind::ToolCall && ev.text == "filesystem:read_file ok"
+            }),
+            "expected 'filesystem:read_file ok' ToolCall event, got {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_cap_enforced() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+
+        let transport = Arc::new(crate::mcp::MockMcpTransport::new("filesystem").with_tool(
+            "read_file",
+            serde_json::json!({"content": [{"type": "text", "text": "ok"}]}),
+        ));
+        let mut mcp = McpGatekeeper::new();
+        mcp.register("filesystem", transport, Vec::new());
+
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new()).with_max_tool_calls(2);
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        for idx in 1..=2 {
+            let items = vec![
+                tool_call_chunk(
+                    0,
+                    Some(&format!("call_{idx}")),
+                    "filesystem__read_file",
+                    "{\"path\":\"src/lib.rs\"}",
+                ),
+                SseItem::Done,
+            ];
+            let res = state
+                .handle_sse_response(&items, &inv, &mcp, &hub)
+                .await
+                .unwrap();
+            assert!(res.is_none());
+        }
+
+        let third = vec![
+            tool_call_chunk(
+                0,
+                Some("call_3"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            SseItem::Done,
+        ];
+        let err = state
+            .handle_sse_response(&third, &inv, &mcp, &hub)
+            .await
+            .unwrap_err();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "coder-1");
+                assert!(message.contains("2"));
+            }
+            other => panic!("expected Error::Agent on 3rd tool call, got {other:?}"),
+        }
+
+        // Verify that reaching max_tool_calls (2) still allows submit_report to finish the turn,
+        // whereas 3 MCP calls before submit_report in the same batch still trips Error::Agent.
+        let mut state_ok = driver.new_turn_state(&inv);
+        let batch_within_cap = vec![
+            tool_call_chunk(
+                0,
+                Some("call_a"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            tool_call_chunk(
+                1,
+                Some("call_b"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            tool_call_chunk(
+                2,
+                Some("call_rep"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"finished after 2 tool calls\"}",
+            ),
+            SseItem::Done,
+        ];
+        let report = state_ok
+            .handle_sse_response(&batch_within_cap, &inv, &mcp, &hub)
+            .await
+            .unwrap()
+            .expect("submit_report after 2 allowed tool calls should succeed");
+        assert_eq!(report.summary, "finished after 2 tool calls");
+
+        let mut state_over = driver.new_turn_state(&inv);
+        let batch_over_cap = vec![
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            tool_call_chunk(
+                1,
+                Some("call_2"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            tool_call_chunk(
+                2,
+                Some("call_3"),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            tool_call_chunk(
+                3,
+                Some("call_rep"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"should not reach\"}",
+            ),
+            SseItem::Done,
+        ];
+        let over_err = state_over
+            .handle_sse_response(&batch_over_cap, &inv, &mcp, &hub)
+            .await
+            .unwrap_err();
+        assert!(matches!(over_err, Error::Agent { .. }));
+    }
+
+    #[test]
+    fn bearer_only_for_cloud_api() {
+        let secrets = crate::security::InMemorySecretStore::new();
+        secrets
+            .set(
+                "orrery.test",
+                "testuser",
+                &SecretValue::new("sk-cloud-token-99"),
+            )
+            .unwrap();
+
+        let cloud_agent = AgentConfig {
+            agent_id: "cloud-1".to_string(),
+            display_name: "Cloud Agent".to_string(),
+            backend: AgentBackend::CloudApi {
+                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                model: "cloud-coder".to_string(),
+                temperature: 0.1,
+                max_context_tokens: 16384,
+                keychain_service: "orrery.test".to_string(),
+                keychain_account: "testuser".to_string(),
+            },
+        };
+        let local_agent = sample_local_agent("local-1");
+
+        let cloud_hdr = bearer_header(&cloud_agent, &secrets).unwrap();
+        assert_eq!(
+            cloud_hdr.as_ref().map(SecretValue::expose),
+            Some("Bearer sk-cloud-token-99")
+        );
+
+        let local_hdr = bearer_header(&local_agent, &secrets).unwrap();
+        assert!(local_hdr.is_none());
+    }
+
+    #[tokio::test]
+    async fn cloud_missing_secret_is_keychain_error() {
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let cloud_agent = AgentConfig {
+            agent_id: "cloud-1".to_string(),
+            display_name: "Cloud Agent".to_string(),
+            backend: AgentBackend::CloudApi {
+                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                model: "cloud-coder".to_string(),
+                temperature: 0.1,
+                max_context_tokens: 16384,
+                keychain_service: "orrery.test".to_string(),
+                keychain_account: "testuser".to_string(),
+            },
+        };
+
+        let hdr_err = bearer_header(&cloud_agent, secrets.as_ref()).unwrap_err();
+        assert!(
+            matches!(hdr_err, Error::Keychain(_)),
+            "expected Error::Keychain from bearer_header, got {hdr_err:?}"
+        );
+
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+
+        let mut inv = sample_invocation("cloud-1");
+        inv.agent = cloud_agent;
+
+        let turn_err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        assert!(
+            matches!(turn_err, Error::Keychain(_)),
+            "expected Error::Keychain from run_turn, got {turn_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_emitted_per_line() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let items = vec![
+            content_chunk("hel"),
+            content_chunk("lo\nwor"),
+            content_chunk("ld"),
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"done\"}",
+            ),
+            SseItem::Done,
+        ];
+
+        let report = state
+            .handle_sse_response(&items, &inv, &mcp, &hub)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.summary, "done");
+
+        let output_events: Vec<String> = hub
+            .recent(10)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == StreamEventKind::Output)
+            .map(|ev| ev.text)
+            .collect();
+        assert_eq!(
+            output_events,
+            vec!["hello".to_string(), "world".to_string()]
+        );
+
+        // Also verify: empty lines are not emitted, Reasoning is buffered per line, and >4096 bytes cuts at UTF-8 char boundary
+        let hub2 = LiveStreamHub::new(
+            tmp.path().join("logs2"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mut proc = ResponseStreamProcessor::default();
+        // 4095 ASCII 'a' + 3-byte '—' (U+2014) = 4098 bytes; byte 4096 falls inside '—'
+        let overlong = format!("{}\u{2014}tail", "a".repeat(4095));
+        let edge_items = vec![
+            content_chunk("\n\r\n"),
+            content_chunk(&overlong),
+            SseItem::Chunk(ChatChunk {
+                content: None,
+                reasoning: Some("think 1\nthink 2".to_string()),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+            }),
+            SseItem::Done,
+        ];
+        let _ = proc.push_items(&edge_items, &inv, &hub2).unwrap();
+        let _ = proc.finish(&inv, &hub2).unwrap();
+
+        let recent2 = hub2.recent(10).unwrap();
+        let out2: Vec<String> = recent2
+            .iter()
+            .filter(|ev| ev.kind == StreamEventKind::Output)
+            .map(|ev| ev.text.clone())
+            .collect();
+        assert_eq!(out2, vec!["a".repeat(4095), "\u{2014}tail".to_string()]);
+        let reas2: Vec<String> = recent2
+            .iter()
+            .filter(|ev| ev.kind == StreamEventKind::Reasoning)
+            .map(|ev| ev.text.clone())
+            .collect();
+        assert_eq!(reas2, vec!["think 1".to_string(), "think 2".to_string()]);
+
+        // Verify raw SSE byte chunks closing without trailing newline or data: [DONE]
+        let hub3 = LiveStreamHub::new(
+            tmp.path().join("logs3"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mut proc3 = ResponseStreamProcessor::default();
+        assert!(
+            !proc3
+                .push_sse_bytes(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"line1\\nli\"}}]}\n",
+                    &inv,
+                    &hub3,
+                )
+                .unwrap()
+        );
+        // Second chunk has no trailing '\n' and no [DONE] before finish()
+        assert!(
+            !proc3
+                .push_sse_bytes(
+                    b"data: {\"choices\":[{\"delta\":{\"content\":\"ne2\"}}]}",
+                    &inv,
+                    &hub3,
+                )
+                .unwrap()
+        );
+        let (assistant_text, _) = proc3.finish(&inv, &hub3).unwrap();
+        assert_eq!(assistant_text, "line1\nline2");
+        let out3: Vec<String> = hub3
+            .recent(10)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == StreamEventKind::Output)
+            .map(|ev| ev.text)
+            .collect();
+        assert_eq!(out3, vec!["line1".to_string(), "line2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn secret_split_across_deltas_redacted() {
+        let tmp = TempDir::new().unwrap();
+        let redactor = Arc::new(SecretRedactor::new());
+        let secret_str = "sk-SPLITTEST-0123456789";
+        redactor.register(&SecretValue::new(secret_str)).unwrap();
+
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            redactor,
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let items = vec![
+            content_chunk("key sk-SPLIT"),
+            content_chunk("TEST-0123456789 end\n"),
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                SUBMIT_REPORT_TOOL,
+                "{\"status\":\"Complete\",\"summary\":\"done\"}",
+            ),
+            SseItem::Done,
+        ];
+
+        let _ = state
+            .handle_sse_response(&items, &inv, &mcp, &hub)
+            .await
+            .unwrap();
+
+        let recent = hub.recent(10).unwrap();
+        assert!(!recent.is_empty());
+        assert!(recent.iter().any(|ev| ev.text.contains("[REDACTED]")));
+        for ev in &recent {
+            assert!(
+                !ev.text.contains(secret_str),
+                "leaked secret in event: {ev:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_tool_call_id_gets_generated_id() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+
+        let transport = Arc::new(crate::mcp::MockMcpTransport::new("filesystem").with_tool(
+            "read_file",
+            serde_json::json!({"content": [{"type": "text", "text": "file-body"}]}),
+        ));
+        let mut mcp = McpGatekeeper::new();
+        mcp.register("filesystem", transport, Vec::new());
+
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let driver = HttpChatDriver::new(secrets, Vec::new());
+        let inv = sample_invocation("coder-1");
+        let mut state = driver.new_turn_state(&inv);
+
+        let items = vec![
+            tool_call_chunk(
+                0,
+                None,
+                "filesystem__read_file",
+                "{\"path\":\"Cargo.toml\"}",
+            ),
+            SseItem::Done,
+        ];
+        let res = state
+            .handle_sse_response(&items, &inv, &mcp, &hub)
+            .await
+            .unwrap();
+        assert!(res.is_none());
+
+        let msgs = state.messages();
+        assert_eq!(msgs.len(), 4); // system, user, assistant, tool
+        let assistant_msg = &msgs[2];
+        let tool_msg = &msgs[3];
+
+        let generated_id = assistant_msg["tool_calls"][0]["id"]
+            .as_str()
+            .expect("assistant tool_calls[0].id should be a string")
+            .to_string();
+        assert!(!generated_id.is_empty());
+        assert_eq!(generated_id, "orrery_call_1");
+        assert_eq!(tool_msg["role"], "tool");
+        assert_eq!(tool_msg["tool_call_id"], generated_id);
+
+        // Second empty-id tool call in the same turn gets the next sequential id
+        let items_2 = vec![
+            tool_call_chunk(
+                0,
+                Some(""),
+                "filesystem__read_file",
+                "{\"path\":\"src/lib.rs\"}",
+            ),
+            SseItem::Done,
+        ];
+        assert!(
+            state
+                .handle_sse_response(&items_2, &inv, &mcp, &hub)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let msgs = state.messages();
+        assert_eq!(msgs[4]["tool_calls"][0]["id"], "orrery_call_2");
+        assert_eq!(msgs[5]["tool_call_id"], "orrery_call_2");
     }
 }
