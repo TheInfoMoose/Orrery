@@ -19,14 +19,13 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
-| 2 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
-| 3 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
-| 4 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 5 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 6 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 7 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 8 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
+| 2 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
+| 3 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
+| 4 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 5 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 6 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 7 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 27** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) |
 | **STEP 28** | **COMPLETED** (2026-11-15, validate-step PASS after spec-gap correction) | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) |
 | **STEP 29** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) |
+| **STEP 30** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` |
 
 ---
 

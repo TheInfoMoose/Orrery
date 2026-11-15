@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use orrery_core::checkpoint::{EnginePhase, StepStatus};
 use orrery_core::config::{
     AgentConfig, ExecutionMode, MAX_STAGE_AGENTS, MAX_STAGES, MIN_STAGES, ProjectConfig,
@@ -11,7 +13,7 @@ use orrery_core::engine::{EngineEvent, RunOutcome};
 use orrery_core::plan::ImplementationPlan;
 use orrery_core::stream_log::StreamEvent;
 
-use crate::layout::UiLayoutRegions;
+use crate::layout::{UiLayoutRegions, UiRegion};
 
 const STREAM_CAPACITY: usize = 2_000;
 const STREAM_PAGE_STEP: usize = 10;
@@ -503,12 +505,11 @@ impl App {
             },
             SelectorKind::Agent => {
                 if option == REMOVE_OPTION {
-                    let existing = self.config.stages.get(stage).and_then(|s| {
-                        s.agent_ids
-                            .get(slot)
-                            .or_else(|| slot.checked_sub(1).and_then(|i| s.agent_ids.get(i)))
-                            .cloned()
-                    });
+                    let existing = self
+                        .config
+                        .stages
+                        .get(stage)
+                        .and_then(|s| s.agent_ids.get(slot).cloned());
                     let Some(agent_id) = existing else {
                         return Vec::new();
                     };
@@ -535,6 +536,37 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn change_stage_count(&mut self, delta: isize) -> Vec<AppAction> {
+        let cur = self.config.stages.len();
+        let next = if delta > 0 {
+            cur.saturating_add(delta.cast_unsigned())
+                .clamp(MIN_STAGES, MAX_STAGES)
+        } else {
+            cur.saturating_sub(delta.unsigned_abs())
+                .clamp(MIN_STAGES, MAX_STAGES)
+        };
+        if next == cur {
+            return Vec::new();
+        }
+        match self.config.set_stage_count(next) {
+            Ok(()) => {
+                if self.stage_selected >= next {
+                    self.stage_selected = next - 1;
+                }
+                if self.stage_scroll >= next {
+                    self.stage_scroll = next - 1;
+                }
+                let max_slot = self.unlocked_slots(self.stage_selected);
+                self.slot_selected = self.slot_selected.min(max_slot);
+                vec![AppAction::SetStageCount(next)]
+            }
+            Err(err) => {
+                self.status_message = Some(err.to_string());
+                Vec::new()
             }
         }
     }
@@ -567,6 +599,8 @@ impl App {
                     self.config.execution_mode = toggled;
                     vec![AppAction::SetMode(toggled)]
                 }
+                4 => self.change_stage_count(-1),
+                5 => self.change_stage_count(1),
                 _ => Vec::new(),
             },
             KeyCode::Char('+' | '-') => match self.top_index {
@@ -583,32 +617,8 @@ impl App {
                     vec![AppAction::SetCycles(next)]
                 }
                 4 | 5 => {
-                    let cur = self.config.stages.len();
-                    let next = if code == KeyCode::Char('+') {
-                        (cur + 1).clamp(MIN_STAGES, MAX_STAGES)
-                    } else {
-                        cur.saturating_sub(1).clamp(MIN_STAGES, MAX_STAGES)
-                    };
-                    if next == cur {
-                        return Vec::new();
-                    }
-                    match self.config.set_stage_count(next) {
-                        Ok(()) => {
-                            if self.stage_selected >= next {
-                                self.stage_selected = next - 1;
-                            }
-                            if self.stage_scroll >= next {
-                                self.stage_scroll = next - 1;
-                            }
-                            let max_slot = self.unlocked_slots(self.stage_selected);
-                            self.slot_selected = self.slot_selected.min(max_slot);
-                            vec![AppAction::SetStageCount(next)]
-                        }
-                        Err(err) => {
-                            self.status_message = Some(err.to_string());
-                            Vec::new()
-                        }
-                    }
+                    let delta = if code == KeyCode::Char('+') { 1 } else { -1 };
+                    self.change_stage_count(delta)
                 }
                 _ => Vec::new(),
             },
@@ -655,9 +665,6 @@ impl App {
             KeyCode::Right => {
                 if self.stage_selected + 1 < self.config.stages.len() {
                     self.stage_selected += 1;
-                    if self.stage_selected >= self.stage_scroll + 3 {
-                        self.stage_scroll = self.stage_selected - 2;
-                    }
                     let max_slot = self.unlocked_slots(self.stage_selected);
                     self.slot_selected = self.slot_selected.min(max_slot);
                 }
@@ -827,12 +834,193 @@ impl App {
         }
     }
 
+    pub fn keep_selection_visible(&mut self, regions: &UiLayoutRegions) {
+        if regions.too_small || regions.stage_columns.is_empty() {
+            return;
+        }
+        let visible_stages = regions.stage_columns.len();
+        if self.stage_selected < self.stage_scroll {
+            self.stage_scroll = self.stage_selected;
+        } else if self.stage_selected >= self.stage_scroll + visible_stages {
+            self.stage_scroll = self.stage_selected + 1 - visible_stages;
+        }
+
+        if self.slot_selected > 0 {
+            let slot_idx = self.slot_selected - 1;
+            let visible_slots = regions.stage_columns[0].slots.len();
+            if visible_slots > 0 {
+                if slot_idx < self.slot_scroll {
+                    self.slot_scroll = slot_idx;
+                } else if slot_idx >= self.slot_scroll + visible_slots {
+                    self.slot_scroll = slot_idx + 1 - visible_slots;
+                }
+            }
+        }
+    }
+
     pub fn handle_mouse_event(
         &mut self,
-        _mouse: MouseEvent,
-        _regions: &UiLayoutRegions,
+        mouse: MouseEvent,
+        regions: &UiLayoutRegions,
     ) -> Vec<AppAction> {
-        Vec::new()
+        if !self.mouse_capture || !matches!(self.modal, Modal::None) {
+            return Vec::new();
+        }
+        let Some(region) = regions.region_at(mouse.column, mouse.row) else {
+            return Vec::new();
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => match region {
+                UiRegion::IngestButton => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 0;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::ModeToggle => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 1;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::CyclesControl => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 2;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::PassedCounter => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 3;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::StagesMinus => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 4;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::StagesPlus => {
+                    self.focus = Focus::TopMenu;
+                    self.top_index = 5;
+                    self.handle_top_menu_key(KeyCode::Enter)
+                }
+                UiRegion::StepsList => {
+                    self.focus = Focus::StepsPanel;
+                    let inner_y = regions.steps_panel.y.saturating_add(1);
+                    let clicked_row = usize::from(mouse.row.saturating_sub(inner_y));
+                    let len = self
+                        .plan
+                        .as_ref()
+                        .map_or(0, |p| p.steps.len())
+                        .max(self.step_statuses.len());
+                    if clicked_row < len {
+                        self.step_selected = clicked_row;
+                    }
+                    self.handle_steps_panel_key(KeyCode::Enter)
+                }
+                UiRegion::StageHeader(stage) => {
+                    if stage < self.config.stages.len() {
+                        self.focus = Focus::StageCanvas;
+                        self.stage_selected = stage;
+                        self.slot_selected = 0;
+                        self.handle_stage_canvas_key(KeyCode::Enter)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                UiRegion::AgentSlot { stage, slot } => {
+                    if stage < self.config.stages.len() {
+                        self.focus = Focus::StageCanvas;
+                        self.stage_selected = stage;
+                        let unlocked = self.unlocked_slots(stage);
+                        if slot < unlocked {
+                            self.slot_selected = slot + 1;
+                            self.handle_stage_canvas_key(KeyCode::Enter)
+                        } else {
+                            self.slot_selected = self.slot_selected.min(unlocked);
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                }
+                UiRegion::LiveStream => {
+                    self.focus = Focus::LiveStream;
+                    self.handle_live_stream_key(KeyCode::Enter)
+                }
+                UiRegion::RunStopButton => {
+                    self.focus = Focus::FooterMenu;
+                    self.footer_index = 0;
+                    self.handle_footer_menu_key(KeyCode::Enter)
+                }
+                UiRegion::ApproveButton => {
+                    if self.approve_visible() {
+                        self.focus = Focus::FooterMenu;
+                        self.footer_index = 1;
+                        self.handle_footer_menu_key(KeyCode::Enter)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                UiRegion::RejectButton => {
+                    if self.approve_visible() {
+                        self.focus = Focus::FooterMenu;
+                        self.footer_index = 2;
+                        self.handle_footer_menu_key(KeyCode::Enter)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                UiRegion::SettingsButton => {
+                    self.focus = Focus::FooterMenu;
+                    self.footer_index = 3;
+                    self.handle_footer_menu_key(KeyCode::Enter)
+                }
+                UiRegion::HelpButton => {
+                    self.focus = Focus::FooterMenu;
+                    self.footer_index = 4;
+                    self.handle_footer_menu_key(KeyCode::Enter)
+                }
+                UiRegion::MouseToggle => {
+                    self.focus = Focus::FooterMenu;
+                    self.footer_index = 5;
+                    self.handle_footer_menu_key(KeyCode::Enter)
+                }
+                UiRegion::QuitButton => {
+                    self.focus = Focus::FooterMenu;
+                    self.footer_index = 6;
+                    self.handle_footer_menu_key(KeyCode::Enter)
+                }
+            },
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let code = if mouse.kind == MouseEventKind::ScrollUp {
+                    KeyCode::Up
+                } else {
+                    KeyCode::Down
+                };
+                match region {
+                    UiRegion::StepsList => {
+                        self.focus = Focus::StepsPanel;
+                        self.handle_steps_panel_key(code)
+                    }
+                    UiRegion::LiveStream => {
+                        self.focus = Focus::LiveStream;
+                        self.handle_live_stream_key(code)
+                    }
+                    UiRegion::StageHeader(stage) | UiRegion::AgentSlot { stage, .. } => {
+                        if stage < self.config.stages.len() {
+                            self.focus = Focus::StageCanvas;
+                            self.stage_selected = stage;
+                            let max_slot = self.unlocked_slots(stage);
+                            self.slot_selected = self.slot_selected.min(max_slot);
+                            self.handle_stage_canvas_key(code)
+                        } else {
+                            Vec::new()
+                        }
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
@@ -1492,5 +1680,303 @@ mod tests {
             app.handle_key_event(key(KeyCode::Enter)),
             vec![AppAction::Quit]
         );
+    }
+
+    fn left_click(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel_up(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn wheel_down(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn layout_120x40(stage_count: usize) -> UiLayoutRegions {
+        UiLayoutRegions::compute(ratatui::layout::Rect::new(0, 0, 120, 40), stage_count, 0, 0)
+    }
+
+    fn find_region_rect(regions: &UiLayoutRegions, target: UiRegion) -> ratatui::layout::Rect {
+        regions
+            .top_items
+            .iter()
+            .chain(regions.footer_items.iter())
+            .find_map(|&(region, rect)| (region == target).then_some(rect))
+            .unwrap()
+    }
+
+    #[test]
+    fn click_run_emits_run() {
+        let mut app = make_app();
+        let regions = layout_120x40(app.config.stages.len());
+        let rect = find_region_rect(&regions, UiRegion::RunStopButton);
+        let actions = app.handle_mouse_event(left_click(rect.x, rect.y), &regions);
+        assert_eq!(actions, vec![AppAction::Run]);
+        assert_eq!(app.focus, Focus::FooterMenu);
+        assert_eq!(app.footer_index, 0);
+    }
+
+    #[test]
+    fn click_ingest_opens_modal() {
+        let mut app = make_app();
+        let regions = layout_120x40(app.config.stages.len());
+        let rect = find_region_rect(&regions, UiRegion::IngestButton);
+        let actions = app.handle_mouse_event(left_click(rect.x, rect.y), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app.focus, Focus::TopMenu);
+        assert_eq!(app.top_index, 0);
+        assert_eq!(
+            app.modal,
+            Modal::Ingest {
+                input: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn click_stage_header_opens_role_selector() {
+        let mut app = make_app();
+        let regions = layout_120x40(app.config.stages.len());
+        let col = &regions.stage_columns[1];
+        let actions = app.handle_mouse_event(left_click(col.header.x, col.header.y), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app.focus, Focus::StageCanvas);
+        assert_eq!(app.stage_selected, 1);
+        assert_eq!(app.slot_selected, 0);
+        assert!(matches!(
+            app.modal,
+            Modal::Selector(Selector {
+                stage: 1,
+                slot: 0,
+                kind: SelectorKind::Role,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn click_locked_slot_does_nothing() {
+        let mut app = make_app();
+        let regions = layout_120x40(app.config.stages.len());
+        // Stage 1 has 0 assigned agents -> unlocked_slots(1) == 1 (only slot 0 is unlocked, slot 1 is locked).
+        assert_eq!(app.unlocked_slots(1), 1);
+        let (_, locked_rect) = regions.stage_columns[1]
+            .slots
+            .iter()
+            .find(|&&(idx, _)| idx == 1)
+            .copied()
+            .unwrap();
+        let actions = app.handle_mouse_event(left_click(locked_rect.x, locked_rect.y), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app.modal, Modal::None);
+
+        // Clicking unlocked slot 0 opens Agent selector.
+        let (_, unlocked_rect) = regions.stage_columns[1]
+            .slots
+            .iter()
+            .find(|&&(idx, _)| idx == 0)
+            .copied()
+            .unwrap();
+        let actions =
+            app.handle_mouse_event(left_click(unlocked_rect.x, unlocked_rect.y), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app.slot_selected, 1);
+        assert!(matches!(
+            app.modal,
+            Modal::Selector(Selector {
+                stage: 1,
+                slot: 0,
+                kind: SelectorKind::Agent,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn wheel_scrolls_live_stream() {
+        let mut app = make_app();
+        for i in 0..20 {
+            app.push_stream_event(StreamEvent::notice(format!("line {i}")));
+        }
+        let regions = layout_120x40(app.config.stages.len());
+        let col = regions.live_stream.x + 1;
+        let row = regions.live_stream.y + 1;
+
+        assert!(
+            app.handle_mouse_event(wheel_up(col, row), &regions)
+                .is_empty()
+        );
+        assert_eq!(app.focus, Focus::LiveStream);
+        assert_eq!(app.stream_scroll, 1);
+
+        assert!(
+            app.handle_mouse_event(wheel_up(col, row), &regions)
+                .is_empty()
+        );
+        assert_eq!(app.stream_scroll, 2);
+
+        assert!(
+            app.handle_mouse_event(wheel_down(col, row), &regions)
+                .is_empty()
+        );
+        assert_eq!(app.stream_scroll, 1);
+
+        // Also verify wheel over StepsList and StageCanvas column.
+        app.step_statuses = vec![StepStatus::Pending, StepStatus::Pending];
+        let step_col = regions.steps_panel.x + 1;
+        let step_row = regions.steps_panel.y + 1;
+        app.handle_mouse_event(wheel_down(step_col, step_row), &regions);
+        assert_eq!(app.focus, Focus::StepsPanel);
+        assert_eq!(app.step_selected, 1);
+        app.handle_mouse_event(wheel_up(step_col, step_row), &regions);
+        assert_eq!(app.step_selected, 0);
+
+        let stage_col = regions.stage_columns[1].header.x;
+        let stage_row = regions.stage_columns[1].header.y;
+        app.handle_mouse_event(wheel_down(stage_col, stage_row), &regions);
+        assert_eq!(app.focus, Focus::StageCanvas);
+        assert_eq!(app.stage_selected, 1);
+        assert_eq!(app.slot_selected, 1);
+        app.handle_mouse_event(wheel_up(stage_col, stage_row), &regions);
+        assert_eq!(app.slot_selected, 0);
+    }
+
+    #[test]
+    fn mouse_ignored_when_capture_off() {
+        let mut app = make_app();
+        app.mouse_capture = false;
+        let before = app.clone();
+        let regions = layout_120x40(app.config.stages.len());
+        let rect = find_region_rect(&regions, UiRegion::RunStopButton);
+        let actions = app.handle_mouse_event(left_click(rect.x, rect.y), &regions);
+        assert!(actions.is_empty());
+        assert_eq!(app, before);
+    }
+
+    #[test]
+    fn click_hidden_approve_does_nothing() {
+        let mut app = make_app();
+        let before = app.clone();
+        let regions = layout_120x40(app.config.stages.len());
+        let approve_rect = find_region_rect(&regions, UiRegion::ApproveButton);
+        let reject_rect = find_region_rect(&regions, UiRegion::RejectButton);
+
+        assert!(!app.approve_visible());
+        assert!(
+            app.handle_mouse_event(left_click(approve_rect.x, approve_rect.y), &regions)
+                .is_empty()
+        );
+        assert!(
+            app.handle_mouse_event(left_click(reject_rect.x, reject_rect.y), &regions)
+                .is_empty()
+        );
+        assert_eq!(app, before);
+
+        // When approve_visible() is true, clicking Approve emits Approve and clicking Reject opens modal.
+        app.awaiting_operator = true;
+        app.config.validation_mode = ValidationMode::GateAndOperator;
+        assert!(app.approve_visible());
+        assert_eq!(
+            app.handle_mouse_event(left_click(approve_rect.x, approve_rect.y), &regions),
+            vec![AppAction::Approve]
+        );
+        assert!(
+            app.handle_mouse_event(left_click(reject_rect.x, reject_rect.y), &regions)
+                .is_empty()
+        );
+        assert!(matches!(app.modal, Modal::RejectFeedback { .. }));
+    }
+
+    #[test]
+    fn click_stage_plus_minus_changes_count() {
+        let mut app = make_app();
+        assert_eq!(app.config.stages.len(), 3);
+        let regions = layout_120x40(app.config.stages.len());
+        let plus_rect = find_region_rect(&regions, UiRegion::StagesPlus);
+        let minus_rect = find_region_rect(&regions, UiRegion::StagesMinus);
+
+        let actions = app.handle_mouse_event(left_click(plus_rect.x, plus_rect.y), &regions);
+        assert_eq!(actions, vec![AppAction::SetStageCount(4)]);
+        assert_eq!(app.config.stages.len(), 4);
+
+        let actions = app.handle_mouse_event(left_click(minus_rect.x, minus_rect.y), &regions);
+        assert_eq!(actions, vec![AppAction::SetStageCount(3)]);
+        assert_eq!(app.config.stages.len(), 3);
+    }
+
+    #[test]
+    fn keep_selection_visible_scrolls_slots_and_stages() {
+        let mut app = make_app();
+        for i in 0..8 {
+            app.config.assign_agent(1, format!("coder_{i}")).unwrap();
+        }
+        app.stage_selected = 1;
+        app.slot_selected = 8;
+
+        let r_small = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        app.keep_selection_visible(&r_small);
+        let r_small_after = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        assert!(
+            r_small_after.stage_columns[1]
+                .slots
+                .iter()
+                .any(|&(idx, _)| idx == 7),
+            "slot index 7 should be visible after keep_selection_visible"
+        );
+
+        // At 80x24 with 10 stages, scrolling right adjusts stage_scroll, and left scrolls back.
+        app.config.set_stage_count(10).unwrap();
+        app.stage_scroll = 0;
+        app.stage_selected = 5;
+        let r_narrow = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        app.keep_selection_visible(&r_narrow);
+        assert!(app.stage_scroll > 0);
+        app.stage_selected = 0;
+        app.keep_selection_visible(&r_narrow);
+        assert_eq!(app.stage_scroll, 0);
+
+        // At 200x60 with 10 stages and stage_selected = 5 from stage_scroll = 0, stage_scroll stays 0 (all fit).
+        app.stage_scroll = 0;
+        app.stage_selected = 5;
+        let r_wide = UiLayoutRegions::compute(
+            ratatui::layout::Rect::new(0, 0, 200, 60),
+            app.config.stages.len(),
+            app.stage_scroll,
+            app.slot_scroll,
+        );
+        app.keep_selection_visible(&r_wide);
+        assert_eq!(app.stage_scroll, 0);
     }
 }
