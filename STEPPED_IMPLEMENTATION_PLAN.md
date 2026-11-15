@@ -19,15 +19,14 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
-| 2 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
-| 3 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
-| 4 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
-| 5 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 6 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 7 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 8 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 9 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
+| 2 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
+| 3 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
+| 4 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
+| 5 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 6 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 7 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 8 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 26** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Engine assembly (`Backends`, `build_engine`), stdio command resolution | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/mcp.rs` |
 | **STEP 27** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) |
 | **STEP 28** | **COMPLETED** (2026-11-15, validate-step PASS after spec-gap correction) | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) |
+| **STEP 29** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) |
 
 ---
 
@@ -1681,6 +1681,11 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13.
+- Amended 2026-11-15 after Step 29's review:
+  - **Make clicks on the Stages and Cycles controls work.** A click acts as `Enter`, but Step 29 gives `Enter` no meaning on `CyclesControl`, `StagesMinus` or `StagesPlus` (only the `+`/`-` keys work there). Make `Enter`/`Space` on `StagesMinus` act as `-` and on `StagesPlus` as `+` (same clamping and no-action-if-unchanged rule). Leave `Enter` on `CyclesControl` as nothing; it keeps the `+`/`-` keys.
+  - **Keep the selection visible.** `App` has no layout, so Step 29 assumes 3 visible stage columns on `Right` and never moves `slot_scroll` on `Down`. Add `pub fn keep_selection_visible(&mut self, regions: &UiLayoutRegions)`: from `regions.stage_columns` (visible count and the visible slot indices), adjust `stage_scroll` so `stage_selected` is in a visible column, and `slot_scroll` so `slot_selected` (when > 0) is a visible slot. Remove the hardcoded `stage_scroll + 3` from `handle_stage_canvas_key`. Step 32's bridge calls the new method after every `compute`.
+  - In `apply_selector_choice`, drop the `.or_else(..slot - 1..)` fallback when removing an agent; "(remove)" is only offered on an occupied slot.
+  - Tests: `click_stage_plus_minus_changes_count` and `keep_selection_visible_scrolls_slots_and_stages`.
 
 ```text
 [STEP_ID]
@@ -1711,9 +1716,12 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `wheel_scrolls_live_stream`.
    - `mouse_ignored_when_capture_off`.
    - `click_hidden_approve_does_nothing`.
+   - `click_stage_plus_minus_changes_count`: with 3 stages, clicking `StagesPlus` gives `[SetStageCount(4)]`, then clicking `StagesMinus` gives `[SetStageCount(3)]`.
+   - `keep_selection_visible_scrolls_slots_and_stages`: at 80×24, a stage with 8 agents and `slot_selected = 8` gives a `slot_scroll` that makes slot index 7 visible; at 200×60 with 10 stages and `stage_selected = 5` from `stage_scroll = 0`, `stage_scroll` stays 0 (all fit).
+3. The scope-note items above (Enter on Stages ±, `keep_selection_visible`, the removed fallback).
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^app::tests::(click_run_emits_run|click_ingest_opens_modal|click_stage_header_opens_role_selector|click_locked_slot_does_nothing|wheel_scrolls_live_stream|mouse_ignored_when_capture_off|click_hidden_approve_does_nothing): test$')" -eq 7
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^app::tests::(click_run_emits_run|click_ingest_opens_modal|click_stage_header_opens_role_selector|click_locked_slot_does_nothing|wheel_scrolls_live_stream|mouse_ignored_when_capture_off|click_hidden_approve_does_nothing|click_stage_plus_minus_changes_count|keep_selection_visible_scrolls_slots_and_stages): test$')" -eq 9
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -1777,6 +1785,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13. `tokio-util` is in the TUI manifest since Step 27, for `CancellationToken`.
+- Amended 2026-11-15 after Step 29's review: after every `UiLayoutRegions::compute`, call `app.keep_selection_visible(&regions)` (added in Step 30), then recompute if `stage_scroll` or `slot_scroll` changed, so the drawn frame matches the selection.
 
 ```text
 [STEP_ID]
