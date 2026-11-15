@@ -292,7 +292,7 @@ pub struct WorkflowEngine {
     events: broadcast::Sender<EngineEvent>,
     operator_tx: mpsc::Sender<OperatorDecision>,
     operator_rx: tokio::sync::Mutex<mpsc::Receiver<OperatorDecision>>,
-    current_lease: tokio::sync::Mutex<Option<StageLease>>,
+    current_lease: tokio::sync::Mutex<Option<Arc<StageLease>>>,
 }
 
 impl WorkflowEngine {
@@ -1349,11 +1349,20 @@ impl WorkflowEngine {
             return Err("Dispatch report requires non-empty allocations".to_string());
         }
         let stage_cfg = &self.ctx.project.stages[target_stage];
-        for alloc in allocations {
+        for (idx, alloc) in allocations.iter().enumerate() {
             if !stage_cfg.agent_ids.contains(&alloc.target_agent_id) {
                 return Err(format!(
                     "target_agent_id '{}' is not in stage {target_stage}",
                     alloc.target_agent_id
+                ));
+            }
+            if allocations[..idx]
+                .iter()
+                .any(|prior| prior.target_agent_id == alloc.target_agent_id)
+            {
+                let id = &alloc.target_agent_id;
+                return Err(format!(
+                    "agent '{id}' is allocated more than once in one stage turn"
                 ));
             }
             if !alloc.write_scope.is_empty()
@@ -1440,92 +1449,100 @@ impl WorkflowEngine {
         }
         let writer = role.is_writer(&self.ctx.servers, &stage_agents);
 
+        let effective_allocations: Vec<SubtaskAllocation> = if role.kind == RoleKind::Validator {
+            let first_instructions = allocations
+                .first()
+                .map(|a| a.instructions.clone())
+                .unwrap_or_default();
+            stage_cfg
+                .agent_ids
+                .iter()
+                .map(|agent_id| {
+                    if let Some(existing) =
+                        allocations.iter().find(|a| &a.target_agent_id == agent_id)
+                    {
+                        existing.clone()
+                    } else {
+                        SubtaskAllocation {
+                            target_agent_id: agent_id.clone(),
+                            instructions: first_instructions.clone(),
+                            write_scope: Vec::new(),
+                        }
+                    }
+                })
+                .collect()
+        } else {
+            allocations.to_vec()
+        };
+
         let prior = self.ctx.checkpoints.load_reports(step.number, None)?;
 
-        let lease = self
-            .ctx
-            .resources
-            .begin_stage(state.run_id, &stage_agents, writer, allocations)
-            .await?;
-        *self.current_lease.lock().await = Some(lease);
-
-        let mut statuses = Vec::with_capacity(allocations.len());
-        let mut turn_error: Option<Error> = None;
-
-        for alloc in allocations {
-            let agent = match self.find_agent(&alloc.target_agent_id) {
-                Ok(agent) => agent,
-                Err(err) => {
-                    turn_error = Some(err);
-                    break;
-                }
-            };
+        let mut invocations = Vec::with_capacity(effective_allocations.len());
+        for alloc in &effective_allocations {
+            let agent = self.find_agent(&alloc.target_agent_id)?;
             let write_scope = if alloc.write_scope.is_empty() {
                 WriteScope::anywhere()
             } else {
-                match WriteScope::new(alloc.write_scope.clone()) {
-                    Ok(scope) => scope,
-                    Err(err) => {
-                        turn_error = Some(err);
-                        break;
-                    }
-                }
+                WriteScope::new(alloc.write_scope.clone())?
             };
-
-            let permit = {
-                let guard = self.current_lease.lock().await;
-                let Some(lease_ref) = guard.as_ref() else {
-                    turn_error = Some(Error::Engine {
-                        step_number: step.number,
-                        message: "stage lease missing during stage turn".to_string(),
-                    });
-                    break;
-                };
-                match lease_ref.acquire_slot().await {
-                    Ok(permit) => permit,
-                    Err(err) => {
-                        turn_error = Some(err);
-                        break;
-                    }
-                }
-            };
-
             let system_prompt = build_system_prompt(&role, rules, &agent.backend);
             let user_prompt = build_user_prompt(step, Some(alloc), &prior, &[]);
-            let inv = AgentInvocation {
+            invocations.push(AgentInvocation {
                 run_id: state.run_id,
                 step_number: step.number,
                 stage_index,
                 stage_count: self.ctx.project.stages.len(),
                 round: state.round,
                 role: role.clone(),
-                agent: agent.clone(),
+                agent,
                 system_prompt,
                 user_prompt,
                 tools: tools.clone(),
                 write_scope,
-            };
+            });
+        }
 
-            let driver = self.ctx.drivers.driver_for(&agent.backend);
-            let turn_res = driver
-                .run_turn(&inv, &self.ctx.gatekeeper, &self.ctx.stream)
-                .await;
-            drop(permit);
+        let lease = Arc::new(
+            self.ctx
+                .resources
+                .begin_stage(state.run_id, &stage_agents, writer, &effective_allocations)
+                .await?,
+        );
+        *self.current_lease.lock().await = Some(Arc::clone(&lease));
 
-            match turn_res {
-                Ok(report) => {
+        let turn_results = {
+            let lease_ref = &lease;
+            let futures = invocations.iter().map(|inv| async move {
+                let permit = lease_ref.acquire_slot().await?;
+                let driver = self.ctx.drivers.driver_for(&inv.agent.backend);
+                let res = driver
+                    .run_turn(inv, &self.ctx.gatekeeper, &self.ctx.stream)
+                    .await;
+                drop(permit);
+                res.map(|report| (inv.agent.agent_id.clone(), report))
+            });
+            futures_util::future::join_all(futures).await
+        };
+        drop(lease);
+
+        let mut statuses = Vec::with_capacity(turn_results.len());
+        let mut turn_error: Option<Error> = None;
+
+        for res in turn_results {
+            match res {
+                Ok((agent_id, report)) => {
                     if let Err(err) = self.stamp_and_save_report(
                         step,
                         state.round,
                         stage_index,
                         &role.role_id,
-                        &agent.agent_id,
+                        &agent_id,
                         &report,
                     ) {
                         turn_error = Some(err);
                         break;
                     }
-                    statuses.push((agent.agent_id, report.status));
+                    statuses.push((agent_id, report.status));
                 }
                 Err(err) => {
                     turn_error = Some(err);
@@ -1534,8 +1551,16 @@ impl WorkflowEngine {
             }
         }
 
-        if let Some(lease) = self.current_lease.lock().await.take() {
-            self.ctx.resources.end_stage(lease).await?;
+        if let Some(lease_arc) = self.current_lease.lock().await.take() {
+            match Arc::try_unwrap(lease_arc) {
+                Ok(lease) => self.ctx.resources.end_stage(lease).await?,
+                Err(_) => {
+                    return Err(Error::Engine {
+                        step_number: step.number,
+                        message: "stage lease still shared at end of stage turn".into(),
+                    });
+                }
+            }
         }
 
         match turn_error {
@@ -1588,6 +1613,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tokio_util::sync::CancellationToken;
 
@@ -1602,8 +1628,8 @@ mod tests {
     };
     use crate::config::{
         AgentBackend, AgentConfig, ExecutionMode, HookConfig, HookEvent, HookFailure, HooksConfig,
-        InferenceConfig, InferenceLifecycle, InferenceMode, ProjectConfig, RoleConfig, RoleKind,
-        StageConfig,
+        InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig, McpTransportConfig,
+        ProjectConfig, RoleConfig, RoleKind, StageConfig, WriteToolSpec,
     };
     use crate::docker::{MockContainerBackend, MockInferenceControl, ResourceManager};
     use crate::llm::{AgentDriver, MockAgentDriver};
@@ -3817,5 +3843,411 @@ mod tests {
         assert!(!stored_output.contains("s3cr3t-hook-token-value-9999"));
         assert!(stored_output.len() <= 4096);
         assert!(stored_output.len() >= 4094);
+    }
+
+    fn set_max_concurrency(ctx: &mut EngineContext, max_concurrent_agents: usize) {
+        ctx.project.max_concurrent_agents = max_concurrent_agents;
+        ctx.resources = Arc::new(ResourceManager::new(
+            Arc::new(MockContainerBackend::new()),
+            Arc::new(MockInferenceControl::new()),
+            ctx.project.inference.clone(),
+            max_concurrent_agents,
+            ctx.project_root.clone(),
+        ));
+    }
+
+    fn mark_implementer_as_writer(ctx: &mut EngineContext) {
+        ctx.servers.push(McpServerConfig {
+            server_id: "fs".to_string(),
+            transport: McpTransportConfig::Stdio {
+                command: "fs-server".to_string(),
+                args: Vec::new(),
+            },
+            write_tools: vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string()],
+            }],
+        });
+        if let Some(role) = ctx
+            .roles
+            .iter_mut()
+            .find(|r| r.kind == RoleKind::Implementer)
+        {
+            role.allowed_mcp_tools.push("fs:write_file".to_string());
+        }
+    }
+
+    fn dispatch_two_implementers(scope_a: Vec<String>, scope_b: Vec<String>) -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Dispatch,
+            summary: "Dispatching two implementers".to_string(),
+            target_stage: Some(1),
+            allocations: vec![
+                SubtaskAllocation {
+                    target_agent_id: "imp-1".to_string(),
+                    instructions: "Implement part 1".to_string(),
+                    write_scope: scope_a,
+                },
+                SubtaskAllocation {
+                    target_agent_id: "imp-2".to_string(),
+                    instructions: "Implement part 2".to_string(),
+                    write_scope: scope_b,
+                },
+            ],
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_writer_stage_runs_in_parallel() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp-1", "imp-2"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        set_max_concurrency(&mut ctx, 2);
+
+        let mock = attach_mock_driver(&mut ctx);
+        mock.set_delay(Duration::from_millis(50));
+
+        mock.push(
+            "orch",
+            Ok(dispatch_two_implementers(Vec::new(), Vec::new())),
+        );
+        mock.push("imp-1", Ok(complete_report()));
+        mock.push("imp-2", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Verify step 1")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(mock.max_in_flight(), 2);
+    }
+
+    #[tokio::test]
+    async fn writer_stage_serialized_without_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp-1", "imp-2"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        set_max_concurrency(&mut ctx, 2);
+        mark_implementer_as_writer(&mut ctx);
+
+        let mock = attach_mock_driver(&mut ctx);
+        mock.set_delay(Duration::from_millis(50));
+
+        mock.push(
+            "orch",
+            Ok(dispatch_two_implementers(Vec::new(), Vec::new())),
+        );
+        mock.push("imp-1", Ok(complete_report()));
+        mock.push("imp-2", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Verify step 1")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(mock.max_in_flight(), 1);
+
+        let invocations = mock.invocations();
+        let imp1_inv = invocations
+            .iter()
+            .find(|inv| inv.agent.agent_id == "imp-1")
+            .unwrap();
+        assert_eq!(imp1_inv.write_scope, WriteScope::anywhere());
+    }
+
+    #[tokio::test]
+    async fn writer_stage_parallel_with_disjoint_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp-1", "imp-2"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        set_max_concurrency(&mut ctx, 2);
+        mark_implementer_as_writer(&mut ctx);
+
+        let mock = attach_mock_driver(&mut ctx);
+        mock.set_delay(Duration::from_millis(50));
+
+        mock.push(
+            "orch",
+            Ok(dispatch_two_implementers(
+                vec!["src/a.rs".to_string()],
+                vec!["src/b.rs".to_string()],
+            )),
+        );
+        mock.push("imp-1", Ok(complete_report()));
+        mock.push("imp-2", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Verify step 1")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(mock.max_in_flight(), 2);
+
+        let invocations = mock.invocations();
+        let imp1_inv = invocations
+            .iter()
+            .find(|inv| inv.agent.agent_id == "imp-1")
+            .unwrap();
+        let imp2_inv = invocations
+            .iter()
+            .find(|inv| inv.agent.agent_id == "imp-2")
+            .unwrap();
+        assert_eq!(
+            imp1_inv.write_scope,
+            WriteScope::new(vec!["src/a.rs".to_string()]).unwrap()
+        );
+        assert_eq!(
+            imp2_inv.write_scope,
+            WriteScope::new(vec!["src/b.rs".to_string()]).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_stage_serialized_with_overlapping_scopes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp-1", "imp-2"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        set_max_concurrency(&mut ctx, 2);
+        mark_implementer_as_writer(&mut ctx);
+
+        let mock = attach_mock_driver(&mut ctx);
+        mock.set_delay(Duration::from_millis(50));
+
+        mock.push(
+            "orch",
+            Ok(dispatch_two_implementers(
+                vec!["src".to_string()],
+                vec!["src/lib.rs".to_string()],
+            )),
+        );
+        mock.push("imp-1", Ok(complete_report()));
+        mock.push("imp-2", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Verify step 1")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(mock.max_in_flight(), 1);
+    }
+
+    #[tokio::test]
+    async fn validator_broadcast_runs_every_validator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val-1", "val-2"]),
+            ],
+        );
+
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step 1")));
+        mock.push("imp", Ok(complete_report()));
+        // Dispatch to validator stage with only 1 allocation (for val-1)
+        mock.push(
+            "orch",
+            Ok(dispatch_report(2, "val-1", "Check broadcast instructions")),
+        );
+        mock.push("val-1", Ok(confirmed_report()));
+        mock.push("val-2", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let invocations = mock.invocations();
+        let val1_inv = invocations
+            .iter()
+            .find(|inv| inv.agent.agent_id == "val-1")
+            .expect("val-1 should be invoked");
+        let val2_inv = invocations
+            .iter()
+            .find(|inv| inv.agent.agent_id == "val-2")
+            .expect("val-2 should be invoked via broadcast");
+        assert!(
+            val1_inv
+                .user_prompt
+                .contains("Check broadcast instructions")
+        );
+        assert!(
+            val2_inv
+                .user_prompt
+                .contains("Check broadcast instructions")
+        );
+        assert_eq!(val1_inv.user_prompt, val2_inv.user_prompt);
+    }
+
+    #[tokio::test]
+    async fn pass_requires_every_broadcast_validator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val-1", "val-2"]),
+            ],
+        );
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step 1")));
+        mock.push("imp", Ok(complete_report()));
+        // Only allocate val-1; val-2 runs via broadcast and denies
+        mock.push("orch", Ok(dispatch_report(2, "val-1", "Validate step 1")));
+        mock.push("val-1", Ok(confirmed_report()));
+        mock.push("val-2", Ok(denied_report("val-2 rejected")));
+        // Orchestrator tries to pass -> protocol violation because val-2 denied
+        mock.push("orch", Ok(step_passed_report()));
+        // Orchestrator retries implementer, then both validators confirm
+        mock.push(
+            "orch",
+            Ok(dispatch_report(1, "imp", "Fix issue from val-2")),
+        );
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val-1", "Re-validate")));
+        mock.push("val-1", Ok(confirmed_report()));
+        mock.push("val-2", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+        assert_eq!(state.retry_count, 1);
+
+        let orch_invocations: Vec<_> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.agent.agent_id == "orch")
+            .collect();
+        // Round 4 orchestrator turn (after premature StepPassed in Round 3) must contain the violation note
+        assert!(
+            orch_invocations[3]
+                .user_prompt
+                .contains("protocol violation")
+        );
+        assert!(orch_invocations[3].user_prompt.contains("val-2"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_allocation_is_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+
+        let mock = attach_mock_driver(&mut ctx);
+
+        // Round 1: orchestrator dispatches two allocations targeting the same implementer "imp"
+        mock.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::Dispatch,
+                summary: "Duplicate allocations for imp".to_string(),
+                target_stage: Some(1),
+                allocations: vec![
+                    SubtaskAllocation {
+                        target_agent_id: "imp".to_string(),
+                        instructions: "Task A".to_string(),
+                        write_scope: Vec::new(),
+                    },
+                    SubtaskAllocation {
+                        target_agent_id: "imp".to_string(),
+                        instructions: "Task B".to_string(),
+                        write_scope: Vec::new(),
+                    },
+                ],
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        // Round 2: orchestrator fixes its dispatch and completes the step
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let invocations = mock.invocations();
+        // Invocations 0 and 1 are both "orch" (Round 1 and Round 2), proving "imp" had zero invocations in Round 1
+        assert_eq!(invocations[0].agent.agent_id, "orch");
+        assert_eq!(invocations[0].round, 1);
+        assert_eq!(invocations[1].agent.agent_id, "orch");
+        assert_eq!(invocations[1].round, 2);
+        assert!(invocations[1].user_prompt.contains(
+            "protocol violation: agent 'imp' is allocated more than once in one stage turn"
+        ));
+        assert_eq!(
+            invocations
+                .iter()
+                .filter(|inv| inv.agent.agent_id == "imp" && inv.round == 1)
+                .count(),
+            0
+        );
     }
 }
