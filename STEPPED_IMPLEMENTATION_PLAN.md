@@ -19,23 +19,22 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 21** | `/boost` | Engine core loop, Run and Loop modes | `crates/orrery-core/src/engine.rs` | — |
-| 2 | **STEP 22** | `/boost` | Engine gates, retries, escalation, operator | `crates/orrery-core/src/engine.rs` | — |
-| 3 | **STEP 23** | `/goal` | Engine lifecycle hooks | `crates/orrery-core/src/engine.rs` | — |
-| 4 | **STEP 24** | `/goal` | Engine stage concurrency, validator broadcast | `crates/orrery-core/src/engine.rs` | — |
-| 5 | **STEP 25** | `/goal` | Engine interrupt, resume, plan reconcile | `crates/orrery-core/src/engine.rs` | — |
-| 6 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`), stdio command resolution | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/mcp.rs` | — |
-| 7 | **STEP 27** | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) | — |
-| 8 | **STEP 28** | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) | — |
-| 9 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
-| 10 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
-| 11 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
-| 12 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
-| 13 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
-| 14 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 15 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 16 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 17 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 22** | `/boost` | Engine gates, retries, escalation, operator | `crates/orrery-core/src/engine.rs` | — |
+| 2 | **STEP 23** | `/goal` | Engine lifecycle hooks | `crates/orrery-core/src/engine.rs` | — |
+| 3 | **STEP 24** | `/goal` | Engine stage concurrency, validator broadcast | `crates/orrery-core/src/engine.rs` | — |
+| 4 | **STEP 25** | `/goal` | Engine interrupt, resume, plan reconcile | `crates/orrery-core/src/engine.rs` | — |
+| 5 | **STEP 26** | `/goal` | Engine assembly (`Backends`, `build_engine`), stdio command resolution | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/mcp.rs` | — |
+| 6 | **STEP 27** | `/goal` | TUI crate, theme, banner, `ratatui`, `crossterm` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-tui/Cargo.toml` (NEW), `crates/orrery-tui/src/lib.rs` (NEW), `crates/orrery-tui/src/theme.rs` (NEW) | — |
+| 7 | **STEP 28** | `/goal` | TUI layout and hit testing | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/layout.rs` (NEW) | — |
+| 8 | **STEP 29** | `/boost` | TUI app state and keyboard input | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/app.rs` (NEW) | — |
+| 9 | **STEP 30** | `/goal` | TUI mouse input | `crates/orrery-tui/src/app.rs` | — |
+| 10 | **STEP 31** | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) | — |
+| 11 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
+| 12 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
+| 13 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
+| 14 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 15 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 16 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 18** | **COMPLETED** (2026-11-14, validate-step PASS) | `/boost` | `HttpChatDriver` turn loop | `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/llm.rs`, `crates/orrery-core/tests/live_llm.rs` (NEW) |
 | **STEP 19** | **COMPLETED** (2026-11-14, validate-step PASS + Claude review fixes) | `/goal` | `CliContainerDriver` | `crates/orrery-core/src/llm.rs` |
 | **STEP 20** | **COMPLETED** (2026-11-14, validate-step PASS) | `/goal` | Engine types and pure rules, `tokio-util` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `crates/orrery-core/src/lib.rs`, `crates/orrery-core/src/engine.rs` (NEW) |
+| **STEP 21** | **COMPLETED** (2026-11-14, validate-step PASS) | `/boost` | Engine core loop, Run and Loop modes | `crates/orrery-core/src/engine.rs` |
 
 ---
 
@@ -1234,6 +1234,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/boost`
 
 Scope note: written 2026-11-13.
+- Amended 2026-11-14 after Step 21's review: delete the placeholder `let _ = &self.operator_rx;` at the top of `WorkflowEngine::run`. This step reads `operator_rx`, so the line has no purpose left.
 
 ```text
 [STEP_ID]
@@ -1343,6 +1344,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13. `futures-util` is already a dependency (Step 15). Agents from different stages are never in flight at the same time (`Orrery_Initial.md` Decisions → Concurrency).
+- Amended 2026-11-14 after Step 21's review: `run_stage_turn` awaits `acquire_slot()` while holding the `current_lease` mutex. Once agents run in parallel, every permit request would queue behind that lock. Take what the agents need out of the lease (or keep the lease in a local and store it in `current_lease` only for interrupt handling) so no `.await` on a permit happens under the mutex.
 
 ```text
 [STEP_ID]
@@ -1387,6 +1389,10 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13.
+- Amended 2026-11-14 after Steps 8 and 21's reviews:
+  - **Resume an in-progress step.** Step 21's `pick_next_step_index` takes the first `Pending` step. A step left `InProgress` (or `AwaitingOperator`) by an interrupted run is skipped and stays that way forever. Resume must continue that step first.
+  - **`changed_steps` is 0-based.** `ReconcileOutcome::Updated.changed_steps` holds plan indices, not step numbers. Convert with `+ 1` (or look up `plan.steps[i].number`) wherever a step number is shown or compared.
+  - **Removing trailing steps.** When the plan shrinks, `reconcile` clamps `current_step_index` to `new_len - 1`, which can point at a `Passed` step. Resume must not continue a `Passed` step; fall through to the next `Pending` one.
 
 ```text
 [STEP_ID]

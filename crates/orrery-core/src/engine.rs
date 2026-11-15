@@ -2,20 +2,25 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chrono::Utc;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::{
-    CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StepStatus,
+    AgentReport, CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StampedReport,
+    StepStatus, SubtaskAllocation, WorkflowCheckpoint,
 };
 use crate::config::{
-    AgentConfig, ExecutionMode, McpServerConfig, ProjectConfig, RoleConfig, RoleKind,
+    AgentBackend, AgentConfig, ExecutionMode, McpServerConfig, ProjectConfig, RoleConfig, RoleKind,
 };
 use crate::docker::{ResourceManager, StageLease};
-use crate::llm::AgentDriver;
-use crate::mcp::McpGatekeeper;
-use crate::plan::ImplementationPlan;
-use crate::stream_log::LiveStreamHub;
+use crate::llm::{
+    AgentDriver, AgentInvocation, StageSummary, build_orchestrator_prompt, build_system_prompt,
+    build_user_prompt,
+};
+use crate::mcp::{McpGatekeeper, WriteScope};
+use crate::plan::{ImplementationPlan, PlanStep};
+use crate::stream_log::{LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -24,6 +29,15 @@ const OPERATOR_CHANNEL_CAPACITY: usize = 8;
 pub struct DriverSet {
     pub chat: Arc<dyn AgentDriver>,
     pub cli: Arc<dyn AgentDriver>,
+}
+
+impl DriverSet {
+    fn driver_for(&self, backend: &AgentBackend) -> &Arc<dyn AgentDriver> {
+        match backend {
+            AgentBackend::LocalModel { .. } | AgentBackend::CloudApi { .. } => &self.chat,
+            AgentBackend::AgentCli { .. } => &self.cli,
+        }
+    }
 }
 
 pub struct EngineContext {
@@ -189,6 +203,11 @@ pub fn agents_pass_rule(
     Ok(())
 }
 
+enum StageTurnOutcome {
+    Completed(StageTurnRecord),
+    ProtocolViolation(String),
+}
+
 pub struct WorkflowEngine {
     ctx: EngineContext,
     events: broadcast::Sender<EngineEvent>,
@@ -202,15 +221,13 @@ impl WorkflowEngine {
         ctx.project.validate_for_run(&ctx.roles, &ctx.agents)?;
         let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let (operator_tx, operator_rx) = mpsc::channel(OPERATOR_CHANNEL_CAPACITY);
-        let engine = Self {
+        Ok(Self {
             ctx,
             events,
             operator_tx,
             operator_rx: tokio::sync::Mutex::new(operator_rx),
             current_lease: tokio::sync::Mutex::new(None),
-        };
-        let _ = (&engine.ctx, &engine.operator_rx, &engine.current_lease);
-        Ok(engine)
+        })
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<EngineEvent> {
@@ -221,11 +238,545 @@ impl WorkflowEngine {
         self.operator_tx.clone()
     }
 
-    pub async fn run(&self, _opts: RunOptions, _cancel: CancellationToken) -> Result<RunOutcome> {
-        Err(Error::Engine {
-            step_number: 0,
-            message: "not implemented until Step 21".into(),
-        })
+    pub async fn run(&self, opts: RunOptions, _cancel: CancellationToken) -> Result<RunOutcome> {
+        let _ = &self.operator_rx;
+
+        let mode = opts.mode.unwrap_or(self.ctx.project.execution_mode);
+        let cycles = opts.cycles.unwrap_or(self.ctx.project.cycle_count);
+        let mut requested_start = opts.start_step;
+
+        let mut state = match self.ctx.checkpoints.load_state()? {
+            Some(loaded) => loaded,
+            None => WorkflowCheckpoint::new(&self.ctx.plan),
+        };
+
+        if !state
+            .step_statuses
+            .iter()
+            .any(|s| matches!(s, StepStatus::InProgress | StepStatus::AwaitingOperator))
+        {
+            state.steps_passed_this_run = 0;
+        }
+
+        let stage_summaries = self.build_stage_summaries()?;
+        let stage_kinds: Vec<RoleKind> = stage_summaries.iter().map(|s| s.kind).collect();
+
+        loop {
+            let Some(step_idx) = self.pick_next_step_index(&state, requested_start.take())? else {
+                let outcome = if state.steps_passed_this_run == 0 {
+                    RunOutcome::NoPendingSteps
+                } else {
+                    RunOutcome::Completed {
+                        steps_passed: state.steps_passed_this_run,
+                    }
+                };
+                state.phase = EnginePhase::Done;
+                state.active_stage_index = None;
+                self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
+                self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+                return Ok(outcome);
+            };
+
+            let step = &self.ctx.plan.steps[step_idx];
+            state.current_step_index = step_idx;
+            state.step_statuses[step_idx] = StepStatus::InProgress;
+            state.round = 0;
+            state.active_stage_index = None;
+            state.retry_count = 0;
+            state.awaiting_reason = None;
+            self.emit_event(EngineEvent::StepStatusChanged {
+                step_number: step.number,
+                status: StepStatus::InProgress,
+            });
+
+            let mut notes: Vec<String> = Vec::new();
+            let mut history: Vec<StageTurnRecord> = Vec::new();
+            let mut last_stage_run: Option<usize> = None;
+            let mut consecutive_violations: usize = 0;
+
+            loop {
+                state.round += 1;
+                state.phase = EnginePhase::OrchestratorTurn;
+                state.active_stage_index = Some(0);
+                self.emit_event(EngineEvent::PhaseChanged(EnginePhase::OrchestratorTurn));
+                self.emit_event(EngineEvent::RoundStarted {
+                    step_number: step.number,
+                    round: state.round,
+                });
+                self.ctx.checkpoints.save_state(&state)?;
+
+                let turn_notes = std::mem::take(&mut notes);
+                let orch_report = match self
+                    .run_orchestrator_turn(&state, step, &stage_summaries, &turn_notes)
+                    .await
+                {
+                    Ok(report) => report,
+                    Err(Error::Report { message }) => {
+                        Self::record_violation(
+                            step.number,
+                            &mut consecutive_violations,
+                            &mut notes,
+                            &message,
+                        )?;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+
+                match orch_report.status {
+                    ReportStatus::Dispatch => {
+                        let Some(target_stage) = orch_report.target_stage else {
+                            Self::record_violation(
+                                step.number,
+                                &mut consecutive_violations,
+                                &mut notes,
+                                "Dispatch report requires target_stage",
+                            )?;
+                            continue;
+                        };
+
+                        if let Err(err) = check_dispatch(target_stage, last_stage_run, &stage_kinds)
+                        {
+                            let msg = match err {
+                                Error::Engine { message, .. } => message,
+                                other => return Err(other),
+                            };
+                            Self::record_violation(
+                                step.number,
+                                &mut consecutive_violations,
+                                &mut notes,
+                                &msg,
+                            )?;
+                            continue;
+                        }
+
+                        if let Err(msg) =
+                            self.validate_stage_allocations(target_stage, &orch_report.allocations)
+                        {
+                            Self::record_violation(
+                                step.number,
+                                &mut consecutive_violations,
+                                &mut notes,
+                                &msg,
+                            )?;
+                            continue;
+                        }
+
+                        state.phase = EnginePhase::StageTurn;
+                        state.active_stage_index = Some(target_stage);
+                        self.emit_event(EngineEvent::PhaseChanged(EnginePhase::StageTurn));
+
+                        match self
+                            .run_stage_turn(&state, step, target_stage, &orch_report.allocations)
+                            .await?
+                        {
+                            StageTurnOutcome::Completed(record) => {
+                                consecutive_violations = 0;
+                                last_stage_run = Some(target_stage);
+                                history.push(record);
+                                state.active_stage_index = None;
+                                self.ctx.checkpoints.save_state(&state)?;
+                            }
+                            StageTurnOutcome::ProtocolViolation(msg) => {
+                                Self::record_violation(
+                                    step.number,
+                                    &mut consecutive_violations,
+                                    &mut notes,
+                                    &msg,
+                                )?;
+                                continue;
+                            }
+                        }
+                    }
+                    ReportStatus::StepPassed => match agents_pass_rule(&history, true) {
+                        Ok(()) => {
+                            state.step_statuses[step_idx] = StepStatus::Passed;
+                            state.steps_passed_this_run += 1;
+                            state.active_stage_index = None;
+
+                            let should_stop = match mode {
+                                ExecutionMode::Run => true,
+                                ExecutionMode::Loop => {
+                                    (cycles > 0 && state.steps_passed_this_run >= cycles)
+                                        || !state.step_statuses.contains(&StepStatus::Pending)
+                                }
+                            };
+                            if should_stop {
+                                state.phase = EnginePhase::Done;
+                            }
+
+                            self.ctx.checkpoints.save_state(&state)?;
+                            self.emit_event(EngineEvent::StepStatusChanged {
+                                step_number: step.number,
+                                status: StepStatus::Passed,
+                            });
+
+                            if should_stop {
+                                let outcome = RunOutcome::Completed {
+                                    steps_passed: state.steps_passed_this_run,
+                                };
+                                self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
+                                self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+                                return Ok(outcome);
+                            }
+                            break;
+                        }
+                        Err(reason) => {
+                            Self::record_violation(
+                                step.number,
+                                &mut consecutive_violations,
+                                &mut notes,
+                                &reason,
+                            )?;
+                            continue;
+                        }
+                    },
+                    other => {
+                        Self::record_violation(
+                            step.number,
+                            &mut consecutive_violations,
+                            &mut notes,
+                            &format!("unexpected orchestrator status {other:?}"),
+                        )?;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_event(&self, event: EngineEvent) {
+        let _ = self.events.send(event);
+    }
+
+    fn record_violation(
+        step_number: usize,
+        consecutive_violations: &mut usize,
+        notes: &mut Vec<String>,
+        msg: &str,
+    ) -> Result<()> {
+        *consecutive_violations += 1;
+        if *consecutive_violations >= 2 {
+            return Err(Error::Engine {
+                step_number,
+                message: format!("protocol violation: {msg}"),
+            });
+        }
+        notes.push(format!("protocol violation: {msg}"));
+        Ok(())
+    }
+
+    fn pick_next_step_index(
+        &self,
+        state: &WorkflowCheckpoint,
+        start_step: Option<usize>,
+    ) -> Result<Option<usize>> {
+        if let Some(step_number) = start_step {
+            let Some(idx) = self
+                .ctx
+                .plan
+                .steps
+                .iter()
+                .position(|s| s.number == step_number)
+            else {
+                return Err(Error::Engine {
+                    step_number,
+                    message: format!("step {step_number} not found in plan"),
+                });
+            };
+            if state.step_statuses.get(idx) != Some(&StepStatus::Pending) {
+                return Err(Error::Engine {
+                    step_number,
+                    message: format!("step {step_number} is not Pending"),
+                });
+            }
+            return Ok(Some(idx));
+        }
+
+        Ok(state
+            .step_statuses
+            .iter()
+            .position(|&status| status == StepStatus::Pending))
+    }
+
+    fn build_stage_summaries(&self) -> Result<Vec<StageSummary>> {
+        let mut summaries = Vec::with_capacity(self.ctx.project.stages.len());
+        for (index, stage) in self.ctx.project.stages.iter().enumerate() {
+            let role = self.find_role(&stage.role_id)?;
+            summaries.push(StageSummary {
+                index,
+                role_id: stage.role_id.clone(),
+                kind: role.kind,
+                agent_ids: stage.agent_ids.clone(),
+            });
+        }
+        Ok(summaries)
+    }
+
+    fn find_role(&self, role_id: &str) -> Result<RoleConfig> {
+        self.ctx
+            .roles
+            .iter()
+            .find(|r| r.role_id == role_id)
+            .cloned()
+            .ok_or_else(|| Error::Validation {
+                field: "role_id".to_string(),
+                message: format!("unknown role_id '{role_id}'"),
+            })
+    }
+
+    fn find_agent(&self, agent_id: &str) -> Result<AgentConfig> {
+        self.ctx
+            .agents
+            .iter()
+            .find(|a| a.agent_id == agent_id)
+            .cloned()
+            .ok_or_else(|| Error::Validation {
+                field: "agent_id".to_string(),
+                message: format!("unknown agent_id '{agent_id}'"),
+            })
+    }
+
+    fn validate_stage_allocations(
+        &self,
+        target_stage: usize,
+        allocations: &[SubtaskAllocation],
+    ) -> std::result::Result<(), String> {
+        if allocations.is_empty() {
+            return Err("Dispatch report requires non-empty allocations".to_string());
+        }
+        let stage_cfg = &self.ctx.project.stages[target_stage];
+        for alloc in allocations {
+            if !stage_cfg.agent_ids.contains(&alloc.target_agent_id) {
+                return Err(format!(
+                    "target_agent_id '{}' is not in stage {target_stage}",
+                    alloc.target_agent_id
+                ));
+            }
+            if !alloc.write_scope.is_empty()
+                && let Err(err) = WriteScope::new(alloc.write_scope.clone())
+            {
+                return Err(format!("invalid write_scope: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    async fn run_orchestrator_turn(
+        &self,
+        state: &WorkflowCheckpoint,
+        step: &PlanStep,
+        stage_summaries: &[StageSummary],
+        notes: &[String],
+    ) -> Result<AgentReport> {
+        let stage_cfg = &self.ctx.project.stages[0];
+        let role = self.find_role(&stage_cfg.role_id)?;
+        let agent = self.find_agent(&stage_cfg.agent_ids[0])?;
+        let rules = self
+            .ctx
+            .role_rules
+            .get(&role.role_id)
+            .map(String::as_str)
+            .unwrap_or_default();
+
+        let prior = self.ctx.checkpoints.load_reports(step.number, None)?;
+        let system_prompt = build_system_prompt(&role, rules, &agent.backend);
+        let user_prompt = build_orchestrator_prompt(step, stage_summaries, &prior, notes);
+        let tools = self.ctx.gatekeeper.tools_for_role(&role);
+
+        let inv = AgentInvocation {
+            run_id: state.run_id,
+            step_number: step.number,
+            stage_index: 0,
+            stage_count: self.ctx.project.stages.len(),
+            round: state.round,
+            role: role.clone(),
+            agent: agent.clone(),
+            system_prompt,
+            user_prompt,
+            tools,
+            write_scope: WriteScope::anywhere(),
+        };
+
+        let driver = self.ctx.drivers.driver_for(&agent.backend);
+        let report = driver
+            .run_turn(&inv, &self.ctx.gatekeeper, &self.ctx.stream)
+            .await?;
+
+        self.stamp_and_save_report(
+            step,
+            state.round,
+            0,
+            &role.role_id,
+            &agent.agent_id,
+            &report,
+        )?;
+        Ok(report)
+    }
+
+    async fn run_stage_turn(
+        &self,
+        state: &WorkflowCheckpoint,
+        step: &PlanStep,
+        stage_index: usize,
+        allocations: &[SubtaskAllocation],
+    ) -> Result<StageTurnOutcome> {
+        let stage_cfg = &self.ctx.project.stages[stage_index];
+        let role = self.find_role(&stage_cfg.role_id)?;
+        let rules = self
+            .ctx
+            .role_rules
+            .get(&role.role_id)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let tools = self.ctx.gatekeeper.tools_for_role(&role);
+
+        let mut stage_agents = Vec::with_capacity(stage_cfg.agent_ids.len());
+        for agent_id in &stage_cfg.agent_ids {
+            stage_agents.push(self.find_agent(agent_id)?);
+        }
+        let writer = role.is_writer(&self.ctx.servers, &stage_agents);
+
+        let prior = self.ctx.checkpoints.load_reports(step.number, None)?;
+
+        let lease = self
+            .ctx
+            .resources
+            .begin_stage(state.run_id, &stage_agents, writer, allocations)
+            .await?;
+        *self.current_lease.lock().await = Some(lease);
+
+        let mut statuses = Vec::with_capacity(allocations.len());
+        let mut turn_error: Option<Error> = None;
+
+        for alloc in allocations {
+            let agent = match self.find_agent(&alloc.target_agent_id) {
+                Ok(agent) => agent,
+                Err(err) => {
+                    turn_error = Some(err);
+                    break;
+                }
+            };
+            let write_scope = if alloc.write_scope.is_empty() {
+                WriteScope::anywhere()
+            } else {
+                match WriteScope::new(alloc.write_scope.clone()) {
+                    Ok(scope) => scope,
+                    Err(err) => {
+                        turn_error = Some(err);
+                        break;
+                    }
+                }
+            };
+
+            let permit = {
+                let guard = self.current_lease.lock().await;
+                let Some(lease_ref) = guard.as_ref() else {
+                    turn_error = Some(Error::Engine {
+                        step_number: step.number,
+                        message: "stage lease missing during stage turn".to_string(),
+                    });
+                    break;
+                };
+                match lease_ref.acquire_slot().await {
+                    Ok(permit) => permit,
+                    Err(err) => {
+                        turn_error = Some(err);
+                        break;
+                    }
+                }
+            };
+
+            let system_prompt = build_system_prompt(&role, rules, &agent.backend);
+            let user_prompt = build_user_prompt(step, Some(alloc), &prior, &[]);
+            let inv = AgentInvocation {
+                run_id: state.run_id,
+                step_number: step.number,
+                stage_index,
+                stage_count: self.ctx.project.stages.len(),
+                round: state.round,
+                role: role.clone(),
+                agent: agent.clone(),
+                system_prompt,
+                user_prompt,
+                tools: tools.clone(),
+                write_scope,
+            };
+
+            let driver = self.ctx.drivers.driver_for(&agent.backend);
+            let turn_res = driver
+                .run_turn(&inv, &self.ctx.gatekeeper, &self.ctx.stream)
+                .await;
+            drop(permit);
+
+            match turn_res {
+                Ok(report) => {
+                    if let Err(err) = self.stamp_and_save_report(
+                        step,
+                        state.round,
+                        stage_index,
+                        &role.role_id,
+                        &agent.agent_id,
+                        &report,
+                    ) {
+                        turn_error = Some(err);
+                        break;
+                    }
+                    statuses.push((agent.agent_id, report.status));
+                }
+                Err(err) => {
+                    turn_error = Some(err);
+                    break;
+                }
+            }
+        }
+
+        if let Some(lease) = self.current_lease.lock().await.take() {
+            self.ctx.resources.end_stage(lease).await?;
+        }
+
+        match turn_error {
+            None => Ok(StageTurnOutcome::Completed(StageTurnRecord {
+                stage_index,
+                kind: role.kind,
+                expected_agents: stage_cfg.agent_ids.clone(),
+                statuses,
+            })),
+            Some(Error::Report { message }) => Ok(StageTurnOutcome::ProtocolViolation(message)),
+            Some(err) => Err(err),
+        }
+    }
+
+    fn stamp_and_save_report(
+        &self,
+        step: &PlanStep,
+        round: usize,
+        stage_index: usize,
+        role_id: &str,
+        agent_id: &str,
+        report: &AgentReport,
+    ) -> Result<()> {
+        let recorded_at = Utc::now();
+        let stamped = StampedReport {
+            step_number: step.number,
+            plan_step_sha256: step.sha256_hex.clone(),
+            round,
+            stage_index,
+            role_id: role_id.to_string(),
+            agent_id: agent_id.to_string(),
+            recorded_at,
+            report: report.clone(),
+        };
+        self.ctx.checkpoints.save_report(&stamped)?;
+        self.ctx.stream.emit(StreamEvent {
+            timestamp: recorded_at,
+            step_number: Some(step.number),
+            stage_index: Some(stage_index),
+            agent_id: Some(agent_id.to_string()),
+            kind: StreamEventKind::ReportSaved,
+            text: format!("{:?}: {}", report.status, report.summary),
+        })?;
+        Ok(())
     }
 }
 
@@ -238,21 +789,24 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        DispatchKind, DriverSet, EngineContext, RunOptions, StageTurnRecord, WorkflowEngine,
-        agents_pass_rule, check_dispatch,
+        DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
+        StageTurnRecord, WorkflowEngine, agents_pass_rule, check_dispatch,
     };
     use crate::Error;
-    use crate::checkpoint::{CheckpointManager, OperatorDecision, ReportStatus};
+    use crate::checkpoint::{
+        AgentReport, CheckpointManager, OperatorDecision, ReportStatus, StepStatus,
+        SubtaskAllocation,
+    };
     use crate::config::{
-        AgentBackend, AgentConfig, InferenceConfig, InferenceLifecycle, InferenceMode,
-        ProjectConfig, RoleConfig, RoleKind, StageConfig,
+        AgentBackend, AgentConfig, ExecutionMode, InferenceConfig, InferenceLifecycle,
+        InferenceMode, ProjectConfig, RoleConfig, RoleKind, StageConfig,
     };
     use crate::docker::{MockContainerBackend, MockInferenceControl, ResourceManager};
     use crate::llm::{AgentDriver, MockAgentDriver};
     use crate::mcp::McpGatekeeper;
     use crate::plan::ImplementationPlan;
     use crate::security::SecretRedactor;
-    use crate::stream_log::{LiveStreamConfig, LiveStreamHub};
+    use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEventKind};
 
     pub(super) fn test_context(dir: &Path, stages: &[(RoleKind, &[&str])]) -> EngineContext {
         let orrery_dir = dir.join(".orrery");
@@ -360,6 +914,83 @@ mod tests {
             resources,
             drivers,
         }
+    }
+
+    fn attach_mock_driver(ctx: &mut EngineContext) -> Arc<MockAgentDriver> {
+        let mock = Arc::new(MockAgentDriver::new());
+        let dyn_driver: Arc<dyn AgentDriver> = Arc::clone(&mock) as Arc<dyn AgentDriver>;
+        ctx.drivers = DriverSet {
+            chat: Arc::clone(&dyn_driver),
+            cli: dyn_driver,
+        };
+        mock
+    }
+
+    fn dispatch_report(target_stage: usize, agent_id: &str, instructions: &str) -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Dispatch,
+            summary: format!("Dispatching to stage {target_stage} ({agent_id})"),
+            target_stage: Some(target_stage),
+            allocations: vec![SubtaskAllocation {
+                target_agent_id: agent_id.to_string(),
+                instructions: instructions.to_string(),
+                write_scope: Vec::new(),
+            }],
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn step_passed_report() -> AgentReport {
+        AgentReport {
+            status: ReportStatus::StepPassed,
+            summary: "Step passed".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn complete_report() -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Complete,
+            summary: "Implementation complete".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: vec!["src/lib.rs".to_string()],
+        }
+    }
+
+    fn confirmed_report() -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Confirmed,
+            summary: "Validation confirmed".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn denied_report(feedback: &str) -> AgentReport {
+        AgentReport {
+            status: ReportStatus::Denied,
+            summary: "Validation denied".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: Some(feedback.to_string()),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn script_passing_step(mock: &MockAgentDriver, orch: &str, imp: &str, val: &str) {
+        mock.push(orch, Ok(dispatch_report(1, imp, "Implement step")));
+        mock.push(imp, Ok(complete_report()));
+        mock.push(orch, Ok(dispatch_report(2, val, "Validate step")));
+        mock.push(val, Ok(confirmed_report()));
+        mock.push(orch, Ok(step_passed_report()));
     }
 
     #[test]
@@ -604,16 +1235,521 @@ mod tests {
         let _rx = engine.subscribe();
         let tx = engine.operator_sender();
         tx.send(OperatorDecision::Approve).await.unwrap();
-        let stub_err = engine
+        let run_err = engine
             .run(RunOptions::default(), CancellationToken::new())
             .await
             .unwrap_err();
-        assert!(matches!(
-            stub_err,
-            Error::Engine {
-                step_number: 0,
-                ref message,
-            } if message == "not implemented until Step 21"
-        ));
+        assert!(matches!(run_err, Error::Agent { .. }));
+    }
+
+    #[tokio::test]
+    async fn run_mode_passes_one_step_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let checkpoints = ctx.checkpoints.clone();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let mut events_rx = engine.subscribe();
+
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+        assert_eq!(state.step_statuses[1], StepStatus::Pending);
+        assert_eq!(state.step_statuses[2], StepStatus::Pending);
+        assert_eq!(state.steps_passed_this_run, 1);
+
+        let mut saw_finished = false;
+        while let Ok(ev) = events_rx.try_recv() {
+            if ev == EngineEvent::RunFinished(RunOutcome::Completed { steps_passed: 1 }) {
+                saw_finished = true;
+            }
+        }
+        assert!(saw_finished);
+    }
+
+    #[tokio::test]
+    async fn loop_cycles_three_passes_three() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.plan = ImplementationPlan::parse(
+            "## Step 1: One\nBody 1\n## Step 2: Two\nBody 2\n## Step 3: Three\nBody 3\n## Step 4: Four\nBody 4\n",
+            "## Step ",
+        )
+        .unwrap();
+
+        let mock = attach_mock_driver(&mut ctx);
+        for _ in 0..3 {
+            script_passing_step(&mock, "orch", "imp", "val");
+        }
+
+        let checkpoints = ctx.checkpoints.clone();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    mode: Some(ExecutionMode::Loop),
+                    cycles: Some(3),
+                    start_step: None,
+                    wait_for_operator: false,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 3 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state.step_statuses,
+            vec![
+                StepStatus::Passed,
+                StepStatus::Passed,
+                StepStatus::Passed,
+                StepStatus::Pending,
+            ]
+        );
+        assert_eq!(state.steps_passed_this_run, 3);
+    }
+
+    #[tokio::test]
+    async fn loop_cycles_zero_passes_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        for _ in 0..3 {
+            script_passing_step(&mock, "orch", "imp", "val");
+        }
+
+        let checkpoints = ctx.checkpoints.clone();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let opts = RunOptions {
+            mode: Some(ExecutionMode::Loop),
+            cycles: Some(0),
+            start_step: None,
+            wait_for_operator: false,
+        };
+
+        let outcome = engine
+            .run(opts.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 3 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Passed, StepStatus::Passed]
+        );
+
+        let second_outcome = engine.run(opts, CancellationToken::new()).await.unwrap();
+        assert_eq!(second_outcome, RunOutcome::NoPendingSteps);
+    }
+
+    #[tokio::test]
+    async fn orchestrator_runs_between_every_stage_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let stage_indices: Vec<usize> = mock.invocations().iter().map(|i| i.stage_index).collect();
+        assert_eq!(stage_indices, vec![0, 1, 0, 2, 0]);
+        for (idx, &stage_idx) in stage_indices.iter().enumerate() {
+            if idx % 2 == 0 {
+                assert_eq!(stage_idx, 0);
+            } else {
+                assert_ne!(stage_idx, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn step_passed_while_validator_denied_is_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Initial work")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate work")));
+        mock.push("val", Ok(denied_report("Missing edge-case test")));
+        // Premature StepPassed while validator denied -> protocol violation
+        mock.push("orch", Ok(step_passed_report()));
+        // Next orchestrator turn gets protocol violation note and dispatches back to stage 1
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Fix edge-case test")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Re-validate")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let orch_prompts: Vec<String> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.stage_index == 0)
+            .map(|inv| inv.user_prompt)
+            .collect();
+        assert_eq!(orch_prompts.len(), 6);
+        assert!(orch_prompts[3].contains("protocol violation"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_skipping_stage_is_violation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+
+        // Skipping stage 1 directly to stage 2 -> protocol violation
+        mock.push("orch", Ok(dispatch_report(2, "val", "Skip implementer")));
+        // Redo orchestrator turn properly
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let orch_prompts: Vec<String> = mock
+            .invocations()
+            .into_iter()
+            .filter(|inv| inv.stage_index == 0)
+            .map(|inv| inv.user_prompt)
+            .collect();
+        assert_eq!(orch_prompts.len(), 4);
+        assert!(orch_prompts[1].contains("protocol violation"));
+
+        // Second consecutive violation returns Err(Error::Engine { .. })
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock2 = attach_mock_driver(&mut ctx2);
+        mock2.push("orch", Ok(dispatch_report(2, "val", "Skip 1")));
+        mock2.push("orch", Ok(dispatch_report(2, "val", "Skip 2")));
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let err = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Engine { step_number: 1, .. }));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_saved_after_every_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let checkpoints = ctx.checkpoints.clone();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let orch_turns = mock
+            .invocations()
+            .iter()
+            .filter(|inv| inv.stage_index == 0)
+            .count();
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.round, orch_turns);
+        assert_eq!(state.round, 3);
+    }
+
+    #[tokio::test]
+    async fn reports_stamped_with_step_hash_and_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let step1_hash = ctx.plan.steps[0].sha256_hex.clone();
+        let checkpoints = ctx.checkpoints.clone();
+        let stream = Arc::clone(&ctx.stream);
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let reports = checkpoints.load_reports(1, None).unwrap();
+        assert_eq!(reports.len(), 5);
+        for stamped in &reports {
+            assert_eq!(stamped.step_number, 1);
+            assert_eq!(stamped.plan_step_sha256, step1_hash);
+        }
+
+        let summary: Vec<(usize, usize, &str)> = reports
+            .iter()
+            .map(|r| (r.round, r.stage_index, r.agent_id.as_str()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (1, 0, "orch"),
+                (1, 1, "imp"),
+                (2, 0, "orch"),
+                (2, 2, "val"),
+                (3, 0, "orch"),
+            ]
+        );
+
+        let saved_events = stream
+            .recent(50)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == StreamEventKind::ReportSaved)
+            .count();
+        assert_eq!(saved_events, 5);
+    }
+
+    #[tokio::test]
+    async fn stage_lease_closed_after_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let resources = Arc::clone(&ctx.resources);
+        let agents = ctx.agents.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let lease = resources
+            .begin_stage(uuid::Uuid::new_v4(), &agents, false, &[])
+            .await
+            .expect("fresh begin_stage after run must succeed");
+        resources.end_stage(lease).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protocol_violation_variants_and_cli_driver_routing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+
+        // Configure implementer as AgentCli to verify DriverSet routing to cli driver
+        ctx.agents[1].backend = AgentBackend::AgentCli {
+            image: "test-cli:1.0.0".to_string(),
+            command: vec!["run".to_string()],
+            workspace_mount: crate::config::WorkspaceMount::ReadOnly,
+            memory_limit_mb: 512,
+            timeout_secs: 30,
+            keychain_service: None,
+            keychain_account: None,
+            secret_env: None,
+        };
+
+        let chat_mock = Arc::new(MockAgentDriver::new());
+        let cli_mock = Arc::new(MockAgentDriver::new());
+        ctx.drivers = DriverSet {
+            chat: Arc::clone(&chat_mock) as Arc<dyn AgentDriver>,
+            cli: Arc::clone(&cli_mock) as Arc<dyn AgentDriver>,
+        };
+
+        // Round 1: orchestrator returns Error::Report -> violation 1
+        chat_mock.push(
+            "orch",
+            Err(Error::Report {
+                message: "malformed JSON".to_string(),
+            }),
+        );
+        // Round 2: orchestrator dispatches to stage 1 and stage 1 completes (resets consecutive_violations)
+        chat_mock.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::Dispatch,
+                summary: "Dispatch with write scope".to_string(),
+                target_stage: Some(1),
+                allocations: vec![SubtaskAllocation {
+                    target_agent_id: "imp".to_string(),
+                    instructions: "Implement".to_string(),
+                    write_scope: vec!["src".to_string()],
+                }],
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        cli_mock.push("imp", Ok(complete_report()));
+        // Round 3: orchestrator dispatches to stage 2 with an unknown target_agent_id -> violation 1
+        chat_mock.push("orch", Ok(dispatch_report(2, "ghost-agent", "Validate")));
+        // Round 4: orchestrator dispatches to stage 2 and validator denies (resets consecutive_violations)
+        chat_mock.push("orch", Ok(dispatch_report(2, "val", "Validate")));
+        chat_mock.push("val", Ok(denied_report("Needs fix")));
+        // Round 5: orchestrator retries stage 1, stage agent returns Error::Report -> violation 1
+        chat_mock.push("orch", Ok(dispatch_report(1, "imp", "Retry implement")));
+        cli_mock.push(
+            "imp",
+            Err(Error::Report {
+                message: "invalid report.toml".to_string(),
+            }),
+        );
+        // Round 6: orchestrator retries stage 1, stage agent succeeds (resets consecutive_violations)
+        chat_mock.push("orch", Ok(dispatch_report(1, "imp", "Implement cleanly")));
+        cli_mock.push("imp", Ok(complete_report()));
+        // Round 7: orchestrator dispatches to stage 2, validator confirms
+        chat_mock.push("orch", Ok(dispatch_report(2, "val", "Re-validate")));
+        chat_mock.push("val", Ok(confirmed_report()));
+        // Round 8: StepPassed
+        chat_mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    mode: None,
+                    cycles: None,
+                    start_step: Some(1),
+                    wait_for_operator: false,
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert_eq!(cli_mock.invocations().len(), 3);
+        assert_eq!(
+            cli_mock.invocations()[0].write_scope.prefixes(),
+            &["src".to_string()]
+        );
+
+        // Two consecutive stage Error::Report violations return Err(Error::Engine { .. })
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock2 = attach_mock_driver(&mut ctx2);
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Attempt 1")));
+        mock2.push(
+            "imp",
+            Err(Error::Report {
+                message: "bad report 1".to_string(),
+            }),
+        );
+        mock2.push("orch", Ok(dispatch_report(1, "imp", "Attempt 2")));
+        mock2.push(
+            "imp",
+            Err(Error::Report {
+                message: "bad report 2".to_string(),
+            }),
+        );
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let err2 = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err2, Error::Engine { step_number: 1, .. }));
     }
 }
