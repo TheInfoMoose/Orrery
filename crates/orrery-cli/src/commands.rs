@@ -1,17 +1,23 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use orrery_core::checkpoint::{
+    CheckpointManager, EnginePhase, OperatorDecision, StepStatus, WorkflowCheckpoint,
+};
 use orrery_core::config::{
     AgentBackend, AgentConfig, ConfigScope, ConfigStore, ExecutionMode, HookConfig, HookEvent,
     HookFailure, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
     McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, WorkspaceMount, WriteToolSpec,
     resolve_compose_file,
 };
-use orrery_core::engine::Backends;
+use orrery_core::engine::{Backends, RunOptions, RunOutcome, build_engine};
 use orrery_core::plan::ImplementationPlan;
 use orrery_core::security::{KeyringBackend, OsKeyringStore, SecretStore, SecretValue};
+use orrery_core::stream_log::{StreamEvent, tail_log};
 use orrery_core::{Error, Result};
+use tokio_util::sync::CancellationToken;
 
 use crate::args::{
     AgentCmd, Command, GateCmd, HookCmd, InferenceCmd, McpCmd, RoleCmd, SecretCmd, WorkflowCmd,
@@ -44,6 +50,15 @@ fn write_stdout_line(ctx: &mut CliContext, line: &str) -> Result<()> {
 
 pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) -> Result<u8> {
     match command {
+        Command::Tui { path } => {
+            let root = if path == Path::new(".") {
+                project.to_path_buf()
+            } else {
+                path
+            };
+            orrery_tui::run_tui(root).await?;
+            Ok(0)
+        }
         Command::Init { path, name } => {
             let target = path.as_deref().unwrap_or(project);
             let store = ConfigStore::new(target, None)?;
@@ -78,7 +93,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             cfg.step_marker = step_marker;
             store.save_project(&cfg)?;
             for step in &plan.steps {
-                write_stdout_line(ctx, &format!("Step {}: {}", step.number, step.title))?;
+                write_stdout_line(ctx, &step.title)?;
             }
             Ok(0)
         }
@@ -90,20 +105,37 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
         Command::Mcp { command } => dispatch_mcp(command, project, ctx).await,
         Command::Gate { command } => dispatch_gate(command, project, ctx),
         Command::Hook { command } => dispatch_hook(command, project, ctx),
-        Command::Tui { .. }
-        | Command::Run { .. }
-        | Command::Approve
-        | Command::Reject { .. }
-        | Command::Resume
-        | Command::Reset { .. }
-        | Command::Status { .. }
-        | Command::Logs { .. } => {
-            let _ = (&ctx.secrets, &ctx.read_secret, &ctx.make_backends);
-            Err(Error::Validation {
-                field: "command".into(),
-                message: "not implemented until Step 35/36".into(),
-            })
+        Command::Run {
+            r#loop,
+            cycles,
+            step,
+        } => {
+            let opts = RunOptions {
+                mode: if r#loop {
+                    Some(ExecutionMode::Loop)
+                } else {
+                    None
+                },
+                cycles,
+                start_step: step,
+                wait_for_operator: false,
+            };
+            dispatch_run(opts, project, ctx).await
         }
+        Command::Approve => dispatch_operator_decision(OperatorDecision::Approve, project, ctx),
+        Command::Reject { feedback } => {
+            dispatch_operator_decision(OperatorDecision::Reject { feedback }, project, ctx)
+        }
+        Command::Resume => {
+            let opts = RunOptions {
+                wait_for_operator: false,
+                ..RunOptions::default()
+            };
+            dispatch_run(opts, project, ctx).await
+        }
+        Command::Reset { step } => dispatch_reset(step, project, ctx),
+        Command::Status { json } => dispatch_status(json, project, ctx),
+        Command::Logs { tail, follow } => dispatch_logs(tail, follow, project, ctx).await,
     }
 }
 
@@ -651,6 +683,12 @@ fn dispatch_secret(command: SecretCmd, ctx: &mut CliContext) -> Result<u8> {
     match command {
         SecretCmd::Set { service, account } => {
             let raw = (ctx.read_secret)()?;
+            if raw.is_empty() {
+                return Err(Error::Validation {
+                    field: "secret".into(),
+                    message: "secret value is empty".into(),
+                });
+            }
             let secret = SecretValue::new(raw);
             ctx.secrets.set(&service, &account, &secret)?;
             write_stdout_line(
@@ -678,6 +716,227 @@ fn dispatch_secret(command: SecretCmd, ctx: &mut CliContext) -> Result<u8> {
     }
 }
 
+fn format_stream_event(ev: &StreamEvent) -> String {
+    let agent = ev.agent_id.as_deref().unwrap_or("-");
+    format!("[{:?}] {agent}: {}", ev.kind, ev.text)
+}
+
+async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    let backends = (ctx.make_backends)(project)?;
+    let engine = build_engine(&store, backends).await?;
+    let mut stream_rx = engine.subscribe_stream();
+    let cancel = CancellationToken::new();
+
+    let signal_cancel = cancel.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_cancel.cancel();
+        }
+    });
+
+    let run_fut = engine.run(opts, cancel);
+    tokio::pin!(run_fut);
+
+    let outcome_res = loop {
+        tokio::select! {
+            biased;
+            recv = stream_rx.recv() => {
+                match recv {
+                    Ok(ev) => {
+                        write_stdout_line(ctx, &format_stream_event(&ev))?;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break run_fut.as_mut().await;
+                    }
+                }
+            }
+            res = &mut run_fut => {
+                break res;
+            }
+        }
+    };
+
+    signal_task.abort();
+    while let Ok(ev) = stream_rx.try_recv() {
+        write_stdout_line(ctx, &format_stream_event(&ev))?;
+    }
+
+    match outcome_res? {
+        RunOutcome::Completed { .. } | RunOutcome::NoPendingSteps => Ok(0),
+        RunOutcome::AwaitingOperator { .. } => Ok(3),
+        RunOutcome::Interrupted => Ok(130),
+    }
+}
+
+fn dispatch_operator_decision(
+    decision: OperatorDecision,
+    project: &Path,
+    ctx: &mut CliContext,
+) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+    let mut state = checkpoints.load_state()?.ok_or_else(|| Error::Validation {
+        field: "checkpoint".into(),
+        message: "no step awaiting operator".into(),
+    })?;
+    if state.step_statuses.get(state.current_step_index) != Some(&StepStatus::AwaitingOperator) {
+        return Err(Error::Validation {
+            field: "checkpoint".into(),
+            message: "no step awaiting operator".into(),
+        });
+    }
+    state.operator_decision = Some(decision);
+    checkpoints.save_state(&state)?;
+    write_stdout_line(
+        ctx,
+        &format!(
+            "Recorded operator decision for step {}",
+            state.current_step_index + 1
+        ),
+    )?;
+    Ok(0)
+}
+
+fn dispatch_reset(step: usize, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+    let mut state = match checkpoints.load_state()? {
+        Some(cp) => cp,
+        None => {
+            let cfg = store.load_project()?;
+            let resolved = store.resolve_safe_path(&cfg.plan_path)?;
+            let plan = ImplementationPlan::from_file(&resolved, &cfg.step_marker)?;
+            WorkflowCheckpoint::new(&plan)
+        }
+    };
+    state.reset_from(step)?;
+    checkpoints.save_state(&state)?;
+    write_stdout_line(ctx, &format!("Reset steps from step {step} to Pending"))?;
+    Ok(0)
+}
+
+fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    let cfg = store.load_project()?;
+    let resolved = store.resolve_safe_path(&cfg.plan_path)?;
+    let plan = ImplementationPlan::from_file(&resolved, &cfg.step_marker)?;
+    let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+    let state = checkpoints.load_state()?;
+
+    let (run_id, phase, current_step, round, retry_count, awaiting_reason, statuses) = match state {
+        Some(cp) => {
+            let current = plan
+                .steps
+                .get(cp.current_step_index)
+                .map_or(cp.current_step_index + 1, |s| s.number);
+            let step_statuses: Vec<StepStatus> = (0..plan.steps.len())
+                .map(|i| {
+                    cp.step_statuses
+                        .get(i)
+                        .copied()
+                        .unwrap_or(StepStatus::Pending)
+                })
+                .collect();
+            (
+                Some(cp.run_id.to_string()),
+                cp.phase,
+                current,
+                cp.round,
+                cp.retry_count,
+                cp.awaiting_reason,
+                step_statuses,
+            )
+        }
+        None => (
+            None,
+            EnginePhase::Idle,
+            plan.steps.first().map_or(0, |s| s.number),
+            0,
+            0,
+            None,
+            vec![StepStatus::Pending; plan.steps.len()],
+        ),
+    };
+
+    if json {
+        let steps_json: Vec<serde_json::Value> = plan
+            .steps
+            .iter()
+            .zip(statuses.iter())
+            .map(|(step, status)| {
+                serde_json::json!({
+                    "number": step.number,
+                    "title": step.title,
+                    "status": status,
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "run_id": run_id,
+            "phase": phase,
+            "current_step": current_step,
+            "round": round,
+            "retry_count": retry_count,
+            "awaiting_reason": awaiting_reason,
+            "steps": steps_json,
+        });
+        let rendered = serde_json::to_string_pretty(&payload)?;
+        write_stdout_line(ctx, &rendered)?;
+    } else {
+        write_stdout_line(
+            ctx,
+            &format!(
+                "Phase: {phase:?} | current_step: {current_step} | round: {round} | retries: {retry_count}"
+            ),
+        )?;
+        if let Some(reason) = &awaiting_reason {
+            write_stdout_line(ctx, &format!("Awaiting operator: {reason}"))?;
+        }
+        for (step, status) in plan.steps.iter().zip(statuses.iter()) {
+            write_stdout_line(ctx, &format!("[{status:?}] {}", step.title))?;
+        }
+    }
+    Ok(0)
+}
+
+async fn dispatch_logs(
+    tail: Option<usize>,
+    follow: bool,
+    project: &Path,
+    ctx: &mut CliContext,
+) -> Result<u8> {
+    let store = ConfigStore::new(project, None)?;
+    let log_dir = store.orrery_dir().join("logs");
+    let limit = tail.unwrap_or(usize::MAX);
+    let lines = tail_log(&log_dir, limit)?;
+    for line in &lines {
+        write_stdout_line(ctx, line)?;
+    }
+    if follow {
+        let mut seen = tail_log(&log_dir, usize::MAX)?.len();
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    return Ok(130);
+                }
+                () = tokio::time::sleep(Duration::from_millis(500)) => {
+                    let all = tail_log(&log_dir, usize::MAX)?;
+                    if all.len() < seen {
+                        seen = 0;
+                    }
+                    for line in all.iter().skip(seen) {
+                        write_stdout_line(ctx, line)?;
+                    }
+                    seen = all.len();
+                }
+            }
+        }
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -685,6 +944,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    use orrery_core::checkpoint::AgentReport;
     use orrery_core::config::{
         ConfigStore, ExecutionMode, HookConfig, HookFailure, ValidationMode,
     };
@@ -848,8 +1108,9 @@ mod tests {
         assert_eq!(code, 0);
 
         let printed = out.as_string();
-        assert!(printed.contains("Step 1: 1: Setup"), "got: {printed}");
-        assert!(printed.contains("Step 2: 2: Build"), "got: {printed}");
+        assert!(printed.contains("1: Setup"), "got: {printed}");
+        assert!(printed.contains("2: Build"), "got: {printed}");
+        assert!(!printed.contains("Step 1: 1:"), "got: {printed}");
 
         let store = ConfigStore::new(dir.path(), None).expect("store");
         let cfg = store.load_project().expect("load_project");
@@ -1330,15 +1591,7 @@ mod tests {
         let cfg2 = store.load_project().expect("load_project");
         assert!(cfg2.hooks.on_step_start.is_none());
 
-        // Verify exit_code_for Interrupted and unimplemented stub.
         assert_eq!(exit_code_for(&Error::Interrupted), 130);
-        let stub_err = dispatch(Command::Approve, dir.path(), &mut ctx)
-            .await
-            .expect_err("unimplemented command must error");
-        assert_eq!(
-            stub_err.to_string(),
-            "invalid command: not implemented until Step 35/36"
-        );
     }
 
     fn mock_backends_with_transports(
@@ -2293,5 +2546,731 @@ mod tests {
         .expect("secret delete");
         assert_eq!(del_code, 0);
         assert!(ctx.secrets.get("orrery.cloud", "testuser").is_err());
+    }
+
+    #[tokio::test]
+    async fn secret_set_empty_rejected() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+        ctx.read_secret = Box::new(|| Ok(String::new()));
+
+        let err = dispatch(
+            Command::Secret {
+                command: SecretCmd::Set {
+                    service: "orrery.cloud".to_string(),
+                    account: "testuser".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("empty secret must fail");
+        assert_eq!(exit_code_for(&err), 1);
+        assert_eq!(err.to_string(), "invalid secret: secret value is empty");
+        assert!(ctx.secrets.get("orrery.cloud", "testuser").is_err());
+    }
+
+    fn dispatch_report(target_stage: usize, target_agent_id: &str) -> AgentReport {
+        AgentReport {
+            status: orrery_core::checkpoint::ReportStatus::Dispatch,
+            summary: format!("dispatch to stage {target_stage}"),
+            target_stage: Some(target_stage),
+            allocations: vec![orrery_core::checkpoint::SubtaskAllocation {
+                target_agent_id: target_agent_id.to_string(),
+                instructions: "execute subtask".to_string(),
+                write_scope: Vec::new(),
+            }],
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn complete_report() -> AgentReport {
+        AgentReport {
+            status: orrery_core::checkpoint::ReportStatus::Complete,
+            summary: "implementation complete".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn confirmed_report() -> AgentReport {
+        AgentReport {
+            status: orrery_core::checkpoint::ReportStatus::Confirmed,
+            summary: "validation confirmed".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn step_passed_report(summary: &str) -> AgentReport {
+        AgentReport {
+            status: orrery_core::checkpoint::ReportStatus::StepPassed,
+            summary: summary.to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: None,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn escalate_report(reason: &str) -> AgentReport {
+        AgentReport {
+            status: orrery_core::checkpoint::ReportStatus::Escalate,
+            summary: "escalating to operator".to_string(),
+            target_stage: None,
+            allocations: Vec::new(),
+            feedback: Some(reason.to_string()),
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn push_one_step_pass(driver: &MockAgentDriver, summary: &str) {
+        driver.push("orch-1", Ok(dispatch_report(1, "coder-1")));
+        driver.push("coder-1", Ok(complete_report()));
+        driver.push("orch-1", Ok(dispatch_report(2, "val-1")));
+        driver.push("val-1", Ok(confirmed_report()));
+        driver.push("orch-1", Ok(step_passed_report(summary)));
+    }
+
+    async fn setup_runnable_project(
+        dir: &Path,
+        plan_markdown: &str,
+        chat_driver: Arc<MockAgentDriver>,
+        secrets: Arc<InMemorySecretStore>,
+    ) -> (CliContext, SharedVec, SharedVec) {
+        let (mut ctx, out, err) = test_ctx();
+        ctx.secrets = secrets.clone();
+        ctx.make_backends = Box::new(move |_root: &Path| {
+            let chat: Arc<dyn AgentDriver> = chat_driver.clone();
+            let cli: Arc<dyn AgentDriver> = Arc::new(MockAgentDriver::new());
+            Ok(Backends {
+                secrets: secrets.clone(),
+                containers: Arc::new(MockContainerBackend::new()),
+                inference_control: Arc::new(MockInferenceControl::new()),
+                connector: Arc::new(MockMcpConnector {
+                    transports: HashMap::new(),
+                }),
+                drivers: DriverSet { chat, cli },
+            })
+        });
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("run-proj".to_string()),
+            },
+            dir,
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        std::fs::write(dir.join("STEPPED_IMPLEMENTATION_PLAN.md"), plan_markdown)
+            .expect("write plan");
+
+        dispatch(
+            Command::Inference {
+                command: InferenceCmd::Add {
+                    id: "ext-inf".to_string(),
+                    endpoint: "http://192.0.2.10:8080".to_string(),
+                    mode: InferenceModeArg::Single,
+                    container: None,
+                    compose: None,
+                    service: None,
+                    no_unload: false,
+                    startup_timeout: 300,
+                },
+            },
+            dir,
+            &mut ctx,
+        )
+        .await
+        .expect("add inference");
+
+        for (id, name) in [
+            ("orch-1", "Orchestrator"),
+            ("coder-1", "Coder"),
+            ("val-1", "Validator"),
+        ] {
+            dispatch(
+                Command::Agent {
+                    command: AgentCmd::AddLocalModel {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        inference: "ext-inf".to_string(),
+                        model: "test-model".to_string(),
+                        temperature: 0.1,
+                        context: 32768,
+                    },
+                },
+                dir,
+                &mut ctx,
+            )
+            .await
+            .expect("add agent");
+        }
+
+        for (stage, agent_id) in [(0, "orch-1"), (1, "coder-1"), (2, "val-1")] {
+            dispatch(
+                Command::Workflow {
+                    command: WorkflowCmd::Assign {
+                        stage,
+                        agent_id: agent_id.to_string(),
+                    },
+                },
+                dir,
+                &mut ctx,
+            )
+            .await
+            .expect("assign agent");
+        }
+
+        out.clear();
+        err.clear();
+        (ctx, out, err)
+    }
+
+    #[tokio::test]
+    async fn run_mode_passes_one_step_exit_0() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nbody 1\n## Step 2: Second\nbody 2\n",
+            driver,
+            secrets,
+        )
+        .await;
+
+        let code = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run should succeed");
+        assert_eq!(code, 0);
+
+        let printed = out.as_string();
+        assert!(
+            printed.contains("[ReportSaved] orch-1: StepPassed: step 1 done"),
+            "got: {printed}"
+        );
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let state = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Pending]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_loop_cycles_two() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        push_one_step_pass(&driver, "step 2 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n## Step 2: Second\nb2\n## Step 3: Third\nb3\n",
+            driver,
+            secrets,
+        )
+        .await;
+
+        let code = dispatch(
+            Command::Run {
+                r#loop: true,
+                cycles: Some(2),
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run --loop --cycles 2");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let state = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Passed, StepStatus::Pending]
+        );
+    }
+
+    #[tokio::test]
+    async fn escalation_exits_3_then_approve_resume_completes() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.push("orch-1", Ok(escalate_report("ambiguous requirement")));
+        push_one_step_pass(&driver, "step 1 resolved");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) =
+            setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
+
+        let code_esc = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run escalates");
+        assert_eq!(code_esc, 3);
+
+        let approve_code = dispatch(Command::Approve, dir.path(), &mut ctx)
+            .await
+            .expect("approve");
+        assert_eq!(approve_code, 0);
+
+        let resume_code = dispatch(Command::Resume, dir.path(), &mut ctx)
+            .await
+            .expect("resume");
+        assert_eq!(resume_code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let state = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(state.step_statuses, vec![StepStatus::Passed]);
+    }
+
+    #[tokio::test]
+    async fn reject_records_feedback() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.push("orch-1", Ok(escalate_report("need guidance")));
+        push_one_step_pass(&driver, "completed after reject");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n",
+            driver.clone(),
+            secrets,
+        )
+        .await;
+
+        let code_esc = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run escalates");
+        assert_eq!(code_esc, 3);
+
+        let feedback_msg = "use bounded retry backoff";
+        let reject_code = dispatch(
+            Command::Reject {
+                feedback: feedback_msg.to_string(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("reject");
+        assert_eq!(reject_code, 0);
+
+        let resume_code = dispatch(Command::Resume, dir.path(), &mut ctx)
+            .await
+            .expect("resume");
+        assert_eq!(resume_code, 0);
+
+        let invs = driver.invocations();
+        let second_orch = invs
+            .iter()
+            .filter(|inv| inv.agent.agent_id == "orch-1")
+            .nth(1)
+            .expect("second orchestrator invocation");
+        assert!(
+            second_orch.user_prompt.contains(feedback_msg),
+            "expected feedback in prompt, got: {}",
+            second_orch.user_prompt
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_without_awaiting_step_exits_1() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) =
+            setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
+
+        // No checkpoint on disk yet.
+        let err_no_cp = dispatch(Command::Approve, dir.path(), &mut ctx)
+            .await
+            .expect_err("approve without checkpoint must fail");
+        assert_eq!(exit_code_for(&err_no_cp), 1);
+        assert!(err_no_cp.to_string().contains("no step awaiting operator"));
+
+        // Run step to Passed, then try approve/reject when no step is AwaitingOperator.
+        dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+
+        let err_passed = dispatch(Command::Approve, dir.path(), &mut ctx)
+            .await
+            .expect_err("approve on passed step must fail");
+        assert_eq!(exit_code_for(&err_passed), 1);
+
+        let err_reject = dispatch(
+            Command::Reject {
+                feedback: "too late".to_string(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("reject on passed step must fail");
+        assert_eq!(exit_code_for(&err_reject), 1);
+    }
+
+    #[tokio::test]
+    async fn reset_step_one_marks_pending() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n## Step 2: Second\nb2\n",
+            driver,
+            secrets,
+        )
+        .await;
+
+        dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+
+        let reset_code = dispatch(Command::Reset { step: 1 }, dir.path(), &mut ctx)
+            .await
+            .expect("reset --step 1");
+        assert_eq!(reset_code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let state = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Pending]
+        );
+        assert_eq!(state.current_step_index, 0);
+        assert_eq!(state.phase, EnginePhase::Idle);
+    }
+
+    #[tokio::test]
+    async fn status_json_shape() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n## Step 2: Second\nb2\n",
+            driver,
+            secrets,
+        )
+        .await;
+
+        // Before any run (no checkpoint on disk yet).
+        let pre_code = dispatch(Command::Status { json: true }, dir.path(), &mut ctx)
+            .await
+            .expect("status --json before run");
+        assert_eq!(pre_code, 0);
+        let pre_val: serde_json::Value =
+            serde_json::from_str(&out.as_string()).expect("parse pre status json");
+        assert!(pre_val["run_id"].is_null());
+        assert_eq!(pre_val["phase"], "Idle");
+        assert_eq!(pre_val["current_step"], 1);
+        assert_eq!(pre_val["round"], 0);
+        assert_eq!(pre_val["retry_count"], 0);
+        assert!(pre_val["awaiting_reason"].is_null());
+
+        dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+        out.clear();
+
+        let code = dispatch(Command::Status { json: true }, dir.path(), &mut ctx)
+            .await
+            .expect("status --json");
+        assert_eq!(code, 0);
+
+        let val: serde_json::Value =
+            serde_json::from_str(&out.as_string()).expect("parse status json");
+        assert!(val["run_id"].is_string());
+        assert_eq!(val["phase"], "Done");
+        assert_eq!(val["current_step"], 1);
+        assert_eq!(val["round"], 3);
+        assert_eq!(val["retry_count"], 0);
+        assert!(val["awaiting_reason"].is_null());
+        let steps = val["steps"].as_array().expect("steps array");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0],
+            serde_json::json!({"number": 1, "title": "1: First", "status": "Passed"})
+        );
+        assert_eq!(
+            steps[1],
+            serde_json::json!({"number": 2, "title": "2: Second", "status": "Pending"})
+        );
+
+        out.clear();
+        let plain_code = dispatch(Command::Status { json: false }, dir.path(), &mut ctx)
+            .await
+            .expect("status plain");
+        assert_eq!(plain_code, 0);
+        let plain = out.as_string();
+        assert!(plain.contains("[Passed] 1: First"), "got: {plain}");
+        assert!(plain.contains("[Pending] 2: Second"), "got: {plain}");
+    }
+
+    #[tokio::test]
+    async fn logs_tail_shows_redacted_lines() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        let raw_secret = "super-secret-api-token-778899";
+        push_one_step_pass(&driver, &format!("done with token {raw_secret}"));
+
+        let secrets = Arc::new(InMemorySecretStore::new());
+        secrets
+            .set("orrery.cloud", "testuser", &SecretValue::new(raw_secret))
+            .expect("store secret");
+
+        let (mut ctx, out, _err) =
+            setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
+
+        // Register a CloudApi agent referencing that keychain entry so build_engine registers the secret with SecretRedactor.
+        dispatch(
+            Command::Agent {
+                command: AgentCmd::AddCloud {
+                    id: "cloud-helper".to_string(),
+                    name: "Cloud Helper".to_string(),
+                    endpoint: "https://api.example.com/v1/chat/completions".to_string(),
+                    model: "example-model".to_string(),
+                    keychain_service: "orrery.cloud".to_string(),
+                    keychain_account: "testuser".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("add cloud agent");
+
+        dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+        out.clear();
+
+        let code = dispatch(
+            Command::Logs {
+                tail: Some(5),
+                follow: false,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("logs --tail 5");
+        assert_eq!(code, 0);
+
+        let logged = out.as_string();
+        assert!(!logged.is_empty());
+        assert!(!logged.contains(raw_secret), "secret leaked: {logged}");
+        assert!(
+            logged.contains("[REDACTED]"),
+            "expected redaction: {logged}"
+        );
+    }
+
+    fn cli_equivalent(a: &orrery_tui::app::AppAction) -> Option<Vec<String>> {
+        use orrery_tui::app::AppAction;
+        match a {
+            AppAction::Run => Some(vec!["orrery".into(), "run".into()]),
+            AppAction::Approve => Some(vec!["orrery".into(), "approve".into()]),
+            AppAction::Reject(f) => Some(vec![
+                "orrery".into(),
+                "reject".into(),
+                "--feedback".into(),
+                f.clone(),
+            ]),
+            AppAction::IngestPlan(p) => Some(vec![
+                "orrery".into(),
+                "ingest".into(),
+                p.to_string_lossy().into_owned(),
+            ]),
+            AppAction::SetMode(mode) => {
+                let mode_str = match mode {
+                    ExecutionMode::Run => "run",
+                    ExecutionMode::Loop => "loop",
+                };
+                Some(vec![
+                    "orrery".into(),
+                    "workflow".into(),
+                    "mode".into(),
+                    mode_str.into(),
+                ])
+            }
+            AppAction::SetCycles(n) => Some(vec![
+                "orrery".into(),
+                "workflow".into(),
+                "mode".into(),
+                "loop".into(),
+                "--cycles".into(),
+                n.to_string(),
+            ]),
+            AppAction::SetStageCount(n) => Some(vec![
+                "orrery".into(),
+                "workflow".into(),
+                "stages".into(),
+                n.to_string(),
+            ]),
+            AppAction::SetStageRole { stage, role_id } => Some(vec![
+                "orrery".into(),
+                "workflow".into(),
+                "set-role".into(),
+                stage.to_string(),
+                role_id.clone(),
+            ]),
+            AppAction::AssignAgent { stage, agent_id } => Some(vec![
+                "orrery".into(),
+                "workflow".into(),
+                "assign".into(),
+                stage.to_string(),
+                agent_id.clone(),
+            ]),
+            AppAction::UnassignAgent { stage, agent_id } => Some(vec![
+                "orrery".into(),
+                "workflow".into(),
+                "unassign".into(),
+                stage.to_string(),
+                agent_id.clone(),
+            ]),
+            AppAction::Interrupt | AppAction::SetMouseCapture(_) | AppAction::Quit => None,
+        }
+    }
+
+    #[test]
+    fn tui_action_parity() {
+        use clap::Parser;
+        use orrery_tui::app::AppAction;
+
+        let actions = [
+            AppAction::Run,
+            AppAction::Interrupt,
+            AppAction::Approve,
+            AppAction::Reject("needs tests".to_string()),
+            AppAction::IngestPlan(PathBuf::from("plan.md")),
+            AppAction::SetMode(ExecutionMode::Run),
+            AppAction::SetMode(ExecutionMode::Loop),
+            AppAction::SetCycles(3),
+            AppAction::SetStageCount(4),
+            AppAction::SetStageRole {
+                stage: 1,
+                role_id: "coder".to_string(),
+            },
+            AppAction::AssignAgent {
+                stage: 1,
+                agent_id: "coder-1".to_string(),
+            },
+            AppAction::UnassignAgent {
+                stage: 1,
+                agent_id: "coder-1".to_string(),
+            },
+            AppAction::SetMouseCapture(false),
+            AppAction::Quit,
+        ];
+
+        for action in &actions {
+            match cli_equivalent(action) {
+                Some(argv) => {
+                    let parsed = crate::args::Cli::try_parse_from(&argv);
+                    assert!(
+                        parsed.is_ok(),
+                        "expected {argv:?} from {action:?} to parse: {parsed:?}"
+                    );
+                }
+                None => {
+                    assert!(
+                        matches!(
+                            action,
+                            AppAction::Interrupt | AppAction::SetMouseCapture(_) | AppAction::Quit
+                        ),
+                        "unexpected None for {action:?}"
+                    );
+                }
+            }
+        }
     }
 }
