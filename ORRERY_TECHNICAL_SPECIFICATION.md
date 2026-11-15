@@ -1072,10 +1072,10 @@ pub enum Modal { None, Ingest { input: String }, Settings, Help, QuitConfirm, Re
 pub enum AppAction { Run, Interrupt, Approve, Reject(String), IngestPlan(PathBuf), SetMode(ExecutionMode), SetCycles(usize),
     SetStageCount(usize), SetStageRole { stage: usize, role_id: String }, AssignAgent { stage: usize, agent_id: String },
     UnassignAgent { stage: usize, agent_id: String }, SetMouseCapture(bool), Quit }
-pub struct App { pub project_root: PathBuf, pub config: ProjectConfig, pub roles: Vec<RoleConfig>, pub agents: Vec<AgentConfig>,
+pub struct App { pub project_root: PathBuf, pub config: ProjectConfig, pub roles: Vec<RoleConfig>, pub agents: Vec<AgentConfig>, pub mcp_servers: Vec<McpServerConfig> /* new() → empty */,
     pub plan: Option<ImplementationPlan>, pub step_statuses: Vec<StepStatus>, pub focus: Focus, pub modal: Modal,
     pub top_index: usize, pub footer_index: usize, pub step_selected: usize, pub stage_selected: usize, pub slot_selected: usize,
-    pub stage_scroll: usize, pub slot_scroll: usize, pub stream: VecDeque<StreamEvent>, pub stream_scroll: usize /* 0 = follow */,
+    pub step_scroll: usize, pub stage_scroll: usize, pub slot_scroll: usize, pub stream: VecDeque<StreamEvent>, pub stream_scroll: usize /* 0 = follow */,
     pub mouse_capture: bool /* default true */, pub status: RunStatus, pub awaiting_operator: bool, pub status_message: Option<String>, pub should_quit: bool }
 // App derives Debug, Clone, PartialEq (tests compare before/after snapshots).
 impl App {

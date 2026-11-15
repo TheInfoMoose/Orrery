@@ -19,7 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui` | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW) | — |
+| 1 | **STEP 32** | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
 | 2 | **STEP 33** | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) | — |
 | 3 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
 | 4 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
@@ -1786,6 +1786,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 Scope note: written 2026-11-13. `tokio-util` is in the TUI manifest since Step 27, for `CancellationToken`.
 - Amended 2026-11-15 after Step 29's review: after every `UiLayoutRegions::compute`, call `app.keep_selection_visible(&regions)` (added in Step 30), then recompute if `stage_scroll` or `slot_scroll` changed, so the drawn frame matches the selection.
+- Amended 2026-11-15 after Step 31's review: two fixes that need `app.rs` and `widgets.rs` move here. (1) The steps list scrolled from `step_selected` at draw time while a click mapped the clicked row straight to a step index, so clicks picked the wrong step once the list scrolled; `App` now stores `step_scroll`. (2) Settings showed `gate_tools` because `App` had no MCP server list; `App` now holds `mcp_servers`, filled by `run_tui`.
 
 ```text
 [STEP_ID]
@@ -1795,15 +1796,19 @@ STEP 32: bridge.rs — BridgeInput, Effects, step(), EngineController (config pe
 ALLOWED_FILES:
   - crates/orrery-tui/src/lib.rs
   - crates/orrery-tui/src/bridge.rs
+  - crates/orrery-tui/src/app.rs
+  - crates/orrery-tui/src/widgets.rs
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1106-1119 (§9.9 bridge block; binding)
   - ORRERY_TECHNICAL_SPECIFICATION.md:574-580 (§6.5 engine bridge)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1075-1078 (§9.9 App fields incl. mcp_servers, step_scroll; binding)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:519 (§6.2 Settings modal lists MCP servers)
   - crates/orrery-core/src/engine.rs (build_engine, Backends, RunOptions, WorkflowEngine::operator_sender)
 FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. The render loop never awaits engine work. Tests never open a terminal.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && test -f crates/orrery-tui/src/widgets.rs && test ! -e crates/orrery-tui/src/bridge.rs && grep -q '^tokio-util.workspace = true$' crates/orrery-tui/Cargo.toml && sed -n 574p $S | grep -q '^### 6.5 '
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && test -f crates/orrery-tui/src/widgets.rs && test ! -e crates/orrery-tui/src/bridge.rs && grep -q '^tokio-util.workspace = true$' crates/orrery-tui/Cargo.toml && sed -n 574p $S | grep -q '^### 6.5 ' && sed -n 1075p $S | grep -q 'pub mcp_servers: Vec<McpServerConfig>' && ! grep -q 'step_scroll' crates/orrery-tui/src/app.rs
 
 [MUTATION_SPEC]
 1. lib.rs: `pub mod bridge;` and `pub use bridge::run_tui;`.
@@ -1820,8 +1825,16 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
      - install a panic hook that restores the terminal, then calls the previous hook; a guard struct also restores on drop;
      - loop with `tokio::select!` over `crossterm::event::EventStream` (`futures_util::StreamExt::next`), the engine/stream channels and a 250 ms tick;
      - recompute `UiLayoutRegions` on each draw;
-     - `SetMouseCapture` toggles crossterm mouse capture.
-3. Tests (bridge::tests; no terminal; `EngineController` with mock `Backends`; `#[tokio::test]`):
+     - `SetMouseCapture` toggles crossterm mouse capture;
+     - builds the `App` with `App::new(..)`, then sets `app.mcp_servers = store.load_mcp_servers()?`.
+3. app.rs (§9.9 fields):
+   - add `pub mcp_servers: Vec<McpServerConfig>` (empty in `new`) and `pub step_scroll: usize` (0 in `new`);
+   - `keep_selection_visible` also keeps `step_selected` inside `step_scroll..step_scroll + rows`, where rows = the steps panel's inner height (`steps_panel` minus its border); skip it when `rows == 0`;
+   - a left click on `StepsList` selects `step_scroll + clicked_row` (still only when that index is `< len`).
+4. widgets.rs:
+   - `render_steps_panel` draws from `app.step_scroll` instead of deriving the scroll from `step_selected`;
+   - the Settings modal's tools line becomes `MCP servers: <server_id, ...>` from `app.mcp_servers` (`(none)` when empty); gate tools stay on their own `Gate tools:` line.
+5. Tests (bridge::tests; no terminal; `EngineController` with mock `Backends`; `#[tokio::test]`):
    - `step_key_returns_actions`.
    - `step_engine_event_updates_app`.
    - `step_stream_event_appends`.
@@ -1829,9 +1842,11 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `interrupt_cancels_and_saves_checkpoint`: the status returns to `Idle`, and the checkpoint step is `InProgress`.
    - `approve_reaches_operator_channel`: with the engine awaiting the operator, `Approve` makes the step `Passed`.
    - `config_edit_persists`: `SetStageCount(4)`, then `ConfigStore::load_project` shows 4 stages.
+6. Tests (app::tests): `keep_selection_visible_scrolls_steps`: 20 steps, 80×24, `step_selected = 18` → `step_scroll` such that 18 is the last visible row; then `step_selected = 0` → `step_scroll == 0`. `steps_click_respects_scroll`: with `step_scroll = 12`, a click on the first inner row selects step 12.
+7. Tests (widgets::tests): `settings_lists_mcp_servers`: one MCP server `fs` in `app.mcp_servers`, Settings modal open → the buffer contains `MCP servers: fs`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '^pub use bridge::run_tui;$' crates/orrery-tui/src/lib.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::(step_key_returns_actions|step_engine_event_updates_app|step_stream_event_appends|run_action_starts_engine_status_running|interrupt_cancels_and_saves_checkpoint|approve_reaches_operator_channel|config_edit_persists): test$')" -eq 7
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '^pub use bridge::run_tui;$' crates/orrery-tui/src/lib.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::(step_key_returns_actions|step_engine_event_updates_app|step_stream_event_appends|run_action_starts_engine_status_running|interrupt_cancels_and_saves_checkpoint|approve_reaches_operator_channel|config_edit_persists): test$')" -eq 7 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(app::tests::(keep_selection_visible_scrolls_steps|steps_click_respects_scroll)|widgets::tests::settings_lists_mcp_servers): test$')" -eq 3 && grep -q 'pub step_scroll: usize' crates/orrery-tui/src/app.rs
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
