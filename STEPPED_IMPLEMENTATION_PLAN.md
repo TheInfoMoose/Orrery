@@ -19,10 +19,9 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 34** | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) | — |
-| 2 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 3 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
-| 4 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW) | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| 1 | **STEP 35** | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 2 | **STEP 36** | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 3 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW), `crates/orrery-tui/src/widgets.rs` | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +60,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 31** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | TUI widgets and rendering | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/widgets.rs` (NEW) |
 | **STEP 32** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | TUI ↔ engine bridge, `run_tui`; steps-list scroll, Settings MCP servers | `crates/orrery-tui/src/lib.rs`, `crates/orrery-tui/src/bridge.rs` (NEW), `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 33** | **COMPLETED** (2026-11-15, POST_GATE PASS; check flagged only Claude's mid-step plan and spec edits) | `/goal` | CLI crate and argument parsing, `clap` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml` (NEW), `crates/orrery-cli/src/main.rs` (NEW), `crates/orrery-cli/src/args.rs` (NEW) |
+| **STEP 34** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) |
 
 ---
 
@@ -2039,6 +2039,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/boost`
 
 Scope note: written 2026-11-13. After this step every `Command` variant is handled and the Step 34 stub text is gone.
+- Amended 2026-11-15 after Step 34's review: a plan step's `title` already includes its number (spec §5.4: the marker line minus the marker, e.g. `1: Alpha`), so `ingest` printing `Step {number}: {title}` shows `Step 1: 1: Alpha`. Item 3 makes it print the title alone.
 
 ```text
 [STEP_ID]
@@ -2063,6 +2064,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - Behaviour and exit codes per §9.10: `RunOptions { wait_for_operator: false, .. }`; Ctrl+C via `tokio::signal::ctrl_c()` cancelling a `CancellationToken`.
    - `logs` uses `stream_log::tail_log`; `--follow` polls the file every 500 ms until Ctrl+C.
    - Remove the Step 34 stub, so every `Command` variant is handled.
+3. `ingest` prints each step as `{title}` alone (no `Step {number}: ` prefix); update `ingest_sets_plan_and_prints_steps` to expect `1: Setup` and `2: Build`, and to assert the output does not contain `Step 1: 1:`.
 2. Tests (commands::tests; mock `Backends` via `make_backends`):
    - `run_mode_passes_one_step_exit_0`.
    - `run_loop_cycles_two`.
@@ -2098,6 +2100,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 * **Recommended Command:** `/goal`
 
 Scope note: written 2026-11-13. The smoke plan uses the product default marker `## Step ` (what `init` writes), not this file's `### STEP `.
+- Amended 2026-11-15 after Step 34's review: the TUI steps panel (Step 31) prints `{badge} {number}. {title}`, but `title` already includes the number (`[ ] 1. 1: first`). `widgets.rs` joins ALLOWED_FILES for item 3 only.
 
 ```text
 [STEP_ID]
@@ -2106,6 +2109,7 @@ STEP 37: tests/cli_smoke.rs — end-to-end CLI smoke test of the built binary; f
 [SCOPE_LOCK]
 ALLOWED_FILES:
   - crates/orrery-cli/tests/cli_smoke.rs
+  - crates/orrery-tui/src/widgets.rs (only `render_steps_panel`'s label and `steps_panel_badges`)
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:621-644 (§8: live-backend env vars and command)
   - ORRERY_TECHNICAL_SPECIFICATION.md:581-620 (§7)
@@ -2123,12 +2127,13 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `workflow show --json` (parse the output with `serde_json`);
    - `status`.
    Each exits 0.
-2. Step report to the operator: the live-backend command
+3. widgets.rs: when a plan is loaded, `render_steps_panel` labels each step `{badge} {title}` (title as-is). Extend `steps_panel_badges` to assert the panel shows `[ ] 1: A`-style labels with no `1. 1:`.
+4. Step report to the operator: the live-backend command
      cargo test --workspace --locked --features orrery-core/live-backends
    with `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `ORRERY_LIVE_LLM_URL`, `ORRERY_LIVE_LLM_MODEL` (§8). `live_keyring` needs a desktop session or keyutils.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy --workspace --all-targets --features orrery-core/live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && ! cargo tree --locked -i zbus >/dev/null 2>&1 && cargo test -p orrery-cli --test cli_smoke --locked 2>&1 | grep -q 'test result: ok. 1 passed'
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy --workspace --all-targets --features orrery-core/live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! cargo tree --locked -i openssl-sys >/dev/null 2>&1 && ! cargo tree --locked -i zbus >/dev/null 2>&1 && cargo test -p orrery-cli --test cli_smoke --locked 2>&1 | grep -q 'test result: ok. 1 passed' && ! grep -q 'step.number, step.title' crates/orrery-tui/src/widgets.rs
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
