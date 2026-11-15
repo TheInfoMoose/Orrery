@@ -1393,6 +1393,9 @@ Scope note: written 2026-11-13.
   - **Resume an in-progress step.** Step 21's `pick_next_step_index` takes the first `Pending` step. A step left `InProgress` (or `AwaitingOperator`) by an interrupted run is skipped and stays that way forever. Resume must continue that step first.
   - **`changed_steps` is 0-based.** `ReconcileOutcome::Updated.changed_steps` holds plan indices, not step numbers. Convert with `+ 1` (or look up `plan.steps[i].number`) wherever a step number is shown or compared.
   - **Removing trailing steps.** When the plan shrinks, `reconcile` clamps `current_step_index` to `new_len - 1`, which can point at a `Passed` step. Resume must not continue a `Passed` step; fall through to the next `Pending` one.
+- Amended 2026-11-15 after Step 24's review:
+  - **Drop the stage turn before ending its lease.** `current_lease` holds an `Arc<StageLease>`, and a running `run_stage_turn` holds its own clone. Its end-of-turn guard returns `Error::Engine` ("stage lease still shared") when `Arc::try_unwrap` fails. So the cancel path must let the stage-turn future (and every clone it holds) drop first, then take `current_lease` and `end_stage` it. Race the whole `run_stage_turn(..)` call in `run` with `cancel.cancelled()`, not the `join_all` inside it. Otherwise Ctrl+C mid-stage returns that error instead of `Interrupted`.
+  - A fresh `begin_stage` succeeding after a cancel does not prove `end_stage` ran: `StageLease`'s `Drop` also clears the open flag. The new test below checks the recorded `Remove` call instead.
 
 ```text
 [STEP_ID]
@@ -1427,9 +1430,10 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `edited_passed_step_blocks_start`: pass step 1, edit its body, then `run` a new engine. It gives `Err(Error::Engine { step_number: 1, .. })` with zero driver invocations.
    - `appended_step_accepted_on_start`.
    - `start_step_must_be_pending`.
+   - `cancel_mid_cli_stage_removes_container`: make the stage-1 agent `AgentCli` (`ctx.agents` edit), and replace `ctx.resources` with a `ResourceManager` built on an `Arc<MockContainerBackend>` the test keeps. The CLI driver is a `MockAgentDriver` with a 500 ms delay; cancel after 50 ms. Gives `Interrupted`, and the backend's `calls()` contain `MockCall::Remove(cli_container_name(&run_id, agent_id))`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'cancelled()' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(cancel_mid_stage_saves_checkpoint_and_closes_lease|cancel_runs_halt_hook|resume_restarts_interrupted_round_orchestrator|edited_passed_step_blocks_start|appended_step_accepted_on_start|start_step_must_be_pending): test$')" -eq 6
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'cancelled()' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(cancel_mid_stage_saves_checkpoint_and_closes_lease|cancel_runs_halt_hook|resume_restarts_interrupted_round_orchestrator|edited_passed_step_blocks_start|appended_step_accepted_on_start|start_step_must_be_pending|cancel_mid_cli_stage_removes_container): test$')" -eq 7
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
