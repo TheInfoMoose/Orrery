@@ -7,12 +7,12 @@ use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::checkpoint::{
-    AgentReport, CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StampedReport,
-    StepStatus, SubtaskAllocation, WorkflowCheckpoint,
+    AgentReport, CheckpointManager, EnginePhase, HookResult, OperatorDecision, ReportStatus,
+    StampedReport, StepStatus, SubtaskAllocation, WorkflowCheckpoint,
 };
 use crate::config::{
-    AgentBackend, AgentConfig, ExecutionMode, McpServerConfig, ProjectConfig, RoleConfig, RoleKind,
-    ValidationMode, validate_concrete_tool_ref,
+    AgentBackend, AgentConfig, ExecutionMode, HookEvent, HookFailure, HooksConfig, McpServerConfig,
+    ProjectConfig, RoleConfig, RoleKind, ValidationMode, validate_concrete_tool_ref,
 };
 use crate::docker::{ResourceManager, StageLease};
 use crate::llm::{
@@ -27,6 +27,7 @@ use crate::{Error, Result};
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const OPERATOR_CHANNEL_CAPACITY: usize = 8;
 const PASS_CHECK_AWAITING_REASON: &str = "awaiting operator approval for step pass";
+const MAX_HOOK_OUTPUT_BYTES: usize = 4096;
 
 pub struct DriverSet {
     pub chat: Arc<dyn AgentDriver>,
@@ -222,6 +223,60 @@ enum AwaitResolution {
     HaltRun(RunOutcome),
 }
 
+enum HookOutcome {
+    Skipped,
+    Completed,
+    Halt(String),
+}
+
+enum StepPassOutcome {
+    FinishedRun(RunOutcome),
+    NextStep,
+    ContinueRound,
+}
+
+fn hook_event_name(event: HookEvent) -> &'static str {
+    match event {
+        HookEvent::StepStart => "step_start",
+        HookEvent::StepPass => "step_pass",
+        HookEvent::StepRetry => "step_retry",
+        HookEvent::Halt => "halt",
+    }
+}
+
+fn build_hook_role(hooks: &HooksConfig) -> RoleConfig {
+    let allowed_mcp_tools = [
+        &hooks.on_step_start,
+        &hooks.on_step_pass,
+        &hooks.on_step_retry,
+        &hooks.on_halt,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|h| h.tool.clone())
+    .collect();
+
+    RoleConfig {
+        role_id: "__orrery_hooks".to_string(),
+        display_name: "__orrery_hooks".to_string(),
+        kind: RoleKind::Orchestrator,
+        rules_file: String::new(),
+        allowed_mcp_tools,
+    }
+}
+
+fn truncate_utf8(mut text: String, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text
+}
+
 struct StepRunState {
     step_idx: usize,
     step_number: usize,
@@ -344,16 +399,21 @@ impl WorkflowEngine {
                 };
                 match resolution {
                     AwaitResolution::PassStep => {
-                        if let Some(outcome) = self.complete_step_pass(
-                            &mut state,
-                            step_idx,
-                            step.number,
-                            mode,
-                            cycles,
-                        )? {
-                            return Ok(outcome);
+                        match self
+                            .complete_step_pass(
+                                &mut state,
+                                &mut resumed,
+                                step,
+                                mode,
+                                cycles,
+                                opts.wait_for_operator,
+                            )
+                            .await?
+                        {
+                            StepPassOutcome::FinishedRun(outcome) => return Ok(outcome),
+                            StepPassOutcome::NextStep => continue,
+                            StepPassOutcome::ContinueRound => resumed,
                         }
-                        continue;
                     }
                     AwaitResolution::ContinueOrchestrator => resumed,
                     AwaitResolution::HaltRun(outcome) => return Ok(outcome),
@@ -384,6 +444,24 @@ impl WorkflowEngine {
                         AwaitingContext::HaltOrEscalation,
                         decision,
                     )?;
+                }
+                if let HookOutcome::Halt(reason) = self
+                    .run_hook(&mut state, step, HookEvent::StepStart)
+                    .await?
+                {
+                    match self
+                        .enter_awaiting_operator(
+                            &mut state,
+                            &mut fresh,
+                            reason,
+                            AwaitingContext::HaltOrEscalation,
+                            opts.wait_for_operator,
+                        )
+                        .await?
+                    {
+                        AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {}
+                        AwaitResolution::HaltRun(outcome) => return Ok(outcome),
+                    }
                 }
                 fresh
             };
@@ -501,6 +579,26 @@ impl WorkflowEngine {
                                     AwaitResolution::HaltRun(outcome) => return Ok(outcome),
                                 }
                             }
+
+                            if let HookOutcome::Halt(reason) = self
+                                .run_hook(&mut state, step, HookEvent::StepRetry)
+                                .await?
+                            {
+                                match self
+                                    .enter_awaiting_operator(
+                                        &mut state,
+                                        &mut step_state,
+                                        reason,
+                                        AwaitingContext::HaltOrEscalation,
+                                        opts.wait_for_operator,
+                                    )
+                                    .await?
+                                {
+                                    AwaitResolution::ContinueOrchestrator
+                                    | AwaitResolution::PassStep => continue,
+                                    AwaitResolution::HaltRun(outcome) => return Ok(outcome),
+                                }
+                            }
                         }
 
                         state.phase = EnginePhase::StageTurn;
@@ -576,16 +674,23 @@ impl WorkflowEngine {
                             let (gate_ok, gate_note) = self.run_gates(&mut state, step).await?;
                             match agents_pass_rule(&step_state.history, gate_ok) {
                                 Ok(()) => {
-                                    if let Some(outcome) = self.complete_step_pass(
-                                        &mut state,
-                                        step_idx,
-                                        step.number,
-                                        mode,
-                                        cycles,
-                                    )? {
-                                        return Ok(outcome);
+                                    match self
+                                        .complete_step_pass(
+                                            &mut state,
+                                            &mut step_state,
+                                            step,
+                                            mode,
+                                            cycles,
+                                            opts.wait_for_operator,
+                                        )
+                                        .await?
+                                    {
+                                        StepPassOutcome::FinishedRun(outcome) => {
+                                            return Ok(outcome);
+                                        }
+                                        StepPassOutcome::NextStep => break,
+                                        StepPassOutcome::ContinueRound => continue,
                                     }
-                                    break;
                                 }
                                 Err(reason) => {
                                     let note = match gate_note {
@@ -654,16 +759,23 @@ impl WorkflowEngine {
                                 .await?
                             {
                                 AwaitResolution::PassStep => {
-                                    if let Some(outcome) = self.complete_step_pass(
-                                        &mut state,
-                                        step_idx,
-                                        step.number,
-                                        mode,
-                                        cycles,
-                                    )? {
-                                        return Ok(outcome);
+                                    match self
+                                        .complete_step_pass(
+                                            &mut state,
+                                            &mut step_state,
+                                            step,
+                                            mode,
+                                            cycles,
+                                            opts.wait_for_operator,
+                                        )
+                                        .await?
+                                    {
+                                        StepPassOutcome::FinishedRun(outcome) => {
+                                            return Ok(outcome);
+                                        }
+                                        StepPassOutcome::NextStep => break,
+                                        StepPassOutcome::ContinueRound => continue,
                                     }
-                                    break;
                                 }
                                 AwaitResolution::ContinueOrchestrator => continue,
                                 AwaitResolution::HaltRun(outcome) => return Ok(outcome),
@@ -730,6 +842,11 @@ impl WorkflowEngine {
         context: AwaitingContext,
         wait_for_operator: bool,
     ) -> Result<AwaitResolution> {
+        let step = &self.ctx.plan.steps[step_state.step_idx];
+        if state.step_statuses[step_state.step_idx] != StepStatus::AwaitingOperator {
+            self.run_halt_hook(state, step).await?;
+        }
+
         state.phase = EnginePhase::AwaitingOperator;
         state.step_statuses[step_state.step_idx] = StepStatus::AwaitingOperator;
         state.active_stage_index = None;
@@ -820,18 +937,43 @@ impl WorkflowEngine {
         }
     }
 
-    fn complete_step_pass(
+    async fn complete_step_pass(
         &self,
         state: &mut WorkflowCheckpoint,
-        step_idx: usize,
-        step_number: usize,
+        step_state: &mut StepRunState,
+        step: &PlanStep,
         mode: ExecutionMode,
         cycles: usize,
-    ) -> Result<Option<RunOutcome>> {
-        state.step_statuses[step_idx] = StepStatus::Passed;
-        state.steps_passed_this_run += 1;
+        wait_for_operator: bool,
+    ) -> Result<StepPassOutcome> {
+        state.step_statuses[step_state.step_idx] = StepStatus::Passed;
         state.active_stage_index = None;
         state.awaiting_reason = None;
+        self.ctx.checkpoints.save_state(state)?;
+        self.emit_event(EngineEvent::StepStatusChanged {
+            step_number: step.number,
+            status: StepStatus::Passed,
+        });
+
+        if let HookOutcome::Halt(reason) = self.run_hook(state, step, HookEvent::StepPass).await? {
+            return match self
+                .enter_awaiting_operator(
+                    state,
+                    step_state,
+                    reason,
+                    AwaitingContext::HaltOrEscalation,
+                    wait_for_operator,
+                )
+                .await?
+            {
+                AwaitResolution::HaltRun(outcome) => Ok(StepPassOutcome::FinishedRun(outcome)),
+                AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {
+                    Ok(StepPassOutcome::ContinueRound)
+                }
+            };
+        }
+
+        state.steps_passed_this_run += 1;
 
         let should_stop = match mode {
             ExecutionMode::Run => true,
@@ -845,10 +987,6 @@ impl WorkflowEngine {
         }
 
         self.ctx.checkpoints.save_state(state)?;
-        self.emit_event(EngineEvent::StepStatusChanged {
-            step_number,
-            status: StepStatus::Passed,
-        });
 
         if should_stop {
             let outcome = RunOutcome::Completed {
@@ -856,10 +994,114 @@ impl WorkflowEngine {
             };
             self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
             self.emit_event(EngineEvent::RunFinished(outcome.clone()));
-            return Ok(Some(outcome));
+            return Ok(StepPassOutcome::FinishedRun(outcome));
         }
 
-        Ok(None)
+        Ok(StepPassOutcome::NextStep)
+    }
+
+    async fn run_halt_hook(&self, state: &mut WorkflowCheckpoint, step: &PlanStep) -> Result<()> {
+        let _ = self.run_hook(state, step, HookEvent::Halt).await?;
+        Ok(())
+    }
+
+    async fn run_hook(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step: &PlanStep,
+        event: HookEvent,
+    ) -> Result<HookOutcome> {
+        let Some(hook_cfg) = self.ctx.project.hooks.get(event).cloned() else {
+            return Ok(HookOutcome::Skipped);
+        };
+
+        state.phase = EnginePhase::Hook;
+        state.active_stage_index = None;
+        self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Hook));
+
+        let field_name = match event {
+            HookEvent::StepStart => "hooks.on_step_start.tool",
+            HookEvent::StepPass => "hooks.on_step_pass.tool",
+            HookEvent::StepRetry => "hooks.on_step_retry.tool",
+            HookEvent::Halt => "hooks.on_halt.tool",
+        };
+        let (server_id, tool) = validate_concrete_tool_ref(&hook_cfg.tool, field_name)?;
+        let hook_role = build_hook_role(&self.ctx.project.hooks);
+        let event_str = hook_event_name(event);
+
+        let args = serde_json::json!({
+            "orrery": {
+                "project_name": self.ctx.project.project_name,
+                "run_id": state.run_id.to_string(),
+                "step_number": step.number,
+                "step_title": step.title,
+                "plan_step_sha256": step.sha256_hex,
+                "event": event_str,
+            }
+        });
+
+        let exec_res = self
+            .ctx
+            .gatekeeper
+            .execute_for_role(&hook_role, &WriteScope::anywhere(), server_id, tool, args)
+            .await;
+
+        let (success, raw_output) = match exec_res {
+            Ok(val) if !tool_result_is_error(&val) => (true, tool_result_text(&val)),
+            Ok(val) => {
+                let text = tool_result_text(&val);
+                let detail = if text.is_empty() {
+                    "tool returned isError=true".to_string()
+                } else {
+                    text
+                };
+                (false, detail)
+            }
+            Err(err) => {
+                let detail = match std::error::Error::source(&err) {
+                    Some(src) => format!("{err}: {src}"),
+                    None => err.to_string(),
+                };
+                (false, detail)
+            }
+        };
+
+        let redacted = self.ctx.stream.redactor().redact(&raw_output)?;
+        let output = truncate_utf8(redacted, MAX_HOOK_OUTPUT_BYTES);
+
+        state.hook_results.push(HookResult {
+            event,
+            step_number: step.number,
+            tool: hook_cfg.tool.clone(),
+            success,
+            output: output.clone(),
+            recorded_at: Utc::now(),
+        });
+        self.ctx.checkpoints.save_state(state)?;
+
+        if success {
+            return Ok(HookOutcome::Completed);
+        }
+
+        match hook_cfg.on_failure {
+            HookFailure::Halt => Ok(HookOutcome::Halt(format!("hook {event_str} failed"))),
+            HookFailure::Warn => {
+                let notice_text = if output.is_empty() {
+                    format!("hook {event_str} ({}) failed", hook_cfg.tool)
+                } else {
+                    format!("hook {event_str} ({}) failed: {output}", hook_cfg.tool)
+                };
+                self.ctx.stream.emit(StreamEvent {
+                    timestamp: Utc::now(),
+                    step_number: Some(step.number),
+                    stage_index: None,
+                    agent_id: None,
+                    kind: StreamEventKind::SystemNotice,
+                    text: notice_text,
+                })?;
+                Ok(HookOutcome::Completed)
+            }
+        }
     }
 
     async fn run_gates(
@@ -1351,7 +1593,7 @@ mod tests {
 
     use super::{
         DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
-        StageTurnRecord, WorkflowEngine, agents_pass_rule, check_dispatch,
+        StageTurnRecord, WorkflowEngine, agents_pass_rule, build_hook_role, check_dispatch,
     };
     use crate::Error;
     use crate::checkpoint::{
@@ -1359,14 +1601,15 @@ mod tests {
         SubtaskAllocation,
     };
     use crate::config::{
-        AgentBackend, AgentConfig, ExecutionMode, InferenceConfig, InferenceLifecycle,
-        InferenceMode, ProjectConfig, RoleConfig, RoleKind, StageConfig,
+        AgentBackend, AgentConfig, ExecutionMode, HookConfig, HookEvent, HookFailure, HooksConfig,
+        InferenceConfig, InferenceLifecycle, InferenceMode, ProjectConfig, RoleConfig, RoleKind,
+        StageConfig,
     };
     use crate::docker::{MockContainerBackend, MockInferenceControl, ResourceManager};
     use crate::llm::{AgentDriver, MockAgentDriver};
-    use crate::mcp::{McpGatekeeper, MockMcpTransport};
+    use crate::mcp::{McpGatekeeper, MockMcpTransport, WriteScope};
     use crate::plan::ImplementationPlan;
-    use crate::security::SecretRedactor;
+    use crate::security::{SecretRedactor, SecretValue};
     use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEventKind};
 
     pub(super) fn test_context(dir: &Path, stages: &[(RoleKind, &[&str])]) -> EngineContext {
@@ -3039,5 +3282,540 @@ mod tests {
             outcome2,
             RunOutcome::AwaitingOperator { step_number: 1, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn hook_args_contain_orrery_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_start = Some(HookConfig {
+            tool: "git:status".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "status",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "clean tree" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let expected_step_hash = ctx.plan.steps[0].sha256_hex.clone();
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "status");
+
+        let orrery_obj = calls[0]
+            .1
+            .get("orrery")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(orrery_obj.len(), 6);
+        assert_eq!(
+            orrery_obj.get("project_name").and_then(|v| v.as_str()),
+            Some("test-project")
+        );
+        assert_eq!(
+            orrery_obj.get("run_id").and_then(|v| v.as_str()),
+            Some(state.run_id.to_string().as_str())
+        );
+        assert_eq!(
+            orrery_obj.get("step_number").and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            orrery_obj.get("step_title").and_then(|v| v.as_str()),
+            Some("1: First")
+        );
+        assert_eq!(
+            orrery_obj.get("plan_step_sha256").and_then(|v| v.as_str()),
+            Some(expected_step_hash.as_str())
+        );
+        assert_eq!(
+            orrery_obj.get("event").and_then(|v| v.as_str()),
+            Some("step_start")
+        );
+
+        assert_eq!(state.hook_results.len(), 1);
+        assert_eq!(state.hook_results[0].event, HookEvent::StepStart);
+        assert_eq!(state.hook_results[0].step_number, 1);
+        assert_eq!(state.hook_results[0].tool, "git:status");
+        assert!(state.hook_results[0].success);
+        assert_eq!(state.hook_results[0].output, "clean tree");
+    }
+
+    #[tokio::test]
+    async fn step_retry_hook_runs_before_each_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_retry = Some(HookConfig {
+            tool: "git:reset".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "reset",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "reset ok" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        // Initial pass attempt -> denied
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Attempt 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate 1")));
+        mock.push("val", Ok(denied_report("Denial 1")));
+        // Retry 1 -> denied
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 1")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate 2")));
+        mock.push("val", Ok(denied_report("Denial 2")));
+        // Retry 2 -> confirmed -> pass
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Retry 2")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(dispatch_report(2, "val", "Validate 3")));
+        mock.push("val", Ok(confirmed_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let mut events_rx = engine.subscribe();
+
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        for (name, args) in &calls {
+            assert_eq!(name, "reset");
+            assert_eq!(args["orrery"]["event"], "step_retry");
+        }
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.hook_results.len(), 2);
+        assert_eq!(state.hook_results[0].event, HookEvent::StepRetry);
+        assert_eq!(state.hook_results[1].event, HookEvent::StepRetry);
+
+        // Verify each retry hook ran before the retried stage's invocation
+        let reports = checkpoints.load_reports(1, None).unwrap();
+        let retry1_stage_report = reports
+            .iter()
+            .find(|r| r.round == 3 && r.stage_index == 1)
+            .unwrap();
+        let retry2_stage_report = reports
+            .iter()
+            .find(|r| r.round == 5 && r.stage_index == 1)
+            .unwrap();
+        assert!(state.hook_results[0].recorded_at <= retry1_stage_report.recorded_at);
+        assert!(state.hook_results[1].recorded_at <= retry2_stage_report.recorded_at);
+
+        let mut phases = Vec::new();
+        while let Ok(ev) = events_rx.try_recv() {
+            if let EngineEvent::PhaseChanged(phase) = ev {
+                phases.push(phase);
+            }
+        }
+        let hook_positions: Vec<usize> = phases
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &p)| (p == EnginePhase::Hook).then_some(i))
+            .collect();
+        assert_eq!(hook_positions.len(), 2);
+        for pos in hook_positions {
+            assert_eq!(phases.get(pos + 1), Some(&EnginePhase::StageTurn));
+        }
+    }
+
+    #[tokio::test]
+    async fn step_pass_hook_runs_after_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:tag".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "tag",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "tagged step-1" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let mut events_rx = engine.subscribe();
+
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "tag");
+        assert_eq!(calls[0].1["orrery"]["event"], "step_pass");
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+        assert_eq!(state.hook_results.len(), 1);
+        assert_eq!(state.hook_results[0].event, HookEvent::StepPass);
+        assert!(state.hook_results[0].success);
+
+        let mut events = Vec::new();
+        while let Ok(ev) = events_rx.try_recv() {
+            events.push(ev);
+        }
+        let passed_idx = events
+            .iter()
+            .position(|ev| {
+                *ev == EngineEvent::StepStatusChanged {
+                    step_number: 1,
+                    status: StepStatus::Passed,
+                }
+            })
+            .expect("StepStatusChanged(Passed) event must be emitted");
+        let hook_idx = events
+            .iter()
+            .position(|ev| *ev == EngineEvent::PhaseChanged(EnginePhase::Hook))
+            .expect("PhaseChanged(Hook) event must be emitted");
+        let done_idx = events
+            .iter()
+            .position(|ev| *ev == EngineEvent::PhaseChanged(EnginePhase::Done))
+            .expect("PhaseChanged(Done) event must be emitted");
+        assert!(passed_idx < hook_idx);
+        assert!(hook_idx < done_idx);
+    }
+
+    #[tokio::test]
+    async fn halt_hook_failure_awaits_operator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_start = Some(HookConfig {
+            tool: "git:check".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        ctx.project.hooks.on_halt = Some(HookConfig {
+            tool: "git:notify_halt".to_string(),
+            on_failure: HookFailure::Warn,
+        });
+
+        let transport = Arc::new(
+            MockMcpTransport::new("git")
+                .with_failing_tool("check", "uncommitted changes")
+                .with_tool(
+                    "notify_halt",
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": "halt notified" }]
+                    }),
+                ),
+        );
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "hook step_start failed".to_string(),
+            }
+        );
+        assert!(mock.invocations().is_empty());
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::AwaitingOperator);
+        assert_eq!(state.phase, EnginePhase::AwaitingOperator);
+        assert_eq!(
+            state.awaiting_reason.as_deref(),
+            Some("hook step_start failed")
+        );
+        assert_eq!(state.hook_results.len(), 2);
+        assert_eq!(state.hook_results[0].event, HookEvent::StepStart);
+        assert!(!state.hook_results[0].success);
+        assert_eq!(state.hook_results[1].event, HookEvent::Halt);
+        assert!(state.hook_results[1].success);
+
+        // Also cover isError=true hook failure on step_retry and step_pass with HookFailure::Halt
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut ctx2 = test_context(
+            dir2.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx2.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        let mut gk2 = McpGatekeeper::new();
+        gk2.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_tool(
+                "commit",
+                serde_json::json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "nothing to commit" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx2.gatekeeper = Arc::new(gk2);
+        let mock2 = attach_mock_driver(&mut ctx2);
+        script_passing_step(&mock2, "orch", "imp", "val");
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let outcome2 = engine2
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome2,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "hook step_pass failed".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn warn_hook_failure_continues_with_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_start = Some(HookConfig {
+            tool: "git:notify".to_string(),
+            on_failure: HookFailure::Warn,
+        });
+
+        let mut gk = McpGatekeeper::new();
+        gk.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_failing_tool("notify", "webhook offline")),
+            Vec::new(),
+        );
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let stream = Arc::clone(&ctx.stream);
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.step_statuses[0], StepStatus::Passed);
+        assert_eq!(state.hook_results.len(), 1);
+        assert_eq!(state.hook_results[0].event, HookEvent::StepStart);
+        assert!(!state.hook_results[0].success);
+        assert!(state.hook_results[0].output.contains("webhook offline"));
+
+        let notices: Vec<_> = stream
+            .recent(50)
+            .unwrap()
+            .into_iter()
+            .filter(|ev| ev.kind == StreamEventKind::SystemNotice)
+            .collect();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].text.contains("step_start"));
+        assert!(notices[0].text.contains("webhook offline"));
+    }
+
+    #[tokio::test]
+    async fn hook_role_can_call_only_hook_tools() {
+        let mut hooks = HooksConfig::default();
+        hooks.set(
+            HookEvent::StepPass,
+            HookConfig {
+                tool: "git:commit".to_string(),
+                on_failure: HookFailure::Halt,
+            },
+        );
+        let role = build_hook_role(&hooks);
+        assert_eq!(role.role_id, "__orrery_hooks");
+        assert!(McpGatekeeper::is_tool_allowed(&role, "git", "commit"));
+        assert!(!McpGatekeeper::is_tool_allowed(&role, "git", "push"));
+
+        let transport = Arc::new(
+            MockMcpTransport::new("git")
+                .with_tool(
+                    "commit",
+                    serde_json::json!({ "content": [{ "type": "text", "text": "committed" }] }),
+                )
+                .with_tool(
+                    "push",
+                    serde_json::json!({ "content": [{ "type": "text", "text": "pushed" }] }),
+                ),
+        );
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+
+        let err = gk
+            .execute_for_role(
+                &role,
+                &WriteScope::anywhere(),
+                "git",
+                "push",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Security { .. }));
+        assert!(transport.calls().is_empty());
+
+        let ok = gk
+            .execute_for_role(
+                &role,
+                &WriteScope::anywhere(),
+                "git",
+                "commit",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok["content"][0]["text"], "committed");
+        assert_eq!(transport.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hook_output_redacted_and_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+
+        let secret = SecretValue::new("s3cr3t-hook-token-value-9999");
+        ctx.stream.redactor().register(&secret).unwrap();
+
+        // Build > 5,000 chars of output containing the registered secret and multi-byte UTF-8 chars
+        let long_text = format!("token=s3cr3t-hook-token-value-9999; {}", "é".repeat(5_000));
+        assert!(long_text.chars().count() > 5_000);
+
+        ctx.project.hooks.on_step_start = Some(HookConfig {
+            tool: "git:log".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+
+        let mut gk = McpGatekeeper::new();
+        gk.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_tool(
+                "log",
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": long_text }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx.gatekeeper = Arc::new(gk);
+
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(state.hook_results.len(), 1);
+        let stored_output = &state.hook_results[0].output;
+        assert!(stored_output.contains("[REDACTED]"));
+        assert!(!stored_output.contains("s3cr3t-hook-token-value-9999"));
+        assert!(stored_output.len() <= 4096);
+        assert!(stored_output.len() >= 4094);
     }
 }
