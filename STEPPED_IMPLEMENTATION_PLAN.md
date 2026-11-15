@@ -1012,7 +1012,10 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/boost`
 
-Scope note: written 2026-11-13. No new crates, so `Cargo.lock` isn't in scope. The per-response handler is a private helper (a free choice under §9.0). Its only constraint is that the unit tests can drive it with fixture `SseItem`s and no network.
+Scope note: written 2026-11-13; amended 2026-11-14 after Steps 9 and 17's reviews. No new crates, so `Cargo.lock` isn't in scope. The per-response handler is a private helper (a free choice under §9.0). Its only constraint is that the unit tests can drive it with fixture `SseItem`s and no network.
+- **Line-buffered events.** `LiveStreamHub::emit` redacts each event on its own and writes the log file under a std `Mutex`. One event per token delta would let a secret split across two deltas past the redactor, and would do a file write per token on the async worker. So output and reasoning are buffered per kind and emitted one line at a time (spec line 998).
+- **Generated tool-call ids.** llama.cpp can stream tool calls without an `id`, and Step 17's accumulator then yields `id: ""`. Give each such call a generated id, so the `tool` reply matches its call.
+- Moving `emit`'s file IO off the async worker is a `stream_log.rs` change, out of scope here and left for a later refresh.
 
 ```text
 [STEP_ID]
@@ -1031,14 +1034,16 @@ FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. A secret exists only inside a SecretValue and is fetched right before the request that uses it. Bearer auth only for CloudApi.
 
 [PRE_GATE]
-S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct SseParser' crates/orrery-core/src/llm.rs && ! grep -q 'struct HttpChatDriver' crates/orrery-core/src/llm.rs && test ! -e crates/orrery-core/tests/live_llm.rs && sed -n 998p $S | grep -q '^- Turn loop'
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub struct SseParser' crates/orrery-core/src/llm.rs && ! grep -q 'struct HttpChatDriver' crates/orrery-core/src/llm.rs && test ! -e crates/orrery-core/tests/live_llm.rs && sed -n 998p $S | grep -q '^- Turn loop' && sed -n 998p $S | grep -q 'orrery_call_'
 
 [MUTATION_SPEC]
 1. crates/orrery-core/Cargo.toml:
      [[test]]
      name = "live_llm"
      required-features = ["live-backends"]
-2. llm.rs: `HttpChatDriver` (`new`, `with_max_tool_calls`; default 50) and `AgentDriver for HttpChatDriver` per the turn-loop bullet. Per-response handling is a private helper that takes fixture `SseItem`s, so the tests below need no network.
+2. llm.rs: `HttpChatDriver` (`new`, `with_max_tool_calls`; default 50) and `AgentDriver for HttpChatDriver` per the turn-loop bullet (spec line 998). Per-response handling is a private helper that takes fixture `SseItem`s, so the tests below need no network.
+   - A private line buffer per event kind (`Output`, `Reasoning`): append each delta; emit every complete line without its `'\n'`; flush the remainder at end of response, and whenever the buffer passes 4096 bytes (cut at a char boundary). Empty lines are not emitted.
+   - After `ToolCallAccumulator::finish`, a call with an empty `id` gets `format!("orrery_call_{n}")`, with `n` counting calls across the turn. The same id goes in the assistant message's `tool_calls` and in the `tool` reply's `tool_call_id`.
 3. tests/live_llm.rs: `live_single_turn`. A `LocalModel`-style agent pointed at `ORRERY_LIVE_LLM_URL` with model `ORRERY_LIVE_LLM_MODEL` (a missing var is a `panic!` with a message), and an empty gatekeeper. `run_turn` returns `Ok` or `Error::Report` (the model didn't comply), never `Http`/`Agent`.
 4. Unit tests (fixture-driven, no network):
    - `submit_report_ends_turn`.
@@ -1049,9 +1054,12 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `tool_call_cap_enforced`: `with_max_tool_calls(2)` and 3 calls give `Error::Agent`.
    - `bearer_only_for_cloud_api`: the private header builder returns `Some("Bearer …")` for `CloudApi` (secret from `InMemorySecretStore`) and `None` for `LocalModel`.
    - `cloud_missing_secret_is_keychain_error`.
+   - `output_emitted_per_line`: content deltas `"hel"`, `"lo\nwor"`, `"ld"` then end of response give exactly two `Output` events, `"hello"` and `"world"`.
+   - `secret_split_across_deltas_redacted`: register `SecretValue::new("sk-SPLITTEST-0123456789")` with the hub's redactor; deltas `"key sk-SPLIT"` and `"TEST-0123456789 end\n"`. `stream.recent(..)` contains `"[REDACTED]"` and no event text contains the secret.
+   - `empty_tool_call_id_gets_generated_id`: a fixture tool call with no `id` gives an assistant message whose `tool_calls[0].id` is non-empty and equals the following `tool` message's `tool_call_id`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn live_single_turn' crates/orrery-core/tests/live_llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^llm::tests::(submit_report_ends_turn|invalid_report_reprompted_once_then_error|no_tool_call_reprompted_once_then_error|disallowed_tool_returns_error_to_model_and_emits_event|allowed_tool_result_returned_to_model|tool_call_cap_enforced|bearer_only_for_cloud_api|cloud_missing_secret_is_keychain_error): test$')" -eq 8
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --features live-backends --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn live_single_turn' crates/orrery-core/tests/live_llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^llm::tests::(submit_report_ends_turn|invalid_report_reprompted_once_then_error|no_tool_call_reprompted_once_then_error|disallowed_tool_returns_error_to_model_and_emits_event|allowed_tool_result_returned_to_model|tool_call_cap_enforced|bearer_only_for_cloud_api|cloud_missing_secret_is_keychain_error|output_emitted_per_line|secret_split_across_deltas_redacted|empty_tool_call_id_gets_generated_id): test$')" -eq 11
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
