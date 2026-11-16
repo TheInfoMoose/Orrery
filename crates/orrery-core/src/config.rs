@@ -15,6 +15,7 @@ pub const MIN_STAGES: usize = 2;
 pub const MAX_STAGES: usize = 15;
 pub const MAX_STAGE_AGENTS: usize = 15;
 pub const MAX_MAPPED_TOOL_NAME_LEN: usize = 64;
+pub const AGENT_CLI_GUARDRAIL_NOTE: &str = "Guardrails: The MCP gatekeeper does not see a CLI's built-in tools. Guardrails are: workspace_mount, container isolation, memory/time limits, and whatever tool config the image ships.";
 
 const EMBEDDED_SECRET_PATTERNS: [&str; 5] = ["sk-", "Bearer ", "AIza", "ghp_", "xox"];
 
@@ -149,6 +150,68 @@ impl fmt::Display for Warning {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeLimits {
+    pub max_tool_calls: usize,
+    pub model_idle_timeout_secs: u64,
+    pub live_stream_ring_capacity: usize,
+    pub live_stream_max_file_bytes: u64,
+    pub live_stream_max_files: usize,
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: 50,
+            model_idle_timeout_secs: 300,
+            live_stream_ring_capacity: 2_000,
+            live_stream_max_file_bytes: 10 * 1024 * 1024,
+            live_stream_max_files: 3,
+        }
+    }
+}
+
+impl RuntimeLimits {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=1000).contains(&self.max_tool_calls) {
+            return Err(Error::Validation {
+                field: "limits.max_tool_calls".to_string(),
+                message: "max_tool_calls must be in 1..=1000".to_string(),
+            });
+        }
+        if !(1..=86_400).contains(&self.model_idle_timeout_secs) {
+            return Err(Error::Validation {
+                field: "limits.model_idle_timeout_secs".to_string(),
+                message: "model_idle_timeout_secs must be in 1..=86_400".to_string(),
+            });
+        }
+        if self.live_stream_ring_capacity < 1 {
+            return Err(Error::Validation {
+                field: "limits.live_stream_ring_capacity".to_string(),
+                message: "live_stream_ring_capacity must be >= 1".to_string(),
+            });
+        }
+        if self.live_stream_max_file_bytes < 4096 {
+            return Err(Error::Validation {
+                field: "limits.live_stream_max_file_bytes".to_string(),
+                message: "live_stream_max_file_bytes must be >= 4096".to_string(),
+            });
+        }
+        if !(1..=10).contains(&self.live_stream_max_files) {
+            return Err(Error::Validation {
+                field: "limits.live_stream_max_files".to_string(),
+                message: "live_stream_max_files must be in 1..=10".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub project_name: String,
@@ -166,6 +229,8 @@ pub struct ProjectConfig {
     pub hooks: HooksConfig,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inference: Vec<InferenceConfig>,
+    #[serde(default, skip_serializing_if = "RuntimeLimits::is_default")]
+    pub limits: RuntimeLimits,
 }
 
 impl ProjectConfig {
@@ -196,6 +261,7 @@ impl ProjectConfig {
             ],
             hooks: HooksConfig::default(),
             inference: Vec::new(),
+            limits: RuntimeLimits::default(),
         }
     }
 
@@ -302,6 +368,7 @@ impl ProjectConfig {
         }
 
         self.hooks.validate()?;
+        self.limits.validate()?;
 
         for inf in &self.inference {
             inf.validate()?;
@@ -3806,5 +3873,113 @@ max_context_tokens = 1024
             Error::Validation { field, .. } => assert_eq!(field, "transport.args"),
             other => panic!("expected Error::Validation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn limits_default_when_omitted() {
+        let project = ProjectConfig::default_template("p");
+        let serialized = toml::to_string(&project).unwrap();
+        assert!(!serialized.contains("[limits]"));
+
+        let parsed: ProjectConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.limits, RuntimeLimits::default());
+        assert!(parsed.limits.is_default());
+    }
+
+    #[test]
+    fn limits_round_trip() {
+        let mut project = ProjectConfig::default_template("p");
+        project.limits.max_tool_calls = 7;
+        project.limits.model_idle_timeout_secs = 42;
+        assert!(!project.limits.is_default());
+
+        let serialized = toml::to_string(&project).unwrap();
+        assert!(serialized.contains("[limits]"));
+
+        let parsed: ProjectConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed, project);
+    }
+
+    #[test]
+    fn limits_validation_bounds() {
+        fn check_invalid(limits: RuntimeLimits, expected_field: &str) {
+            match limits.validate().unwrap_err() {
+                Error::Validation { field, .. } => assert_eq!(field, expected_field),
+                other => panic!("expected Error::Validation, got {other:?}"),
+            }
+        }
+
+        assert!(RuntimeLimits::default().validate().is_ok());
+
+        check_invalid(
+            RuntimeLimits {
+                max_tool_calls: 0,
+                ..RuntimeLimits::default()
+            },
+            "limits.max_tool_calls",
+        );
+        check_invalid(
+            RuntimeLimits {
+                max_tool_calls: 1001,
+                ..RuntimeLimits::default()
+            },
+            "limits.max_tool_calls",
+        );
+        check_invalid(
+            RuntimeLimits {
+                model_idle_timeout_secs: 0,
+                ..RuntimeLimits::default()
+            },
+            "limits.model_idle_timeout_secs",
+        );
+        check_invalid(
+            RuntimeLimits {
+                model_idle_timeout_secs: 86_401,
+                ..RuntimeLimits::default()
+            },
+            "limits.model_idle_timeout_secs",
+        );
+        check_invalid(
+            RuntimeLimits {
+                live_stream_ring_capacity: 0,
+                ..RuntimeLimits::default()
+            },
+            "limits.live_stream_ring_capacity",
+        );
+        check_invalid(
+            RuntimeLimits {
+                live_stream_max_file_bytes: 4095,
+                ..RuntimeLimits::default()
+            },
+            "limits.live_stream_max_file_bytes",
+        );
+        check_invalid(
+            RuntimeLimits {
+                live_stream_max_files: 0,
+                ..RuntimeLimits::default()
+            },
+            "limits.live_stream_max_files",
+        );
+        check_invalid(
+            RuntimeLimits {
+                live_stream_max_files: 11,
+                ..RuntimeLimits::default()
+            },
+            "limits.live_stream_max_files",
+        );
+
+        let mut project = ProjectConfig::default_template("p");
+        project.limits.live_stream_max_files = 11;
+        match project.validate_staging().unwrap_err() {
+            Error::Validation { field, .. } => assert_eq!(field, "limits.live_stream_max_files"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limits_unknown_key_rejected() {
+        let base = toml::to_string(&ProjectConfig::default_template("p")).unwrap();
+        let with_unknown = format!("{base}\n[limits]\nmax_tools = 3\n");
+        assert!(toml::from_str::<ProjectConfig>(&with_unknown).is_err());
     }
 }
