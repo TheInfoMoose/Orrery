@@ -336,7 +336,7 @@ pub struct LogFollower {
     file: Option<File>,
     offset: u64,
     ino: u64,
-    partial: String,
+    partial: Vec<u8>,
 }
 
 impl LogFollower {
@@ -357,7 +357,7 @@ impl LogFollower {
                     file: Some(file),
                     offset,
                     ino: meta.ino(),
-                    partial: String::new(),
+                    partial: Vec::new(),
                 })
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self {
@@ -365,7 +365,7 @@ impl LogFollower {
                 file: None,
                 offset: 0,
                 ino: 0,
-                partial: String::new(),
+                partial: Vec::new(),
             }),
             Err(source) => Err(Error::Io { path, source }),
         }
@@ -378,12 +378,12 @@ impl LogFollower {
                     path: self.path.clone(),
                     source,
                 })?;
-            let read_bytes =
-                file.read_to_string(&mut self.partial)
-                    .map_err(|source| Error::Io {
-                        path: self.path.clone(),
-                        source,
-                    })?;
+            let read_bytes = file
+                .read_to_end(&mut self.partial)
+                .map_err(|source| Error::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
             self.offset += read_bytes as u64;
         }
 
@@ -399,7 +399,7 @@ impl LogFollower {
                             self.ino = open_meta.ino();
                             self.offset = 0;
                             let read_bytes =
-                                file.read_to_string(&mut self.partial).map_err(|source| {
+                                file.read_to_end(&mut self.partial).map_err(|source| {
                                     Error::Io {
                                         path: self.path.clone(),
                                         source,
@@ -428,10 +428,12 @@ impl LogFollower {
         }
 
         let mut lines = Vec::new();
-        while let Some(pos) = self.partial.find('\n') {
-            let line = self.partial[..pos].trim_end_matches('\r').to_string();
+        while let Some(pos) = self.partial.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.partial.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&raw[..pos])
+                .trim_end_matches('\r')
+                .to_string();
             lines.push(line);
-            self.partial.drain(..=pos);
         }
         Ok(lines)
     }
@@ -966,6 +968,35 @@ mod tests {
         assert_eq!(
             follower.poll().expect("poll completed"),
             vec!["partial".to_string()]
+        );
+    }
+
+    #[test]
+    fn follower_handles_split_utf8() {
+        let dir = TempDir::new().expect("tempdir");
+        let log_path = dir.path().join(LOG_FILE);
+        fs::write(&log_path, "").expect("write empty");
+
+        let mut follower = LogFollower::new(dir.path()).expect("new follower");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        f.write_all(b"first\nsplit \xC3")
+            .expect("append first part");
+        f.flush().expect("flush");
+
+        assert_eq!(
+            follower.poll().expect("poll partial utf8"),
+            vec!["first".to_string()]
+        );
+
+        f.write_all(b"\xA9 done\n").expect("append second part");
+        f.flush().expect("flush");
+
+        assert_eq!(
+            follower.poll().expect("poll completed utf8"),
+            vec!["split é done".to_string()]
         );
     }
 }
