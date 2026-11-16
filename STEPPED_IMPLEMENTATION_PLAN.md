@@ -19,7 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 42** | `/goal` | Context preflight, unmappable tool names | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/engine.rs` | — |
+| 1 | **STEP 42** | `/goal` | Context preflight, unmappable tool names | `crates/orrery-core/src/llm.rs` | — |
 | 2 | **STEP 43** | `/goal` | Connect referenced MCP servers only, cap hook history | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | — |
 | 3 | **STEP 44** | `/boost` | Halted step-pass hook: Approve re-runs the hook | `crates/orrery-core/src/engine.rs` | — |
 | 4 | **STEP 45** | `/goal` | CLI error causes, status hint, log follower | `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/src/main.rs`, `crates/orrery-core/src/stream_log.rs` | — |
@@ -2191,6 +2191,7 @@ Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §8 says Linux only).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `crates/orrery-core/src/llm.rs` `auth_header_value` — the formatted `"Bearer {key}"` `String` is a plain heap copy of the API key, not zeroized (the pre-Step-40 code held it in a `SecretValue`) — build it in `zeroize::Zeroizing<String>`; the `HeaderValue` copy itself is unavoidable. Found validating Step 40; the Step 40 spec text asked for the plain `format!`.
+- `crates/orrery-core/src/mcp.rs:165-167` `is_tool_allowed` — a `<server>:*` pattern hides a tool whose name can't map to a function name with no notice, so the operator never learns it's unavailable — have `build_engine` emit a `StreamEvent::notice` per hidden tool (needs a gatekeeper accessor for the unfiltered catalog). Found while withdrawing Step 42 item 4.
 - `crates/orrery-core/src/stream_log.rs` `LogWriter` — a log write error (disk full, permissions) is only kept for `flush()`, which nothing calls in production, so the operator never sees it (before Step 41 `emit` returned it) — have the writer share its kept error with the hub (e.g. `Arc<Mutex<Option<String>>>`) and let the next `emit` broadcast one `Error` event for it. Found validating Step 41; the §9.11.4 spec left this out.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
 
@@ -2377,21 +2378,19 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/goal`
 
-Scope note: `max_context_tokens` is validated but never used, and a tool name that can't map to a function name is silently renamed (`llm.rs` `unwrap_or_else` in `build_chat_request`), so the model can never call it. `engine.rs` tests have a `build_engine` setup (around the test that builds `Backends` with `MockMcpConnector`); reuse it.
+Scope note: `max_context_tokens` is validated but never used, and a tool name that can't map to a function name is silently renamed (`llm.rs` `unwrap_or_else` in `build_chat_request`), so the model can never call it. (In practice `tools_for_role` already filters those names, so the rename never ran; item 3 removes the dead fallback.)
 
 ```text
 [STEP_ID]
-STEP 42: llm.rs + engine.rs — estimate_tokens preflight against max_context_tokens before every chat request; unmappable tool names left out of requests and rejected by build_engine
+STEP 42: llm.rs — estimate_tokens preflight against max_context_tokens before every chat request; unmappable tool names left out of requests
 
 [SCOPE_LOCK]
 ALLOWED_FILES:
   - crates/orrery-core/src/llm.rs
-  - crates/orrery-core/src/engine.rs
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1216-1224 (§9.11.5; binding)
   - crates/orrery-core/src/llm.rs:330-377 (build_chat_request), the run_turn turn loop
   - crates/orrery-core/src/config.rs format_mapped_tool_name
-  - crates/orrery-core/src/engine.rs build_engine (the refresh_catalog call)
 FORBIDDEN_SCOPE:
   - Any file not listed in ALLOWED_FILES. `build_chat_request` keeps its signature.
 
@@ -2402,15 +2401,14 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 1. llm.rs: `pub fn estimate_tokens(body: &serde_json::Value) -> usize` per §9.11.5.
 2. llm.rs: in `run_turn`, after each `build_chat_request` and before the request, compare against the agent's `max_context_tokens` (`LocalModel` / `CloudApi`) and return the §9.11.5 `Error::Agent` when over.
 3. llm.rs: `build_chat_request` uses `filter_map` and drops tools whose mapped name fails; the `unwrap_or_else` fallback is gone.
-4. engine.rs: after `gatekeeper.refresh_catalog().await?` in `build_engine`, the §9.11.5 check over every role's `tools_for_role`.
+4. Withdrawn 2026-11-15: `McpGatekeeper::is_tool_allowed` (mcp.rs:165-167) already drops unmappable tools from `tools_for_role`, so a `build_engine` check could never fire. `engine.rs` is not changed.
 5. Tests:
    - `llm::tests::estimate_tokens_bytes_div_4`: `json!("abcd")` (6 bytes serialized) → 2; `json!({})` (2 bytes) → 1.
    - `llm::tests::context_preflight_rejects_before_request` (`#[tokio::test]`): `LocalModel` agent with `max_context_tokens: 10` and an inference whose `endpoint_url` is `http://127.0.0.1:9` (nothing listens there); `run_turn` → `Error::Agent` whose message starts `"prompt is about "` and contains `"over max_context_tokens 10"` (not `Error::Http`, so no request was sent).
    - `llm::tests::unmappable_tool_left_out_of_request`: tools `fs:read_file` and `fs:read.file`; the request's `tools` names are exactly `["fs__read_file", "submit_report"]`.
-   - `engine::tests::build_engine_rejects_unmappable_tool_name` (`#[tokio::test]`): a `MockMcpTransport` for `fs` with tool `read.file`; a stage role allowing `fs:*`; `build_engine` → `Error::Validation` with `field == "allowed_mcp_tools"`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn estimate_tokens' crates/orrery-core/src/llm.rs && ! grep -q 'unwrap_or_else(|_| format!("{}__{}"' crates/orrery-core/src/llm.rs && grep -q "whose name can't map to a model function name" crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(llm::tests::(estimate_tokens_bytes_div_4|context_preflight_rejects_before_request|unmappable_tool_left_out_of_request)|engine::tests::build_engine_rejects_unmappable_tool_name): test$')" -eq 4
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn estimate_tokens' crates/orrery-core/src/llm.rs && ! grep -q 'unwrap_or_else(|_| format!("{}__{}"' crates/orrery-core/src/llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(llm::tests::(estimate_tokens_bytes_div_4|context_preflight_rejects_before_request|unmappable_tool_left_out_of_request)): test$')" -eq 3
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.

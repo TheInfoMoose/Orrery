@@ -1220,7 +1220,7 @@ pub fn estimate_tokens(body: &serde_json::Value) -> usize;   // serde_json::to_s
 ```
 - `run_turn`: for `LocalModel` and `CloudApi`, before every request in the turn loop, `estimate_tokens(&body) > max_context_tokens` → `Error::Agent { agent_id, message: format!("prompt is about {est} tokens, over max_context_tokens {max}") }`, with no request sent. Bytes / 4 undercounts tokens for code, so this catches clear overflow without rejecting prompts that fit. Orrery never trims history (every plan step starts a fresh agent).
 - `build_chat_request`: a tool whose `format_mapped_tool_name(server_id, name)` fails is left out (`filter_map`). There is no fallback name.
-- `build_engine`: after `gatekeeper.refresh_catalog()`, for each role in `roles` and each tool in `gatekeeper.tools_for_role(role)`, `format_mapped_tool_name(&tool.server_id, &tool.name)` failing → `Error::Validation { field: "allowed_mcp_tools", message: format!("role '{role_id}' would expose MCP tool '{server_id}:{name}', whose name can't map to a model function name ([A-Za-z0-9_-], 64 max)") }`.
+- `build_engine` adds no check of its own: a concrete `allowed_mcp_tools` entry with an unmappable name already fails at config load (`validate_concrete_tool_ref`), and `McpGatekeeper::is_tool_allowed` already leaves unmappable tools out of `tools_for_role`, so a `<server>:*` pattern never exposes one.
 
 #### 9.11.6 Referenced MCP servers and hook history (Step 43)
 ```rust
