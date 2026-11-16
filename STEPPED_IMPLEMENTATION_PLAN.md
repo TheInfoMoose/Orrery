@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51) and Phase E (52–57). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (51). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (57). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,12 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 52** | `/goal` | Zeroized Bearer header copy | `crates/orrery-core/src/llm.rs` | — |
+| 2 | **STEP 53** | `/goal` | Report hidden MCP tools | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` | — |
+| 3 | **STEP 54** | `/goal` | Byte-safe log follower | `crates/orrery-core/src/stream_log.rs` | — |
+| 4 | **STEP 55** | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` | STEP 54 (same file) |
+| 5 | **STEP 56** | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` | — |
+| 6 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
 
 ### Completed
 
@@ -2170,7 +2176,7 @@ Written 2026-11-15 against the Step 37 tree (`152d415`). Line numbers in `READ_O
 - `max_context_tokens` is a preflight check that fails the turn (§9.11.5). No history trimming and no tokenizer.
 - On a halted `on_step_pass` hook, Approve re-runs the hook only (§9.11.7, operator's call 2026-11-15).
 - Approve/Reject show in the TUI whenever a step awaits the operator, in every validation mode (§9.11.10).
-- Windows stays out of scope (spec §8: Linux only). `PATHEXT` is parked.
+- Windows stays out of scope for this phase (spec §8 is silent on platform; §9.12.1 now states Linux only for now). `PATHEXT` is parked.
 
 ### User Step: LIVE-1 — run the live-backend tests first (COMPLETED 2026-11-15)
 Done by the operator; every live test passed. `live_docker` needs an existing container and a small image, which nothing documented. The operator's setup (Step 51 puts it in the README):
@@ -2188,14 +2194,9 @@ cargo test --workspace --locked --features orrery-core/live-backends
 Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `ORRERY_LIVE_LLM_URL`, `ORRERY_LIVE_LLM_MODEL`. `live_keyring` needs Secret Service or keyutils.
 
 ### Parked
-- `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §8 says Linux only).
+Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52–56). The rest stay parked.
+- `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
-- `crates/orrery-core/src/llm.rs` `auth_header_value` — the formatted `"Bearer {key}"` `String` is a plain heap copy of the API key, not zeroized (the pre-Step-40 code held it in a `SecretValue`) — build it in `zeroize::Zeroizing<String>`; the `HeaderValue` copy itself is unavoidable. Found validating Step 40; the Step 40 spec text asked for the plain `format!`.
-- `crates/orrery-core/src/mcp.rs:165-167` `is_tool_allowed` — a `<server>:*` pattern hides a tool whose name can't map to a function name with no notice, so the operator never learns it's unavailable — have `build_engine` emit a `StreamEvent::notice` per hidden tool (needs a gatekeeper accessor for the unfiltered catalog). Found while withdrawing Step 42 item 4.
-- `crates/orrery-core/src/stream_log.rs` `LogFollower::poll` — `read_to_string` errors with `InvalidData` if a poll lands mid-way through a multi-byte UTF-8 character the writer hasn't finished, and `logs --follow` then exits with an I/O error — keep `partial` as `Vec<u8>` and `String::from_utf8_lossy` each complete line. Found validating Step 45; the Step 45 spec asked for `partial: String`.
-- `crates/orrery-tui/src/bridge.rs` `handle(Run)` task — the operator forwarder's `eng_op_tx.send(dec).await` runs in the same `select!` as the pinned `engine.run` future, so if the engine's 8-slot operator channel is full, `run_fut` is never polled again (cancel is not seen; `shutdown` times out and aborts before the checkpoint save) — forward with `try_send` and set the same "operator decision dropped" notice on `Full`. Needs 9+ stale Approve/Reject presses, so low risk. Found validating Step 46.
-- `crates/orrery-tui/src/bridge.rs` `handle(Run)` — `app.run_passed = 0` is set only on `Run`, not in `start_run`, so a run started by Approve/Reject (Step 47) keeps the old count while the engine's `steps_passed_this_run` restarts at 0, and `[Passed: X/cycles]` overstates Loop progress — move the reset into `start_run`. Found validating Step 48; the Step 48 spec said `handle(Run)`.
-- `crates/orrery-core/src/stream_log.rs` `LogWriter` — a log write error (disk full, permissions) is only kept for `flush()`, which nothing calls in production, so the operator never sees it (before Step 41 `emit` returned it) — have the writer share its kept error with the hub (e.g. `Arc<Mutex<Option<String>>>`) and let the next `emit` broadcast one `Error` event for it. Found validating Step 41; the §9.11.4 spec left this out.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
 
 ---
@@ -2811,6 +2812,249 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 
 [POST_GATE]
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && test "$(grep -cE '^## (Requirements|Build|Quickstart|TUI keys|Project layout|Security|Live-backend tests)$' README.md)" -eq 7 && grep -q 'orrery-core/live-backends' README.md && grep -q 'orrery init' README.md && grep -q 'trap exit TERM' README.md && grep -q 'ORRERY_LIVE_CONTAINER=orrery-live-test' README.md && ! grep -qE '/(home|srv|Users|root)/' README.md
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+## Phase E — parked fixes and doc accuracy (Steps 52–57)
+
+**Phase goal (frozen until the phase ends):** fix the six parked Phase D findings the operator picked (2026-11-16: the zeroized Bearer copy, hidden MCP tools, `logs --follow` on split UTF-8, log write errors, the TUI operator forwarder, Loop progress after Approve/Reject), and make the README state only what has been verified, platform support above all. Design: spec §9.12 (`ORRERY_TECHNICAL_SPECIFICATION.md:1298-1328`).
+
+Written 2026-11-16 against the Step 51 tree (`8ed077a`). Line numbers in `READ_ONLY_REFS` are from that tree. Steps 54 and 55 both edit `stream_log.rs`, so Step 55 names functions as well as lines.
+
+**Decisions the contract leaves open** (settled here, not by the executor):
+- Platform: Linux x86_64 is the only tested target. macOS and Windows are planned but not in this phase; docs say "not supported yet" (§9.12.1, operator 2026-11-16).
+- A log write error is reported once per `kept_error` episode: once ever in production, where nothing calls `flush()`, and again after each `flush()` in tests (§9.12.5).
+- Step 52 adds no test: zeroization on drop can't be observed from safe code. `bearer_only_for_cloud_api` keeps the header value covered.
+
+### STEP 52: Zeroized Bearer Header Copy
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked from Step 40. `auth_header_value` formats `"Bearer {key}"` into a plain `String` that is dropped without being wiped.
+
+```text
+[STEP_ID]
+STEP 52: llm.rs — auth_header_value builds the Bearer string in zeroize::Zeroizing<String>
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/llm.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1306-1307 (§9.12.2; binding)
+  - crates/orrery-core/src/llm.rs:611-633 (auth_header_value), the test bearer_only_for_cloud_api
+  - crates/orrery-core/Cargo.toml (zeroize is already a dependency)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The auth_header_value signature, its error mapping and set_sensitive(true) stay as they are. No test is added or changed.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'Zeroizing' crates/orrery-core/src/llm.rs && grep -q 'from_str(&format!("Bearer {}", secret.expose()))' crates/orrery-core/src/llm.rs && sed -n 1306p $S | grep -q '^#### 9.12.2 '
+
+[MUTATION_SPEC]
+1. llm.rs auth_header_value, CloudApi arm: `let bearer = zeroize::Zeroizing::new(format!("Bearer {}", secret.expose()));` then `reqwest::header::HeaderValue::from_str(&bearer)` with today's `map_err`. Nothing else changes.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'Zeroizing::new(format!("Bearer {}", secret.expose()))' crates/orrery-core/src/llm.rs && ! grep -q 'from_str(&format!("Bearer' crates/orrery-core/src/llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -c '^llm::tests::bearer_only_for_cloud_api: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 53: Report Hidden MCP Tools
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked from Step 42. A `<server>:*` role pattern silently drops a tool whose name can't map to a function name, so the operator never learns it's unavailable.
+
+```text
+[STEP_ID]
+STEP 53: mcp.rs + engine.rs — McpGatekeeper::catalog accessor; build_engine emits one notice per unmappable catalog tool
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1309-1311 (§9.12.3; binding)
+  - crates/orrery-core/src/mcp.rs:122-198 (McpGatekeeper, refresh_catalog, is_tool_allowed, tools_for_role), 270-290 (MockMcpTransport::new, with_tool), 656-674 (MockMcpConnector)
+  - crates/orrery-core/src/config.rs:1269-1285 (format_mapped_tool_name), 1341-1361 (allowed chars [A-Za-z0-9_-])
+  - crates/orrery-core/src/engine.rs:1993-2025 (build_engine connect loop through refresh_catalog), 5550-5595 (test build_engine_skips_unused_server, the pattern to copy)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. is_tool_allowed, tools_for_role and the catalog field stay as they are.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'pub fn catalog(&self)' crates/orrery-core/src/mcp.rs && grep -q 'gatekeeper.refresh_catalog().await?;' crates/orrery-core/src/engine.rs && sed -n 1309p $S | grep -q '^#### 9.12.3 '
+
+[MUTATION_SPEC]
+1. mcp.rs: `impl McpGatekeeper` gains `pub fn catalog(&self) -> &[McpToolSchema] { &self.catalog }`.
+2. engine.rs build_engine: right after `gatekeeper.refresh_catalog().await?;`, loop `for tool in gatekeeper.catalog()`; where `format_mapped_tool_name(&tool.server_id, &tool.name).is_err()`, `stream.emit(StreamEvent::notice(format!("MCP tool '{}:{}' is hidden: its name can't map to a function name", tool.server_id, tool.name)))?;`. Import `format_mapped_tool_name` from `crate::config` if it isn't already.
+3. Tests:
+   - `mcp::tests::catalog_returns_unfiltered_tools` (`#[tokio::test]`): register a `MockMcpTransport::new("fs")` with tools `read_file` and `read.file`; `refresh_catalog().await`; `catalog()` has 2 entries with names `["read_file", "read.file"]` in that order.
+   - `engine::tests::build_engine_reports_hidden_tool` (`#[tokio::test]`): copy `build_engine_skips_unused_server`, with the coder role's `allowed_mcp_tools = vec!["fs:*".to_string()]`, only the `fs` server saved, and the `fs` mock having tools `read_file` and `read.file`. After `build_engine`, `engine.ctx.stream.recent(20)` has exactly 1 `SystemNotice` with text `"MCP tool 'fs:read.file' is hidden: its name can't map to a function name"`, and no event's text contains `"'fs:read_file' is hidden"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn catalog(&self) -> &\[McpToolSchema\]' crates/orrery-core/src/mcp.rs && grep -q "is hidden: its name can't map to a function name" crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(mcp::tests::catalog_returns_unfiltered_tools|engine::tests::build_engine_reports_hidden_tool): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 54: Byte-Safe Log Follower
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked from Step 45. If a `poll` lands in the middle of a multi-byte UTF-8 character, `read_to_string` fails with `InvalidData` and `orrery logs --follow` exits on an I/O error.
+
+```text
+[STEP_ID]
+STEP 54: stream_log.rs — LogFollower.partial is Vec<u8>; complete lines decode with from_utf8_lossy
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/stream_log.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1313-1314 (§9.12.4; binding)
+  - crates/orrery-core/src/stream_log.rs:334-437 (LogFollower, new, poll), 948-970 (test follower_keeps_partial_line, the pattern to copy)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. LogFollower::new and poll keep their signatures; the rotation and inode logic in poll stays as it is. LogWriter and LiveStreamHub are untouched (Step 55).
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '    partial: String,' crates/orrery-core/src/stream_log.rs && sed -n 1313p $S | grep -q '^#### 9.12.4 '
+
+[MUTATION_SPEC]
+1. stream_log.rs: `LogFollower.partial: Vec<u8>`; both constructors in `new` use `Vec::new()`.
+2. poll: both `file.read_to_string(&mut self.partial)` calls become `file.read_to_end(&mut self.partial)` with the same error mapping.
+3. poll line split: `while let Some(pos) = self.partial.iter().position(|&b| b == b'\n')`; take `let raw: Vec<u8> = self.partial.drain(..=pos).collect();`, decode `String::from_utf8_lossy(&raw[..pos])`, trim a trailing `'\r'` as now, and push it as an owned `String`.
+4. Test `stream_log::tests::follower_handles_split_utf8`: copy `follower_keeps_partial_line`; append `b"first\nsplit \xC3"` → `poll()` is `Ok(vec!["first".to_string()])`; append `b"\xA9 done\n"` → `poll()` is `Ok(vec!["split é done".to_string()])`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '    partial: Vec<u8>,' crates/orrery-core/src/stream_log.rs && ! grep -q 'read_to_string(&mut self.partial)' crates/orrery-core/src/stream_log.rs && grep -q 'from_utf8_lossy' crates/orrery-core/src/stream_log.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -c '^stream_log::tests::follower_handles_split_utf8: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 55: Surface Live-Stream Log Write Errors
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked from Step 41. `LogWriter` keeps a write error only for `flush()`, and nothing in production calls `flush()`, so a full disk or a permissions error is never seen.
+
+```text
+[STEP_ID]
+STEP 55: stream_log.rs — LogWriter shares its first write error with the hub; the next emit broadcasts one Error event
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/stream_log.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1316-1319 (§9.12.5; binding), 1202-1215 (§9.11.4)
+  - crates/orrery-core/src/stream_log.rs (8ed077a lines; Step 54 edits only LogFollower, below these): 29-49 (StreamEvent, notice), 74-121 (LogWriter, record_error, write_line), 123-232 (LiveStreamHub, new, emit), 845-862 (test flush_reports_write_error, the pattern to copy)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The signatures of emit, flush and LiveStreamHub::new stay as they are, and so does flush's behavior. The Error event is never sent to the writer.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '    partial: Vec<u8>,' crates/orrery-core/src/stream_log.rs && ! grep -q 'write_error: Arc<Mutex' crates/orrery-core/src/stream_log.rs && sed -n 1316p $S | grep -q '^#### 9.12.5 '
+
+[MUTATION_SPEC]
+1. stream_log.rs: `LogWriter` gains `shared_error: Arc<Mutex<Option<String>>>`. In `record_error`, inside `if self.kept_error.is_none()`, after setting `kept_error`, also set the shared slot to the same message: `if let Ok(mut slot) = self.shared_error.lock() { *slot = Some(msg.clone()); }`. A poisoned lock here is skipped, because the writer thread has no caller to return an error to.
+2. `LiveStreamHub` gains `write_error: Arc<Mutex<Option<String>>>`. `new` creates it, gives a clone to the writer as `shared_error`, and stores it.
+3. emit: after `let _ = self.sender.send(event);`, take the slot (poisoned lock → `Error::Security { message: "LiveStreamHub lock poisoned".into() }`). On `Some(msg)`, build `StreamEvent { timestamp: Utc::now(), step_number: None, stage_index: None, agent_id: None, kind: StreamEventKind::Error, text: self.redactor.redact(&format!("live stream log write failed: {msg}"))? }`, push it to the ring with the same capacity rule as the main event, and broadcast it. Don't send it to the writer.
+4. Test `stream_log::tests::write_error_broadcasts_once`: copy `flush_reports_write_error`'s setup (directory at `LOG_FILE`). Emit notice "a"; `hub.flush()` is `Err` (this also syncs with the writer); emit notice "b"; `hub.recent(20)` has exactly 1 event with `kind == StreamEventKind::Error` whose text starts with `"live stream log write failed: "`.
+5. `flush_reports_write_error` stays unchanged and passing.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'shared_error: Arc<Mutex<Option<String>>>' crates/orrery-core/src/stream_log.rs && grep -q 'write_error: Arc<Mutex<Option<String>>>' crates/orrery-core/src/stream_log.rs && grep -q 'live stream log write failed: {msg}' crates/orrery-core/src/stream_log.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^stream_log::tests::(write_error_broadcasts_once|flush_reports_write_error): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 56: TUI Operator Forwarder and Loop Progress Reset
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked from Steps 46 and 48. The run task's `eng_op_tx.send(dec).await` can stall the same `select!` that polls `engine.run`. And `run_passed` resets only on `Run`, so a run started by Approve or Reject overstates `[Passed: X/cycles]`.
+
+```text
+[STEP_ID]
+STEP 56: bridge.rs — forward_operator_decision uses try_send with a dropped notice; run_passed reset moves into start_run
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1321-1323 (§9.12.6; binding)
+  - crates/orrery-tui/src/bridge.rs:224-300 (start_run and the run task's select!), 365-371 (handle Run), 383-389 (the existing "operator decision dropped" message), 405-440 (flush_dropped_notice, forward_stream_event: helper style to copy), 1529-1641 (test approve_without_running_engine_resumes)
+  - crates/orrery-core/src/engine.rs:338-340 (operator_sender returns tokio::sync::mpsc::Sender<OperatorDecision>)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other select! arm changes; the 8-slot channel sizes stay as they are.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'let _ = eng_op_tx.send(dec).await;' crates/orrery-tui/src/bridge.rs && ! grep -q 'fn forward_operator_decision' crates/orrery-tui/src/bridge.rs && sed -n 1321p $S | grep -q '^#### 9.12.6 '
+
+[MUTATION_SPEC]
+1. bridge.rs: add a free function `fn forward_operator_decision(eng_op_tx: &mpsc::Sender<OperatorDecision>, stream_tx: &mpsc::Sender<StreamEvent>, dec: OperatorDecision)` next to `flush_dropped_notice`. It matches `eng_op_tx.try_send(dec)`: `Ok(())` and `Err(Closed(_))` do nothing; `Err(Full(_))` runs `let _ = stream_tx.try_send(StreamEvent::notice("operator decision dropped: channel full"));`.
+2. The run task's `Some(dec) =>` arm becomes `forward_operator_decision(&eng_op_tx, &stream_tx, dec);` with no `.await`.
+3. Move `app.run_passed = 0;` from `handle(AppAction::Run)` into `start_run`, directly after `app.awaiting_operator = false;`.
+4. Tests (in `mod tests`):
+   - `forward_operator_decision_delivers` (`#[tokio::test]`): `mpsc::channel(1)` for each of the operator and stream channels; call once with `Approve`; the operator receiver gets `Approve`, and `stream_rx.try_recv()` is `Err`.
+   - `forward_operator_decision_full_sends_notice` (`#[tokio::test]`): fill the 1-slot operator channel with `Approve`, then call with `Reject { feedback: "x".into() }`; the stream receiver gets one `SystemNotice` with text `"operator decision dropped: channel full"`, and the operator channel still holds only the first `Approve`.
+   - `approve_without_running_engine_resumes`: set `app.run_passed = 5;` right after `load_initial_app(..)`, and at the end assert `app.run_passed == 1`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'eng_op_tx.send(dec).await' crates/orrery-tui/src/bridge.rs && grep -q 'fn forward_operator_decision' crates/orrery-tui/src/bridge.rs && test "$(grep -c 'app.run_passed = 0;' crates/orrery-tui/src/bridge.rs)" -eq 1 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::(forward_operator_decision_delivers|forward_operator_decision_full_sends_notice|approve_without_running_engine_resumes): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 57: README States Only What Is Verified
+
+* **Recommended Command:** `/goal`
+
+Scope note: Checked 2026-11-16 against the code and the live-test record, the README claims more than has been verified. It lists aarch64 as supported, but only `cargo deny` sees that target. It lists rootless Docker and Podman, which have never been tested. It gives the Rust version as "stable supporting Edition 2024", while the workspace pins `rust-version = "1.99.1"`. And it says arrow keys scroll Help, which doesn't scroll (`app.rs` `Modal::Help` handles only `Esc`/`Enter`/`q`).
+
+```text
+[STEP_ID]
+STEP 57: README.md — platform, Rust and Docker lines match §9.12.1; TUI key rows match the Help/Settings modal code
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1300-1304 (§9.12.1), 1325-1328 (§9.12.7; binding)
+  - README.md:5-12 (Requirements), 73-90 (TUI keys)
+  - Cargo.toml:7-8 (edition, rust-version), deny.toml:35 (targets)
+  - crates/orrery-tui/src/app.rs:505-535 (Modal::Help and Modal::Settings key handling)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The seven `##` sections, the Quickstart, Project layout, Security and Live-backend tests stay word for word. No host paths, real hostnames or real accounts.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'aarch64-unknown-linux-gnu' README.md && grep -q 'Podman' README.md && sed -n 1325p $S | grep -q '^#### 9.12.7 '
+
+[MUTATION_SPEC]
+1. Requirements, the OS line: Linux on x86_64 (`x86_64-unknown-linux-gnu`) is the tested platform. `aarch64-unknown-linux-gnu` is dependency-checked by `cargo deny` only and is untested. macOS and Windows are not supported yet (planned).
+2. Requirements, the Rust line: "Rust 1.99.1 or newer (workspace `rust-version`), edition 2024."
+3. Requirements, the Docker line: Docker Engine (used by the live-backend tests). Orrery honors `DOCKER_HOST`; rootless Docker and Podman are untested.
+4. TUI keys: the arrow-key row says arrows scroll the Settings modal (not Help). The `Esc` row, or a new row, says that in Help and Settings, `Esc`, `Enter` or `q` close the modal.
+5. No other line changes.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && test "$(grep -cE '^## (Requirements|Build|Quickstart|TUI keys|Project layout|Security|Live-backend tests)$' README.md)" -eq 7 && grep -q '1.99.1' README.md && grep -qi 'macOS and Windows are not supported yet' README.md && grep -qi 'untested' README.md && ! grep -qE 'modal \(`Settings`, `Help`\)' README.md && grep -q 'trap exit TERM' README.md && ! grep -qE '/(home|srv|Users|root)/' README.md && test "$(git diff --numstat -- README.md | awk '{print $1}')" -le 8
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.

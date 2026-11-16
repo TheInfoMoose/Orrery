@@ -1294,3 +1294,35 @@ impl LogFollower {
 
 #### 9.11.14 README (Step 51)
 - `README.md` at the repo root, for operators: what Orrery does; requirements (Linux only, Docker or a `DOCKER_HOST`, an OpenAI-compatible llama.cpp server, build packages `libdbus-1-dev` and `pkg-config`); build; a quickstart (`init`, `inference add`, `agent add-local-model`, `workflow assign`, `ingest`, `workflow show`, `run`, `approve` / `reject`, `status`, `logs`); TUI keys (§6.4); the `.orrery/` layout (§4); security notes (keys only in the OS keychain, the AgentCli guardrail note and residual risks from §5.7.2); the live-test command and env vars (§8, §9.11.13), plus the `live_docker` setup (an existing idle container and a small image with `/bin/sh`, e.g. `busybox:1.37`; the container command traps TERM so `docker stop` is immediate). Placeholders only (§8 fixtures rule).
+
+### 9.12 Phase E: parked fixes and doc accuracy (Steps 52–57)
+
+#### 9.12.1 Platform scope (adds to §8)
+- Tested: Linux on x86_64 (`x86_64-unknown-linux-gnu`); the operator's live-backend run (2026-11-15) used Docker Engine.
+- `aarch64-unknown-linux-gnu` appears only in `deny.toml` `targets`, so `cargo deny` checks its dependency graph. Nothing builds or tests it.
+- macOS and Windows are not supported yet. The keychain stores are Linux-only (D-Bus Secret Service, kernel keyutils). Support is planned and will be added only with a build and test on that OS.
+- Docs state only what is tested. They name untested paths as untested: aarch64, rootless Docker, Podman through `DOCKER_HOST`.
+
+#### 9.12.2 Bearer header copy is zeroized (Step 52) (adds to §5.3)
+- `llm::auth_header_value` builds `"Bearer {key}"` in a `zeroize::Zeroizing<String>`, so that copy of the key is wiped on drop. The `HeaderValue` copy belongs to reqwest and can't be avoided; it stays `set_sensitive(true)`.
+
+#### 9.12.3 Hidden MCP tools are reported (Step 53) (adds to §9.11.5)
+- `McpGatekeeper::catalog(&self) -> &[McpToolSchema]` returns the full catalog, unfiltered.
+- `build_engine`, right after `gatekeeper.refresh_catalog().await?`, emits one `StreamEvent::notice` per catalog tool for which `format_mapped_tool_name(&tool.server_id, &tool.name)` is `Err`, in catalog order: `"MCP tool '{server_id}:{name}' is hidden: its name can't map to a function name"`. `is_tool_allowed` is unchanged.
+
+#### 9.12.4 `logs --follow` survives split UTF-8 (Step 54) (overrides §9.11.8 `partial: String`)
+- `LogFollower.partial` is `Vec<u8>`. Both reads in `poll` use `read_to_end`. Lines split at `b'\n'`. Each complete line becomes `String::from_utf8_lossy(..)` with a trailing `\r` trimmed, as now. An incomplete tail stays in `partial` as raw bytes until its `\n` arrives.
+
+#### 9.12.5 Log write errors reach the operator (Step 55) (adds to §9.11.4)
+- `LiveStreamHub` gains `write_error: Arc<Mutex<Option<String>>>`, shared with `LogWriter` (field `shared_error`). `LogWriter::record_error` sets the shared slot in the same branch where it sets `kept_error` (only when `kept_error` was `None`).
+- `emit`, after its broadcast, takes the shared slot. On `Some(msg)` it builds one `StreamEvent { timestamp: Utc::now(), step_number: None, stage_index: None, agent_id: None, kind: StreamEventKind::Error, text }`, where `text` is the redacted `"live stream log write failed: {msg}"`. That event goes to the ring and the broadcast only, never to the writer, since the log is what's failing. A poisoned lock is `Error::Security`, like the ring lock.
+- `flush()` is unchanged: it still returns the kept error once.
+
+#### 9.12.6 TUI operator forwarding and Loop progress (Step 56) (overrides §9.11.10 forwarder, §9.11.11 `run_passed` reset)
+- `bridge::forward_operator_decision(eng_op_tx: &mpsc::Sender<OperatorDecision>, stream_tx: &mpsc::Sender<StreamEvent>, dec: OperatorDecision)` calls `eng_op_tx.try_send(dec)`. On `Full` it sends `StreamEvent::notice("operator decision dropped: channel full")` with `stream_tx.try_send`, ignoring that result. On `Closed` it does nothing. The run task's `Some(dec)` arm calls it with no `.await`.
+- `app.run_passed = 0` moves from `handle(AppAction::Run)` into `start_run`, next to `app.awaiting_operator = false`, so a run that Approve or Reject starts also resets it.
+
+#### 9.12.7 README accuracy (Step 57) (overrides §9.11.14 where they differ)
+- Requirements: the OS line states §9.12.1 (Linux x86_64 tested; aarch64 untested; macOS and Windows not supported yet, planned). The Rust line is "Rust 1.99.1 or newer (workspace `rust-version`), edition 2024". The Docker line says Docker Engine is tested, `DOCKER_HOST` is honored, and rootless Docker and Podman are untested.
+- TUI keys: arrows scroll the Settings modal only; Help doesn't scroll. In Help and Settings, `Esc`, `Enter` or `q` close the modal.
+- The seven `##` sections and everything else stay as they are.
