@@ -161,6 +161,10 @@ impl McpGatekeeper {
         Ok(())
     }
 
+    pub fn catalog(&self) -> &[McpToolSchema] {
+        &self.catalog
+    }
+
     pub fn is_tool_allowed(role: &RoleConfig, server_id: &str, tool: &str) -> bool {
         if format_mapped_tool_name(server_id, tool).is_err() {
             return false;
@@ -1330,5 +1334,24 @@ mod tests {
         connector.attach_stream(Arc::clone(&hub_a));
         connector.attach_stream(Arc::clone(&hub_b));
         assert!(Arc::ptr_eq(connector.stream.get().unwrap(), &hub_a));
+    }
+
+    #[tokio::test]
+    async fn catalog_returns_unfiltered_tools() {
+        let mut gatekeeper = McpGatekeeper::new();
+        let transport = Arc::new(
+            MockMcpTransport::new("fs")
+                .with_tool("read_file", json!({}))
+                .with_tool("read.file", json!({})),
+        );
+        gatekeeper.register("fs", transport, Vec::new());
+        gatekeeper.refresh_catalog().await.unwrap();
+
+        let names: Vec<&str> = gatekeeper
+            .catalog()
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["read_file", "read.file"]);
     }
 }

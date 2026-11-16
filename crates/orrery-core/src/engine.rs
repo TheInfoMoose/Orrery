@@ -14,7 +14,7 @@ use crate::checkpoint::{
 use crate::config::{
     AgentBackend, AgentConfig, ConfigStore, ExecutionMode, HookEvent, HookFailure, HooksConfig,
     McpServerConfig, McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, ValidationMode,
-    validate_concrete_tool_ref,
+    format_mapped_tool_name, validate_concrete_tool_ref,
 };
 use crate::docker::{
     BollardContainerBackend, ContainerBackend, DockerComposeCli, DockerInferenceControl,
@@ -2023,6 +2023,14 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
         }
     }
     gatekeeper.refresh_catalog().await?;
+    for tool in gatekeeper.catalog() {
+        if format_mapped_tool_name(&tool.server_id, &tool.name).is_err() {
+            stream.emit(StreamEvent::notice(format!(
+                "MCP tool '{}:{}' is hidden: its name can't map to a function name",
+                tool.server_id, tool.name
+            )))?;
+        }
+    }
 
     let resources = Arc::new(ResourceManager::new(
         backends.containers,
@@ -5892,5 +5900,73 @@ mod tests {
         cancel.cancel();
         let outcome = run_handle.await.unwrap().unwrap();
         assert_eq!(outcome, RunOutcome::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn build_engine_reports_hidden_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut backends, _mock_driver, _secrets) =
+            init_project_with_agents(dir.path(), true);
+
+        let mut coder_role = store
+            .load_roles()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .unwrap();
+        let coder_rules = store.load_role_rules("coder").unwrap();
+        coder_role.allowed_mcp_tools = vec!["fs:*".to_string()];
+        store.save_role(&coder_role, &coder_rules).unwrap();
+
+        store
+            .save_mcp_server(&McpServerConfig {
+                server_id: "fs".to_string(),
+                transport: McpTransportConfig::Stdio {
+                    command: "fake-mcp".to_string(),
+                    args: Vec::new(),
+                },
+                write_tools: Vec::new(),
+            })
+            .unwrap();
+
+        let mut connector = MockMcpConnector::default();
+        connector.transports.insert(
+            "fs".to_string(),
+            Arc::new(
+                MockMcpTransport::new("fs")
+                    .with_tool(
+                        "read_file",
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": "ok" }]
+                        }),
+                    )
+                    .with_tool(
+                        "read.file",
+                        serde_json::json!({
+                            "content": [{ "type": "text", "text": "ok" }]
+                        }),
+                    ),
+            ),
+        );
+        backends.connector = Arc::new(connector);
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        let events = engine.ctx.stream.recent(20).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|ev| {
+                    ev.kind == StreamEventKind::SystemNotice
+                        && ev.text
+                            == "MCP tool 'fs:read.file' is hidden: its name can't map to a function name"
+                })
+                .count(),
+            1
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|ev| ev.text.contains("'fs:read_file' is hidden"))
+        );
     }
 }
