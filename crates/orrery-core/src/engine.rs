@@ -35,6 +35,7 @@ use crate::{Error, Result};
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const OPERATOR_CHANNEL_CAPACITY: usize = 8;
 const PASS_CHECK_AWAITING_REASON: &str = "awaiting operator approval for step pass";
+const STEP_PASS_HOOK_AWAITING_REASON: &str = "hook step_pass failed";
 const MAX_HOOK_OUTPUT_BYTES: usize = 4096;
 
 pub struct DriverSet {
@@ -222,6 +223,7 @@ enum StageTurnOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AwaitingContext {
     PassCheck,
+    StepPassHook,
     HaltOrEscalation,
 }
 
@@ -418,14 +420,17 @@ impl WorkflowEngine {
                     consecutive_violations: 0,
                     stage_ran_since_gate_failure: true,
                 };
-                let context = if validation_mode == ValidationMode::GateAndOperator
-                    && last_is_step_passed
-                    && state.awaiting_reason.as_deref() == Some(PASS_CHECK_AWAITING_REASON)
-                {
-                    AwaitingContext::PassCheck
-                } else {
-                    AwaitingContext::HaltOrEscalation
-                };
+                let context =
+                    if state.awaiting_reason.as_deref() == Some(STEP_PASS_HOOK_AWAITING_REASON) {
+                        AwaitingContext::StepPassHook
+                    } else if validation_mode == ValidationMode::GateAndOperator
+                        && last_is_step_passed
+                        && state.awaiting_reason.as_deref() == Some(PASS_CHECK_AWAITING_REASON)
+                    {
+                        AwaitingContext::PassCheck
+                    } else {
+                        AwaitingContext::HaltOrEscalation
+                    };
                 let resolution = match state.operator_decision.take() {
                     Some(decision) => {
                         self.apply_operator_decision(&mut state, &mut resumed, context, decision)?
@@ -1120,9 +1125,10 @@ impl WorkflowEngine {
         step_state.consecutive_violations = 0;
 
         match (context, decision) {
-            (AwaitingContext::PassCheck, OperatorDecision::Approve) => {
-                Ok(AwaitResolution::PassStep)
-            }
+            (
+                AwaitingContext::PassCheck | AwaitingContext::StepPassHook,
+                OperatorDecision::Approve,
+            ) => Ok(AwaitResolution::PassStep),
             (AwaitingContext::PassCheck, OperatorDecision::Reject { feedback }) => {
                 state.retry_count += 1;
                 step_state.last_stage_run = None;
@@ -1147,7 +1153,10 @@ impl WorkflowEngine {
                 self.ctx.checkpoints.save_state(state)?;
                 Ok(AwaitResolution::ContinueOrchestrator)
             }
-            (AwaitingContext::HaltOrEscalation, OperatorDecision::Reject { feedback }) => {
+            (
+                AwaitingContext::StepPassHook | AwaitingContext::HaltOrEscalation,
+                OperatorDecision::Reject { feedback },
+            ) => {
                 state.retry_count = 0;
                 step_state
                     .notes
@@ -1172,58 +1181,63 @@ impl WorkflowEngine {
         cycles: usize,
         wait_for_operator: bool,
     ) -> Result<StepPassOutcome> {
-        state.step_statuses[step_state.step_idx] = StepStatus::Passed;
-        state.active_stage_index = None;
-        state.awaiting_reason = None;
-        self.ctx.checkpoints.save_state(state)?;
-        self.emit_event(EngineEvent::StepStatusChanged {
-            step_number: step.number,
-            status: StepStatus::Passed,
-        });
+        loop {
+            state.step_statuses[step_state.step_idx] = StepStatus::Passed;
+            state.active_stage_index = None;
+            state.awaiting_reason = None;
+            self.ctx.checkpoints.save_state(state)?;
+            self.emit_event(EngineEvent::StepStatusChanged {
+                step_number: step.number,
+                status: StepStatus::Passed,
+            });
 
-        if let HookOutcome::Halt(reason) = self.run_hook(state, step, HookEvent::StepPass).await? {
-            return match self
-                .enter_awaiting_operator(
-                    state,
-                    step_state,
-                    reason,
-                    AwaitingContext::HaltOrEscalation,
-                    wait_for_operator,
-                )
-                .await?
-            {
-                AwaitResolution::HaltRun(outcome) => Ok(StepPassOutcome::FinishedRun(outcome)),
-                AwaitResolution::ContinueOrchestrator | AwaitResolution::PassStep => {
-                    Ok(StepPassOutcome::ContinueRound)
+            if let HookOutcome::Halt(_) = self.run_hook(state, step, HookEvent::StepPass).await? {
+                match self
+                    .enter_awaiting_operator(
+                        state,
+                        step_state,
+                        STEP_PASS_HOOK_AWAITING_REASON.to_string(),
+                        AwaitingContext::StepPassHook,
+                        wait_for_operator,
+                    )
+                    .await?
+                {
+                    AwaitResolution::PassStep => continue,
+                    AwaitResolution::ContinueOrchestrator => {
+                        return Ok(StepPassOutcome::ContinueRound);
+                    }
+                    AwaitResolution::HaltRun(outcome) => {
+                        return Ok(StepPassOutcome::FinishedRun(outcome));
+                    }
+                }
+            }
+
+            state.steps_passed_this_run += 1;
+
+            let should_stop = match mode {
+                ExecutionMode::Run => true,
+                ExecutionMode::Loop => {
+                    (cycles > 0 && state.steps_passed_this_run >= cycles)
+                        || !state.step_statuses.contains(&StepStatus::Pending)
                 }
             };
-        }
-
-        state.steps_passed_this_run += 1;
-
-        let should_stop = match mode {
-            ExecutionMode::Run => true,
-            ExecutionMode::Loop => {
-                (cycles > 0 && state.steps_passed_this_run >= cycles)
-                    || !state.step_statuses.contains(&StepStatus::Pending)
+            if should_stop {
+                state.phase = EnginePhase::Done;
             }
-        };
-        if should_stop {
-            state.phase = EnginePhase::Done;
+
+            self.ctx.checkpoints.save_state(state)?;
+
+            if should_stop {
+                let outcome = RunOutcome::Completed {
+                    steps_passed: state.steps_passed_this_run,
+                };
+                self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
+                self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+                return Ok(StepPassOutcome::FinishedRun(outcome));
+            }
+
+            return Ok(StepPassOutcome::NextStep);
         }
-
-        self.ctx.checkpoints.save_state(state)?;
-
-        if should_stop {
-            let outcome = RunOutcome::Completed {
-                steps_passed: state.steps_passed_this_run,
-            };
-            self.emit_event(EngineEvent::PhaseChanged(EnginePhase::Done));
-            self.emit_event(EngineEvent::RunFinished(outcome.clone()));
-            return Ok(StepPassOutcome::FinishedRun(outcome));
-        }
-
-        Ok(StepPassOutcome::NextStep)
     }
 
     async fn run_halt_hook(&self, state: &mut WorkflowCheckpoint, step: &PlanStep) -> Result<()> {
@@ -5579,5 +5593,304 @@ mod tests {
             ev.kind == StreamEventKind::SystemNotice
                 && ev.text == "MCP server 'unused' is not used by this workflow; not connected"
         }));
+    }
+
+    #[tokio::test]
+    async fn step_pass_hook_halt_approve_reruns_hook_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let stages = &[
+            (RoleKind::Orchestrator, &["orch"][..]),
+            (RoleKind::Implementer, &["imp"][..]),
+            (RoleKind::Validator, &["val"][..]),
+        ];
+
+        // Run 1: on_step_pass = git:commit (Halt) failing with isError: true
+        let mut ctx1 = test_context(dir.path(), stages);
+        ctx1.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        let mut gk1 = McpGatekeeper::new();
+        gk1.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_tool(
+                "commit",
+                serde_json::json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "commit failed" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx1.gatekeeper = Arc::new(gk1);
+        let checkpoints = ctx1.checkpoints.clone();
+        let mock1 = attach_mock_driver(&mut ctx1);
+        script_passing_step(&mock1, "orch", "imp", "val");
+
+        let engine1 = WorkflowEngine::new(ctx1).unwrap();
+        let outcome1 = engine1
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome1,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "hook step_pass failed".to_string(),
+            }
+        );
+
+        let mut state = checkpoints.load_state().unwrap().unwrap();
+        state.operator_decision = Some(OperatorDecision::Approve);
+        checkpoints.save_state(&state).unwrap();
+
+        // Run 2: succeeding commit and fresh MockAgentDriver with no scripts
+        let mut ctx2 = test_context(dir.path(), stages);
+        ctx2.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        let transport2 = Arc::new(MockMcpTransport::new("git").with_tool(
+            "commit",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "committed" }]
+            }),
+        ));
+        let mut gk2 = McpGatekeeper::new();
+        gk2.register("git", Arc::clone(&transport2) as _, Vec::new());
+        ctx2.gatekeeper = Arc::new(gk2);
+        let mock2 = attach_mock_driver(&mut ctx2);
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let outcome2 = engine2
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome2, RunOutcome::Completed { steps_passed: 1 });
+        assert!(mock2.invocations().is_empty());
+
+        let calls = transport2.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "commit");
+
+        let final_state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(final_state.step_statuses[0], StepStatus::Passed);
+    }
+
+    #[tokio::test]
+    async fn step_pass_hook_halt_reject_reruns_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let stages = &[
+            (RoleKind::Orchestrator, &["orch"][..]),
+            (RoleKind::Implementer, &["imp"][..]),
+            (RoleKind::Validator, &["val"][..]),
+        ];
+
+        // Run 1: on_step_pass = git:commit (Halt) failing with isError: true
+        let mut ctx1 = test_context(dir.path(), stages);
+        ctx1.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        let mut gk1 = McpGatekeeper::new();
+        gk1.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_tool(
+                "commit",
+                serde_json::json!({
+                    "isError": true,
+                    "content": [{ "type": "text", "text": "commit failed" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx1.gatekeeper = Arc::new(gk1);
+        let checkpoints = ctx1.checkpoints.clone();
+        let mock1 = attach_mock_driver(&mut ctx1);
+        script_passing_step(&mock1, "orch", "imp", "val");
+
+        let engine1 = WorkflowEngine::new(ctx1).unwrap();
+        let outcome1 = engine1
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome1,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "hook step_pass failed".to_string(),
+            }
+        );
+
+        let mut state = checkpoints.load_state().unwrap().unwrap();
+        state.operator_decision = Some(OperatorDecision::Reject {
+            feedback: "tag missing".to_string(),
+        });
+        checkpoints.save_state(&state).unwrap();
+
+        // Run 2: scripted with script_passing_step and succeeding commit
+        let mut ctx2 = test_context(dir.path(), stages);
+        ctx2.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+        let mut gk2 = McpGatekeeper::new();
+        gk2.register(
+            "git",
+            Arc::new(MockMcpTransport::new("git").with_tool(
+                "commit",
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": "committed" }]
+                }),
+            )),
+            Vec::new(),
+        );
+        ctx2.gatekeeper = Arc::new(gk2);
+        let mock2 = attach_mock_driver(&mut ctx2);
+        script_passing_step(&mock2, "orch", "imp", "val");
+
+        let engine2 = WorkflowEngine::new(ctx2).unwrap();
+        let outcome2 = engine2
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome2, RunOutcome::Completed { steps_passed: 1 });
+
+        let invocations = mock2.invocations();
+        assert!(!invocations.is_empty());
+        assert_eq!(invocations[0].stage_index, 0);
+        assert!(
+            invocations[0]
+                .user_prompt
+                .contains("operator rejected: tag missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn step_pass_hook_halt_approve_while_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:commit".to_string(),
+            on_failure: HookFailure::Halt,
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "commit",
+            serde_json::json!({
+                "isError": true,
+                "content": [{ "type": "text", "text": "commit failed" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = Arc::new(WorkflowEngine::new(ctx).unwrap());
+        let mut events_rx = engine.subscribe();
+        let op_tx = engine.operator_sender();
+        let cancel = CancellationToken::new();
+
+        let run_handle = {
+            let engine = Arc::clone(&engine);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                engine
+                    .run(
+                        RunOptions {
+                            wait_for_operator: true,
+                            ..Default::default()
+                        },
+                        cancel,
+                    )
+                    .await
+            })
+        };
+
+        // Wait for first AwaitingOperator
+        loop {
+            if let EngineEvent::AwaitingOperator {
+                step_number,
+                reason,
+            } = events_rx.recv().await.unwrap()
+            {
+                assert_eq!(step_number, 1);
+                assert_eq!(reason, "hook step_pass failed");
+                break;
+            }
+        }
+
+        let inv_count_at_first = mock.invocations().len();
+        assert_eq!(
+            transport
+                .calls()
+                .iter()
+                .filter(|(t, _)| t == "commit")
+                .count(),
+            1
+        );
+
+        op_tx.send(OperatorDecision::Approve).await.unwrap();
+
+        // Wait for second AwaitingOperator
+        loop {
+            if let EngineEvent::AwaitingOperator {
+                step_number,
+                reason,
+            } = events_rx.recv().await.unwrap()
+            {
+                assert_eq!(step_number, 1);
+                assert_eq!(reason, "hook step_pass failed");
+                break;
+            }
+        }
+
+        assert_eq!(
+            transport
+                .calls()
+                .iter()
+                .filter(|(t, _)| t == "commit")
+                .count(),
+            2
+        );
+        assert_eq!(mock.invocations().len(), inv_count_at_first);
+
+        cancel.cancel();
+        let outcome = run_handle.await.unwrap().unwrap();
+        assert_eq!(outcome, RunOutcome::Interrupted);
     }
 }
