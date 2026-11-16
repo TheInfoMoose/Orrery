@@ -19,7 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 37** | `/goal` | Release readiness: CLI smoke test, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW), `crates/orrery-tui/src/widgets.rs` | **[USER]** runs the live-backend tests afterwards (command in the Step 37 report). |
+| — | *None. All 37 steps are complete.* | | | | **[USER]** runs the live-backend tests (command in the Step 37 report). |
 
 ### Completed
 
@@ -61,6 +61,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 34** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | CLI project and workflow commands | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` (NEW) |
 | **STEP 35** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | CLI catalog and secret commands, `rpassword` | `Cargo.toml`, `Cargo.lock`, `crates/orrery-cli/Cargo.toml`, `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 36** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | CLI run, operator, status commands; TUI launch | `crates/orrery-cli/src/main.rs`, `crates/orrery-cli/src/commands.rs` |
+| **STEP 37** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Release readiness: CLI smoke test, steps-panel label, final checks | `crates/orrery-cli/tests/cli_smoke.rs` (NEW), `crates/orrery-tui/src/widgets.rs` |
 
 ---
 
@@ -2130,8 +2131,8 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `workflow show --json` (parse the output with `serde_json`);
    - `status`.
    Each exits 0.
-3. widgets.rs: when a plan is loaded, `render_steps_panel` labels each step `{badge} {title}` (title as-is). Extend `steps_panel_badges` to assert the panel shows `[ ] 1: A`-style labels with no `1. 1:`.
-4. Step report to the operator: the live-backend command
+2. widgets.rs: when a plan is loaded, `render_steps_panel` labels each step `{badge} {title}` (title as-is). Extend `steps_panel_badges` to assert the panel shows `[ ] 1: A`-style labels with no `1. 1:`.
+3. Step report to the operator: the live-backend command
      cargo test --workspace --locked --features orrery-core/live-backends
    with `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `ORRERY_LIVE_LLM_URL`, `ORRERY_LIVE_LLM_MODEL` (§8). `live_keyring` needs a desktop session or keyutils.
 

@@ -314,7 +314,7 @@ fn render_steps_panel(frame: &mut Frame, app: &App, rect: Rect) {
             .unwrap_or(StepStatus::Pending);
         let badge = step_status_badge(status);
         let label = if let Some(step) = app.plan.as_ref().and_then(|p| p.steps.get(idx)) {
-            format!("{badge} {}. {}", step.number, step.title)
+            format!("{badge} {}", step.title)
         } else {
             format!("{badge} Step {}", idx + 1)
         };
@@ -990,6 +990,14 @@ mod tests {
                 "missing step badge {badge} in:\n{steps_text}"
             );
         }
+        assert!(
+            steps_text.contains("[ ] 1: A"),
+            "expected '[ ] 1: A' in:\n{steps_text}"
+        );
+        assert!(
+            !steps_text.contains("1. 1:"),
+            "unexpected '1. 1:' in:\n{steps_text}"
+        );
 
         // Fallback step labels without parsed plan and scrolled selection when focused.
         app.plan = None;
