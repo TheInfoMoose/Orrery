@@ -19,12 +19,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 46** | `/boost` | TUI controller never blocks the render loop | `crates/orrery-tui/src/bridge.rs` | — |
-| 2 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs` | — |
-| 3 | **STEP 48** | `/goal` | TUI cycles entry, Loop progress, ingest marker | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-tui/src/bridge.rs` | — |
-| 4 | **STEP 49** | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
-| 5 | **STEP 50** | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs` (NEW), `crates/orrery-core/Cargo.toml` | — |
-| 6 | **STEP 51** | `/goal` | Operator README | `README.md` (NEW) | — |
+| 1 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs` | — |
+| 2 | **STEP 48** | `/goal` | TUI cycles entry, Loop progress, ingest marker | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-tui/src/bridge.rs` | — |
+| 3 | **STEP 49** | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
+| 4 | **STEP 50** | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs` (NEW), `crates/orrery-core/Cargo.toml` | — |
+| 5 | **STEP 51** | `/goal` | Operator README | `README.md` (NEW) | — |
 
 ### Completed
 
@@ -76,6 +75,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 43** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Connect referenced MCP servers only, cap hook history | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` |
 | **STEP 44** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | Halted step-pass hook: Approve re-runs the hook | `crates/orrery-core/src/engine.rs` |
 | **STEP 45** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | CLI error causes, status hint, log follower | `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/src/main.rs`, `crates/orrery-core/src/stream_log.rs` |
+| **STEP 46** | **COMPLETED** (2026-11-16, validate-step PASS) | `/boost` | TUI controller never blocks the render loop | `crates/orrery-tui/src/bridge.rs` |
 
 ---
 
@@ -2193,6 +2193,7 @@ Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `
 - `crates/orrery-core/src/llm.rs` `auth_header_value` — the formatted `"Bearer {key}"` `String` is a plain heap copy of the API key, not zeroized (the pre-Step-40 code held it in a `SecretValue`) — build it in `zeroize::Zeroizing<String>`; the `HeaderValue` copy itself is unavoidable. Found validating Step 40; the Step 40 spec text asked for the plain `format!`.
 - `crates/orrery-core/src/mcp.rs:165-167` `is_tool_allowed` — a `<server>:*` pattern hides a tool whose name can't map to a function name with no notice, so the operator never learns it's unavailable — have `build_engine` emit a `StreamEvent::notice` per hidden tool (needs a gatekeeper accessor for the unfiltered catalog). Found while withdrawing Step 42 item 4.
 - `crates/orrery-core/src/stream_log.rs` `LogFollower::poll` — `read_to_string` errors with `InvalidData` if a poll lands mid-way through a multi-byte UTF-8 character the writer hasn't finished, and `logs --follow` then exits with an I/O error — keep `partial` as `Vec<u8>` and `String::from_utf8_lossy` each complete line. Found validating Step 45; the Step 45 spec asked for `partial: String`.
+- `crates/orrery-tui/src/bridge.rs` `handle(Run)` task — the operator forwarder's `eng_op_tx.send(dec).await` runs in the same `select!` as the pinned `engine.run` future, so if the engine's 8-slot operator channel is full, `run_fut` is never polled again (cancel is not seen; `shutdown` times out and aborts before the checkpoint save) — forward with `try_send` and set the same "operator decision dropped" notice on `Full`. Needs 9+ stale Approve/Reject presses, so low risk. Found validating Step 46.
 - `crates/orrery-core/src/stream_log.rs` `LogWriter` — a log write error (disk full, permissions) is only kept for `flush()`, which nothing calls in production, so the operator never sees it (before Step 41 `emit` returned it) — have the writer share its kept error with the hub (e.g. `Arc<Mutex<Option<String>>>`) and let the next `emit` broadcast one `Error` event for it. Found validating Step 41; the §9.11.4 spec left this out.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
 
