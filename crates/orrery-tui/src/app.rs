@@ -7,7 +7,7 @@ use crossterm::event::{
 use orrery_core::checkpoint::{EnginePhase, StepStatus};
 use orrery_core::config::{
     AgentConfig, ExecutionMode, MAX_STAGE_AGENTS, MAX_STAGES, MIN_STAGES, McpServerConfig,
-    ProjectConfig, RoleConfig, ValidationMode,
+    ProjectConfig, RoleConfig,
 };
 use orrery_core::engine::{EngineEvent, RunOutcome};
 use orrery_core::plan::ImplementationPlan;
@@ -203,7 +203,6 @@ impl App {
 
     pub fn approve_visible(&self) -> bool {
         self.awaiting_operator
-            && self.config.effective_validation_mode(&self.roles) == ValidationMode::GateAndOperator
     }
 
     pub fn push_stream_event(&mut self, event: StreamEvent) {
@@ -1530,23 +1529,12 @@ mod tests {
     }
 
     #[test]
-    fn approve_hidden_unless_gate_and_operator() {
+    fn approve_visible_whenever_awaiting() {
         let mut app = make_app();
         app.awaiting_operator = true;
-        // Default has validator stage + ValidationMode::Auto -> effective Agents.
-        assert!(!app.approve_visible());
-
-        app.focus = Focus::FooterMenu;
-        app.footer_index = 1;
-        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
-        app.footer_index = 2;
-        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
-        assert_eq!(app.modal, Modal::None);
-
-        // Switch to GateAndOperator while awaiting_operator is true.
-        app.config.validation_mode = ValidationMode::GateAndOperator;
         assert!(app.approve_visible());
 
+        app.focus = Focus::FooterMenu;
         app.footer_index = 1;
         assert_eq!(
             app.handle_key_event(key(KeyCode::Enter)),
@@ -1571,6 +1559,12 @@ mod tests {
 
         app.awaiting_operator = false;
         assert!(!app.approve_visible());
+
+        app.footer_index = 1;
+        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
+        app.footer_index = 2;
+        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
+        assert_eq!(app.modal, Modal::None);
     }
 
     #[test]
@@ -1905,7 +1899,6 @@ mod tests {
 
         // When approve_visible() is true, clicking Approve emits Approve and clicking Reject opens modal.
         app.awaiting_operator = true;
-        app.config.validation_mode = ValidationMode::GateAndOperator;
         assert!(app.approve_visible());
         assert_eq!(
             app.handle_mouse_event(left_click(approve_rect.x, approve_rect.y), &regions),

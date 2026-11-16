@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn approve_reject_only_when_awaiting_gate_and_operator() {
+    fn approve_reject_whenever_awaiting() {
         let mut app = test_app();
         app.config.validation_mode = ValidationMode::GateAndOperator;
         app.awaiting_operator = false;
@@ -1122,14 +1122,22 @@ mod tests {
         app.config.validation_mode = ValidationMode::Agents;
         let (buf_agents, regions_agents) = draw_app(&app, 100, 30);
         let footer_agents = rect_text(&buf_agents, regions_agents.footer_menu);
-        assert!(!footer_agents.contains("[Approve]"));
-        assert!(!footer_agents.contains("[Reject]"));
+        assert!(footer_agents.contains("[Approve]"));
+        assert!(footer_agents.contains("[Reject]"));
 
         app.config.validation_mode = ValidationMode::GateAndOperator;
         let (buf_gate, regions_gate) = draw_app(&app, 100, 30);
         let footer_gate = rect_text(&buf_gate, regions_gate.footer_menu);
         assert!(footer_gate.contains("[Approve]"));
         assert!(footer_gate.contains("[Reject]"));
+
+        app.config.validation_mode = ValidationMode::Agents;
+        app.awaiting_operator = false;
+        app.status = RunStatus::Idle;
+        let (buf_agents_idle, regions_agents_idle) = draw_app(&app, 100, 30);
+        let footer_agents_idle = rect_text(&buf_agents_idle, regions_agents_idle.footer_menu);
+        assert!(!footer_agents_idle.contains("[Approve]"));
+        assert!(!footer_agents_idle.contains("[Reject]"));
     }
 
     #[test]
