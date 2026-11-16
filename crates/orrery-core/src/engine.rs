@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::{broadcast, mpsc};
@@ -1847,6 +1848,7 @@ pub struct Backends {
 impl Backends {
     pub fn real(project_root: &Path) -> Result<Self> {
         let store = ConfigStore::new(project_root, None)?;
+        let limits = store.load_project()?.limits;
         let inference = store.load_inference()?;
         let secrets: Arc<dyn SecretStore> = Arc::new(OsKeyringStore::new()?);
         let containers: Arc<dyn ContainerBackend> = Arc::new(BollardContainerBackend::connect()?);
@@ -1861,7 +1863,11 @@ impl Backends {
             stream: std::sync::OnceLock::new(),
         });
         let drivers = DriverSet {
-            chat: Arc::new(HttpChatDriver::new(Arc::clone(&secrets), inference)),
+            chat: Arc::new(
+                HttpChatDriver::new(Arc::clone(&secrets), inference)
+                    .with_max_tool_calls(limits.max_tool_calls)
+                    .with_idle_timeout(Duration::from_secs(limits.model_idle_timeout_secs)),
+            ),
             cli: Arc::new(CliContainerDriver::new(
                 Arc::clone(&containers),
                 Arc::clone(&secrets),

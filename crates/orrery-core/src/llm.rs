@@ -19,7 +19,7 @@ use crate::docker::{
 };
 use crate::mcp::{McpGatekeeper, McpToolSchema, WriteScope, tool_result_text};
 use crate::plan::PlanStep;
-use crate::security::{SecretStore, SecretValue};
+use crate::security::SecretStore;
 use crate::stream_log::{LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
 
@@ -565,6 +565,7 @@ impl ToolCallAccumulator {
 }
 
 const DEFAULT_MAX_TOOL_CALLS: usize = 50;
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 const MAX_LINE_BUFFER_BYTES: usize = 4096;
 
 pub struct HttpChatDriver {
@@ -572,6 +573,7 @@ pub struct HttpChatDriver {
     secrets: Arc<dyn SecretStore>,
     inference: Vec<InferenceConfig>,
     max_tool_calls: usize,
+    idle_timeout: Duration,
 }
 
 impl HttpChatDriver {
@@ -581,6 +583,7 @@ impl HttpChatDriver {
             secrets,
             inference,
             max_tool_calls: DEFAULT_MAX_TOOL_CALLS,
+            idle_timeout: Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS),
         }
     }
 
@@ -589,12 +592,20 @@ impl HttpChatDriver {
         self
     }
 
+    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
     fn new_turn_state(&self, inv: &AgentInvocation) -> TurnState {
         TurnState::new(inv, self.max_tool_calls)
     }
 }
 
-fn bearer_header(agent: &AgentConfig, secrets: &dyn SecretStore) -> Result<Option<SecretValue>> {
+fn auth_header_value(
+    agent: &AgentConfig,
+    secrets: &dyn SecretStore,
+) -> Result<Option<reqwest::header::HeaderValue>> {
     match &agent.backend {
         AgentBackend::CloudApi {
             keychain_service,
@@ -602,10 +613,14 @@ fn bearer_header(agent: &AgentConfig, secrets: &dyn SecretStore) -> Result<Optio
             ..
         } => {
             let secret = secrets.get(keychain_service, keychain_account)?;
-            Ok(Some(SecretValue::new(format!(
-                "Bearer {}",
-                secret.expose()
-            ))))
+            let mut value =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", secret.expose()))
+                    .map_err(|_| Error::Validation {
+                        field: "keychain".to_string(),
+                        message: "API key is not a valid HTTP header value".to_string(),
+                    })?;
+            value.set_sensitive(true);
+            Ok(Some(value))
         }
         AgentBackend::LocalModel { .. } | AgentBackend::AgentCli { .. } => Ok(None),
     }
@@ -963,11 +978,20 @@ impl AgentDriver for HttpChatDriver {
         loop {
             let body = build_chat_request(inv, state.messages());
             let mut req = self.client.post(&url).json(&body);
-            if let Some(auth) = bearer_header(&inv.agent, self.secrets.as_ref())? {
-                req = req.header(reqwest::header::AUTHORIZATION, auth.expose());
+            if let Some(value) = auth_header_value(&inv.agent, self.secrets.as_ref())? {
+                req = req.header(reqwest::header::AUTHORIZATION, value);
             }
 
-            let resp = req.send().await.map_err(Error::Http)?;
+            let resp = tokio::time::timeout(self.idle_timeout, req.send())
+                .await
+                .map_err(|_| Error::Agent {
+                    agent_id: inv.agent.agent_id.clone(),
+                    message: format!(
+                        "no response from model within {}s",
+                        self.idle_timeout.as_secs()
+                    ),
+                })?
+                .map_err(Error::Http)?;
             let status = resp.status();
             if !status.is_success() {
                 return Err(Error::Agent {
@@ -979,7 +1003,16 @@ impl AgentDriver for HttpChatDriver {
             let mut proc = ResponseStreamProcessor::default();
             let mut byte_stream = resp.bytes_stream();
 
-            while let Some(chunk_res) = byte_stream.next().await {
+            while let Some(chunk_res) = tokio::time::timeout(self.idle_timeout, byte_stream.next())
+                .await
+                .map_err(|_| Error::Agent {
+                    agent_id: inv.agent.agent_id.clone(),
+                    message: format!(
+                        "no response from model within {}s",
+                        self.idle_timeout.as_secs()
+                    ),
+                })?
+            {
                 let bytes = chunk_res.map_err(Error::Http)?;
                 if proc.push_sse_bytes(&bytes, inv, stream)? {
                     break;
@@ -1193,7 +1226,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::ReportStatus;
     use crate::config::WorkspaceMount;
-    use crate::security::SecretRedactor;
+    use crate::security::{SecretRedactor, SecretValue};
     use crate::stream_log::{LiveStreamConfig, StreamEvent, StreamEventKind};
 
     fn sample_step() -> PlanStep {
@@ -2471,13 +2504,11 @@ mod tests {
         };
         let local_agent = sample_local_agent("local-1");
 
-        let cloud_hdr = bearer_header(&cloud_agent, &secrets).unwrap();
-        assert_eq!(
-            cloud_hdr.as_ref().map(SecretValue::expose),
-            Some("Bearer sk-cloud-token-99")
-        );
+        let cloud_hdr = auth_header_value(&cloud_agent, &secrets).unwrap().unwrap();
+        assert!(cloud_hdr.is_sensitive());
+        assert_eq!(cloud_hdr.to_str().unwrap(), "Bearer sk-cloud-token-99");
 
-        let local_hdr = bearer_header(&local_agent, &secrets).unwrap();
+        let local_hdr = auth_header_value(&local_agent, &secrets).unwrap();
         assert!(local_hdr.is_none());
     }
 
@@ -2497,10 +2528,10 @@ mod tests {
             },
         };
 
-        let hdr_err = bearer_header(&cloud_agent, secrets.as_ref()).unwrap_err();
+        let hdr_err = auth_header_value(&cloud_agent, secrets.as_ref()).unwrap_err();
         assert!(
             matches!(hdr_err, Error::Keychain(_)),
-            "expected Error::Keychain from bearer_header, got {hdr_err:?}"
+            "expected Error::Keychain from auth_header_value, got {hdr_err:?}"
         );
 
         let tmp = TempDir::new().unwrap();
@@ -3274,5 +3305,118 @@ mod tests {
         let report = driver.run_turn(&inv, &mcp, &hub).await.unwrap();
         assert_eq!(report.status, ReportStatus::Complete);
         assert_eq!(mask_verified.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_timeout_is_agent_error() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let inference = vec![sample_inference("local-1", &format!("http://{addr}"))];
+        let driver =
+            HttpChatDriver::new(secrets, inference).with_idle_timeout(Duration::from_secs(1));
+        let inv = sample_invocation("coder-1");
+
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        server_task.abort();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "coder-1");
+                assert_eq!(message, "no response from model within 1s");
+            }
+            other => panic!("expected Error::Agent, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_is_agent_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+                .await
+                .unwrap();
+            sock.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+                .await
+                .unwrap();
+            sock.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let inference = vec![sample_inference("local-1", &format!("http://{addr}"))];
+        let driver =
+            HttpChatDriver::new(secrets, inference).with_idle_timeout(Duration::from_secs(1));
+        let inv = sample_invocation("coder-1");
+
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        server_task.abort();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "coder-1");
+                assert_eq!(message, "no response from model within 1s");
+            }
+            other => panic!("expected Error::Agent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_header_marked_sensitive() {
+        let secrets = crate::security::InMemorySecretStore::new();
+        secrets
+            .set(
+                "orrery.test",
+                "testuser",
+                &SecretValue::new("test-token-123"),
+            )
+            .unwrap();
+
+        let cloud_agent = AgentConfig {
+            agent_id: "cloud-1".to_string(),
+            display_name: "Cloud Agent".to_string(),
+            backend: AgentBackend::CloudApi {
+                endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                model: "cloud-coder".to_string(),
+                temperature: 0.1,
+                max_context_tokens: 16384,
+                keychain_service: "orrery.test".to_string(),
+                keychain_account: "testuser".to_string(),
+            },
+        };
+
+        let hdr = auth_header_value(&cloud_agent, &secrets).unwrap();
+        let v = hdr.expect("expected Some header value for CloudApi");
+        assert!(v.is_sensitive());
+        assert_eq!(v.to_str().unwrap(), "Bearer test-token-123");
     }
 }
