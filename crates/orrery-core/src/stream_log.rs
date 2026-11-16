@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::{self, JoinHandle};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -64,11 +65,67 @@ impl Default for LiveStreamConfig {
     }
 }
 
+enum WriterMsg {
+    Line(String),
+    Flush(mpsc::Sender<Option<String>>),
+}
+
+struct LogWriter {
+    log_dir: PathBuf,
+    max_file_bytes: u64,
+    max_files: usize,
+    current_size: u64,
+    file: Option<File>,
+    kept_error: Option<String>,
+}
+
+impl LogWriter {
+    fn record_error(&mut self, path: &Path, err: &io::Error) {
+        if self.kept_error.is_none() {
+            self.kept_error = Some(format!("{}: {err}", path.display()));
+        }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let line_len = line.len() as u64;
+        if self.current_size + line_len > self.max_file_bytes {
+            self.file = None;
+            if let Err((path, err)) = rotate_files(&self.log_dir, self.max_files) {
+                self.record_error(&path, &err);
+                return;
+            }
+            self.current_size = 0;
+        }
+
+        let log_path = self.log_dir.join(LOG_FILE);
+        if self.file.is_none() {
+            match OpenOptions::new().create(true).append(true).open(&log_path) {
+                Ok(file) => self.file = Some(file),
+                Err(err) => {
+                    self.record_error(&log_path, &err);
+                    return;
+                }
+            }
+        }
+
+        if let Some(file) = self.file.as_mut() {
+            if let Err(err) = file.write_all(line.as_bytes()).and_then(|()| file.flush()) {
+                self.file = None;
+                self.record_error(&log_path, &err);
+                return;
+            }
+            self.current_size += line_len;
+        }
+    }
+}
+
 pub struct LiveStreamHub {
     log_dir: PathBuf,
     config: LiveStreamConfig,
     redactor: Arc<SecretRedactor>,
-    state: Mutex<(VecDeque<StreamEvent>, u64)>,
+    ring: Mutex<VecDeque<StreamEvent>>,
+    writer_tx: Mutex<Option<mpsc::Sender<WriterMsg>>>,
+    writer_handle: Option<JoinHandle<()>>,
     sender: broadcast::Sender<StreamEvent>,
 }
 
@@ -95,6 +152,35 @@ impl LiveStreamHub {
             }
         };
 
+        let (tx, rx) = mpsc::channel::<WriterMsg>();
+        let writer_log_dir = log_dir.clone();
+        let max_file_bytes = config.max_file_bytes;
+        let max_files = config.max_files;
+        let writer_handle = thread::Builder::new()
+            .name("orrery-log-writer".into())
+            .spawn(move || {
+                let mut writer = LogWriter {
+                    log_dir: writer_log_dir,
+                    max_file_bytes,
+                    max_files,
+                    current_size,
+                    file: None,
+                    kept_error: None,
+                };
+                while let Ok(msg) = rx.recv() {
+                    match msg {
+                        WriterMsg::Line(line) => writer.write_line(&line),
+                        WriterMsg::Flush(reply) => {
+                            let _ = reply.send(writer.kept_error.take());
+                        }
+                    }
+                }
+            })
+            .map_err(|source| Error::Io {
+                path: log_dir.clone(),
+                source,
+            })?;
+
         let channel_capacity = config.ring_capacity.max(1);
         let (sender, _) = broadcast::channel(channel_capacity);
 
@@ -102,7 +188,9 @@ impl LiveStreamHub {
             log_dir,
             config,
             redactor,
-            state: Mutex::new((VecDeque::with_capacity(config.ring_capacity), current_size)),
+            ring: Mutex::new(VecDeque::with_capacity(config.ring_capacity)),
+            writer_tx: Mutex::new(Some(tx)),
+            writer_handle: Some(writer_handle),
             sender,
         })
     }
@@ -111,49 +199,62 @@ impl LiveStreamHub {
         event.text = self.redactor.redact(&event.text)?;
 
         {
-            let mut guard = self.state.lock().map_err(|_| Error::Security {
+            let mut ring = self.ring.lock().map_err(|_| Error::Security {
                 message: "LiveStreamHub lock poisoned".into(),
             })?;
 
             if self.config.ring_capacity > 0 {
-                if guard.0.len() >= self.config.ring_capacity {
-                    guard.0.pop_front();
+                if ring.len() >= self.config.ring_capacity {
+                    ring.pop_front();
                 }
-                guard.0.push_back(event.clone());
+                ring.push_back(event.clone());
             }
+        }
 
-            if self.config.max_files > 0
-                && let Some(line) = fit_event_line(&event, self.config.max_file_bytes)?
-            {
-                let line_len = line.len() as u64;
-                if guard.1 + line_len > self.config.max_file_bytes {
-                    self.rotate_files()?;
-                    guard.1 = 0;
-                }
-                let log_path = self.log_dir.join(LOG_FILE);
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .map_err(|source| Error::Io {
-                        path: log_path.clone(),
-                        source,
-                    })?;
-                file.write_all(line.as_bytes())
-                    .map_err(|source| Error::Io {
-                        path: log_path.clone(),
-                        source,
-                    })?;
-                file.flush().map_err(|source| Error::Io {
-                    path: log_path,
-                    source,
+        if self.config.max_files > 0
+            && let Some(line) = fit_event_line(&event, self.config.max_file_bytes)?
+        {
+            let guard = self.writer_tx.lock().map_err(|_| Error::Security {
+                message: "LiveStreamHub lock poisoned".into(),
+            })?;
+            let tx = guard.as_ref().ok_or_else(|| Error::Security {
+                message: "LiveStreamHub writer stopped".into(),
+            })?;
+            tx.send(WriterMsg::Line(line))
+                .map_err(|_| Error::Security {
+                    message: "LiveStreamHub writer stopped".into(),
                 })?;
-                guard.1 += line_len;
-            }
         }
 
         let _ = self.sender.send(event);
         Ok(())
+    }
+
+    pub fn flush(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        {
+            let guard = self.writer_tx.lock().map_err(|_| Error::Security {
+                message: "LiveStreamHub lock poisoned".into(),
+            })?;
+            let tx = guard.as_ref().ok_or_else(|| Error::Security {
+                message: "LiveStreamHub writer stopped".into(),
+            })?;
+            tx.send(WriterMsg::Flush(reply_tx))
+                .map_err(|_| Error::Security {
+                    message: "LiveStreamHub writer stopped".into(),
+                })?;
+        }
+
+        match reply_rx.recv() {
+            Ok(None) => Ok(()),
+            Ok(Some(msg)) => Err(Error::Io {
+                path: self.log_dir.join(LOG_FILE),
+                source: io::Error::other(msg),
+            }),
+            Err(_) => Err(Error::Security {
+                message: "LiveStreamHub writer stopped".into(),
+            }),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<StreamEvent> {
@@ -161,39 +262,50 @@ impl LiveStreamHub {
     }
 
     pub fn recent(&self, limit: usize) -> Result<Vec<StreamEvent>> {
-        let guard = self.state.lock().map_err(|_| Error::Security {
+        let ring = self.ring.lock().map_err(|_| Error::Security {
             message: "LiveStreamHub lock poisoned".into(),
         })?;
-        let skip = guard.0.len().saturating_sub(limit);
-        Ok(guard.0.iter().skip(skip).cloned().collect())
+        let skip = ring.len().saturating_sub(limit);
+        Ok(ring.iter().skip(skip).cloned().collect())
     }
 
     pub fn redactor(&self) -> &Arc<SecretRedactor> {
         &self.redactor
     }
+}
 
-    fn rotate_files(&self) -> Result<()> {
-        if self.config.max_files <= 1 {
-            let log_path = self.log_dir.join(LOG_FILE);
-            remove_if_exists(&log_path)?;
-            return Ok(());
+impl Drop for LiveStreamHub {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.writer_tx.lock() {
+            let _ = guard.take();
         }
-
-        let oldest = rotated_log_path(&self.log_dir, self.config.max_files - 1);
-        remove_if_exists(&oldest)?;
-
-        for k in (1..=self.config.max_files - 2).rev() {
-            let src = rotated_log_path(&self.log_dir, k);
-            let dst = rotated_log_path(&self.log_dir, k + 1);
-            rename_if_exists(&src, &dst)?;
+        if let Some(handle) = self.writer_handle.take() {
+            let _ = handle.join();
         }
-
-        let base = self.log_dir.join(LOG_FILE);
-        let first_rot = rotated_log_path(&self.log_dir, 1);
-        rename_if_exists(&base, &first_rot)?;
-
-        Ok(())
     }
+}
+
+fn rotate_files(log_dir: &Path, max_files: usize) -> std::result::Result<(), (PathBuf, io::Error)> {
+    if max_files <= 1 {
+        let log_path = log_dir.join(LOG_FILE);
+        remove_if_exists(&log_path)?;
+        return Ok(());
+    }
+
+    let oldest = rotated_log_path(log_dir, max_files - 1);
+    remove_if_exists(&oldest)?;
+
+    for k in (1..=max_files - 2).rev() {
+        let src = rotated_log_path(log_dir, k);
+        let dst = rotated_log_path(log_dir, k + 1);
+        rename_if_exists(&src, &dst)?;
+    }
+
+    let base = log_dir.join(LOG_FILE);
+    let first_rot = rotated_log_path(log_dir, 1);
+    rename_if_exists(&base, &first_rot)?;
+
+    Ok(())
 }
 
 pub fn tail_log(log_dir: &Path, limit: usize) -> Result<Vec<String>> {
@@ -222,25 +334,19 @@ fn rotated_log_path(log_dir: &Path, index: usize) -> PathBuf {
     log_dir.join(format!("{LOG_FILE}.{index}"))
 }
 
-fn remove_if_exists(path: &Path) -> Result<()> {
+fn remove_if_exists(path: &Path) -> std::result::Result<(), (PathBuf, io::Error)> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err((path.to_path_buf(), source)),
     }
 }
 
-fn rename_if_exists(src: &Path, dst: &Path) -> Result<()> {
+fn rename_if_exists(src: &Path, dst: &Path) -> std::result::Result<(), (PathBuf, io::Error)> {
     match fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(Error::Io {
-            path: src.to_path_buf(),
-            source,
-        }),
+        Err(source) => Err((src.to_path_buf(), source)),
     }
 }
 
@@ -373,6 +479,7 @@ mod tests {
             assert!(ev.text.contains(REDACTED));
         }
 
+        hub.flush().unwrap();
         for path in [
             dir.path().join(LOG_FILE),
             rotated_log_path(dir.path(), 1),
@@ -397,6 +504,7 @@ mod tests {
             )))
             .expect("emit");
         }
+        hub.flush().unwrap();
 
         let log0 = dir.path().join(LOG_FILE);
         let log1 = rotated_log_path(dir.path(), 1);
@@ -435,6 +543,7 @@ mod tests {
             )))
             .expect("emit");
         }
+        hub.flush().unwrap();
 
         assert!(dir.path().join(LOG_FILE).exists());
         assert!(rotated_log_path(dir.path(), 1).exists());
@@ -451,6 +560,7 @@ mod tests {
         for i in 0..1_000 {
             hub.emit(StreamEvent::notice(format!("event-number-{i}-payload")))
                 .expect("emit");
+            hub.flush().unwrap();
 
             let mut total = 0u64;
             for path in [
@@ -479,6 +589,7 @@ mod tests {
         let long_text = "é".repeat(2_000);
         hub.emit(StreamEvent::notice(long_text))
             .expect("emit oversize event");
+        hub.flush().unwrap();
 
         let log_path = dir.path().join(LOG_FILE);
         let raw = fs::read(&log_path).expect("read log file");
@@ -537,6 +648,7 @@ mod tests {
             )))
             .expect("emit");
         }
+        hub.flush().unwrap();
 
         assert!(rotated_log_path(dir.path(), 2).exists());
         assert!(rotated_log_path(dir.path(), 1).exists());
@@ -585,6 +697,7 @@ mod tests {
             "skipped file write because max_file_bytes is 10",
         ))
         .expect("emit when empty event exceeds max_file_bytes");
+        hub.flush().unwrap();
         assert!(!dir.path().join(LOG_FILE).exists());
         assert_eq!(hub.recent(5).expect("recent").len(), 1);
 
@@ -592,10 +705,89 @@ mod tests {
         let hub1 = make_hub(&dir2);
         hub1.emit(StreamEvent::notice("initial-line"))
             .expect("emit initial");
+        hub1.flush().unwrap();
         let hub2 = make_hub(&dir2);
         hub2.emit(StreamEvent::notice("second-line"))
             .expect("emit second");
+        hub2.flush().unwrap();
         let tailed = tail_log(dir2.path(), 10).expect("tail");
         assert_eq!(tailed.len(), 2);
+    }
+
+    #[test]
+    fn drop_writes_pending_lines() {
+        let dir = TempDir::new().expect("tempdir");
+        let hub = LiveStreamHub::new(
+            dir.path().to_path_buf(),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .expect("create hub");
+
+        for i in 1..=100 {
+            hub.emit(StreamEvent::notice(format!("pending-line-{i}")))
+                .expect("emit");
+        }
+        drop(hub);
+
+        let lines = tail_log(dir.path(), usize::MAX).expect("tail_log");
+        assert_eq!(lines.len(), 100);
+    }
+
+    #[test]
+    fn flush_reports_write_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let hub = LiveStreamHub::new(
+            dir.path().to_path_buf(),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .expect("create hub");
+        fs::create_dir(dir.path().join(LOG_FILE)).expect("create blocking directory");
+
+        hub.emit(StreamEvent::notice("cannot write to directory"))
+            .expect("emit should return Ok");
+        let err = hub.flush().expect_err("first flush should return Err");
+        assert!(matches!(err, crate::Error::Io { .. }));
+
+        hub.flush()
+            .expect("second flush should return Ok after error was taken");
+    }
+
+    #[test]
+    fn rotation_unchanged_with_writer_thread() {
+        let dir = TempDir::new().expect("tempdir");
+        let cfg = LiveStreamConfig {
+            ring_capacity: 64,
+            max_file_bytes: 300,
+            max_files: 3,
+        };
+        let hub = LiveStreamHub::new(
+            dir.path().to_path_buf(),
+            cfg,
+            Arc::new(SecretRedactor::new()),
+        )
+        .expect("create hub");
+
+        for i in 1..=30 {
+            hub.emit(StreamEvent::notice(format!("writer-rot-{i:02}-payload")))
+                .expect("emit");
+        }
+        hub.flush().unwrap();
+
+        let log0 = dir.path().join(LOG_FILE);
+        let log1 = rotated_log_path(dir.path(), 1);
+        let log2 = rotated_log_path(dir.path(), 2);
+        let log3 = rotated_log_path(dir.path(), 3);
+
+        assert!(log0.exists());
+        assert!(log1.exists());
+        assert!(log2.exists());
+        assert!(!log3.exists());
+
+        for path in [&log0, &log1, &log2] {
+            let len = fs::metadata(path).expect("metadata").len();
+            assert!(len <= 300, "{} had {len} bytes (> 300)", path.display());
+        }
     }
 }

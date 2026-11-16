@@ -1935,7 +1935,11 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
     let orrery_dir = store.orrery_dir();
     let stream = Arc::new(LiveStreamHub::new(
         orrery_dir.join("logs"),
-        LiveStreamConfig::default(),
+        LiveStreamConfig {
+            ring_capacity: project.limits.live_stream_ring_capacity,
+            max_file_bytes: project.limits.live_stream_max_file_bytes,
+            max_files: project.limits.live_stream_max_files,
+        },
         redactor,
     )?);
     backends.connector.attach_stream(Arc::clone(&stream));
@@ -2100,7 +2104,11 @@ mod tests {
         let stream = Arc::new(
             LiveStreamHub::new(
                 orrery_dir.join("logs"),
-                LiveStreamConfig::default(),
+                LiveStreamConfig {
+                    ring_capacity: project.limits.live_stream_ring_capacity,
+                    max_file_bytes: project.limits.live_stream_max_file_bytes,
+                    max_files: project.limits.live_stream_max_files,
+                },
                 Arc::new(SecretRedactor::new()),
             )
             .expect("test stream hub should initialize"),
