@@ -619,12 +619,12 @@ fn auth_header_value(
             ..
         } => {
             let secret = secrets.get(keychain_service, keychain_account)?;
+            let bearer = zeroize::Zeroizing::new(format!("Bearer {}", secret.expose()));
             let mut value =
-                reqwest::header::HeaderValue::from_str(&format!("Bearer {}", secret.expose()))
-                    .map_err(|_| Error::Validation {
-                        field: "keychain".to_string(),
-                        message: "API key is not a valid HTTP header value".to_string(),
-                    })?;
+                reqwest::header::HeaderValue::from_str(&bearer).map_err(|_| Error::Validation {
+                    field: "keychain".to_string(),
+                    message: "API key is not a valid HTTP header value".to_string(),
+                })?;
             value.set_sensitive(true);
             Ok(Some(value))
         }
