@@ -1,11 +1,11 @@
 use orrery_core::checkpoint::StepStatus;
-use orrery_core::config::{AgentBackend, ExecutionMode, HookEvent};
+use orrery_core::config::{AGENT_CLI_GUARDRAIL_NOTE, AgentBackend, ExecutionMode, HookEvent};
 use orrery_core::stream_log::{StreamEvent, StreamEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
 use crate::app::{App, Focus, Modal, RunStatus, Selector, SelectorKind};
 use crate::layout::{BANNER_MIN_HEIGHT, StageColumn, UiLayoutRegions, UiRegion};
@@ -668,9 +668,15 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_settings_modal(frame: &mut Frame, app: &App, modal_rect: Rect) {
-    let block = focused_block().title(" Settings (read-only — edit via CLI) ");
+    let title = if app.warnings.is_empty() {
+        " Settings (read-only — edit via CLI) ".to_string()
+    } else {
+        format!(" Settings — {} warning(s) ", app.warnings.len())
+    };
+    let block = focused_block().title(title);
     let primary = Style::default().fg(AMBER_PRIMARY).bg(PANEL_BG);
     let dim = Style::default().fg(AMBER_DIM).bg(PANEL_BG);
+    let alert = Style::default().fg(AMBER_ALERT).bg(PANEL_BG);
 
     let role_list: String = if app.roles.is_empty() {
         "(none)".to_string()
@@ -678,16 +684,6 @@ fn render_settings_modal(frame: &mut Frame, app: &App, modal_rect: Rect) {
         app.roles
             .iter()
             .map(|r| format!("{} ({:?})", r.role_id, r.kind))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let agent_list: String = if app.agents.is_empty() {
-        "(none)".to_string()
-    } else {
-        app.agents
-            .iter()
-            .map(|a| format!("{} [{}]", a.agent_id, agent_backend_tag(&a.backend)))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -725,16 +721,95 @@ fn render_settings_modal(frame: &mut Frame, app: &App, modal_rect: Rect) {
         hook_parts.join(", ")
     };
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(Span::styled(format!("Roles: {role_list}"), primary)),
-        Line::from(Span::styled(format!("Agents: {agent_list}"), primary)),
-        Line::from(Span::styled(format!("MCP servers: {mcp_list}"), primary)),
-        Line::from(Span::styled(format!("Gate tools: {gates}"), primary)),
-        Line::from(Span::styled(format!("Hooks: {hooks_str}"), primary)),
-        Line::from(Span::styled("Press Esc, Enter, or q to close", dim)),
+        Line::from(Span::styled("Warnings:", primary)),
     ];
+    if app.warnings.is_empty() {
+        lines.push(Line::from(Span::styled("  (none)", primary)));
+    } else {
+        for w in &app.warnings {
+            lines.push(Line::from(Span::styled(format!("  {w}"), primary)));
+        }
+    }
 
-    let widget = Paragraph::new(lines).block(block).style(primary);
+    lines.push(Line::from(Span::styled("Agents:", primary)));
+    for agent in &app.agents {
+        let tag = agent_backend_tag(&agent.backend);
+        lines.push(Line::from(Span::styled(
+            format!("  {} [{tag}] {}", agent.agent_id, agent.display_name),
+            primary,
+        )));
+        match &agent.backend {
+            AgentBackend::LocalModel {
+                inference_id,
+                model,
+                max_context_tokens,
+                ..
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "    inference {inference_id}, model {model}, context {max_context_tokens}"
+                    ),
+                    primary,
+                )));
+            }
+            AgentBackend::CloudApi {
+                endpoint_url,
+                model,
+                max_context_tokens,
+                ..
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "    endpoint {endpoint_url}, model {model}, context {max_context_tokens}"
+                    ),
+                    primary,
+                )));
+            }
+            AgentBackend::AgentCli {
+                image,
+                workspace_mount,
+                memory_limit_mb,
+                timeout_secs,
+                ..
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "    image {image}, mount {workspace_mount:?}, memory {memory_limit_mb} MB, timeout {timeout_secs}s"
+                    ),
+                    primary,
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("    {AGENT_CLI_GUARDRAIL_NOTE}"),
+                    alert,
+                )));
+            }
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        format!("MCP servers: {mcp_list}"),
+        primary,
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Gate tools: {gates}"),
+        primary,
+    )));
+    lines.push(Line::from(Span::styled(
+        format!("Hooks: {hooks_str}"),
+        primary,
+    )));
+    lines.push(Line::from(Span::styled(
+        "Press Esc, Enter, or q to close",
+        dim,
+    )));
+
+    let widget = Paragraph::new(lines)
+        .block(block)
+        .style(primary)
+        .wrap(Wrap { trim: false })
+        .scroll((app.settings_scroll, 0));
     frame.render_widget(widget, modal_rect);
 }
 
@@ -1284,11 +1359,72 @@ mod tests {
             write_tools: Vec::new(),
         }];
         app.modal = Modal::Settings;
+        app.settings_scroll = 8;
         let (buf, _) = draw_app(&app, 100, 30);
         let text = buffer_text(&buf);
         assert!(
             text.contains("MCP servers: fs"),
             "expected 'MCP servers: fs' in Settings modal, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn settings_shows_agent_details_and_guardrail() {
+        let mut app = test_app();
+        app.agents = vec![
+            AgentConfig {
+                agent_id: "cli-worker".into(),
+                display_name: "CLI Worker".into(),
+                backend: AgentBackend::AgentCli {
+                    image: "registry.example.com/agents/cli@sha256:0000".into(),
+                    command: vec!["worker".into()],
+                    workspace_mount: WorkspaceMount::ReadWrite,
+                    memory_limit_mb: 512,
+                    timeout_secs: 60,
+                    keychain_service: None,
+                    keychain_account: None,
+                    secret_env: None,
+                },
+            },
+            AgentConfig {
+                agent_id: "local-qwen".into(),
+                display_name: "Local Qwen".into(),
+                backend: AgentBackend::LocalModel {
+                    inference_id: "vllm".into(),
+                    model: "qwen".into(),
+                    temperature: 0.1,
+                    max_context_tokens: 8192,
+                },
+            },
+        ];
+        app.modal = Modal::Settings;
+        let (buf, _) = draw_app(&app, 120, 40);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("image registry.example.com/agents/cli@sha256:0000"),
+            "missing image detail in:\n{text}"
+        );
+        assert!(
+            text.contains("inference "),
+            "missing inference detail in:\n{text}"
+        );
+        let first_40 = &AGENT_CLI_GUARDRAIL_NOTE[..40];
+        assert!(
+            text.contains(first_40),
+            "missing guardrail note prefix {first_40:?} in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn settings_title_counts_warnings() {
+        let mut app = test_app();
+        app.warnings = vec!["warning one".into(), "warning two".into()];
+        app.modal = Modal::Settings;
+        let (buf, _) = draw_app(&app, 100, 30);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("2 warning(s)"),
+            "expected '2 warning(s)' in Settings title, got:\n{text}"
         );
     }
 

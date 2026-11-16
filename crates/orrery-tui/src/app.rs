@@ -141,6 +141,8 @@ pub struct App {
     pub status_message: Option<String>,
     pub should_quit: bool,
     pub run_passed: usize,
+    pub warnings: Vec<String>,
+    pub settings_scroll: u16,
 }
 
 impl App {
@@ -150,7 +152,7 @@ impl App {
         roles: Vec<RoleConfig>,
         agents: Vec<AgentConfig>,
     ) -> Self {
-        Self {
+        let mut app = Self {
             project_root,
             config,
             roles,
@@ -176,7 +178,18 @@ impl App {
             status_message: None,
             should_quit: false,
             run_passed: 0,
-        }
+            warnings: Vec::new(),
+            settings_scroll: 0,
+        };
+        app.refresh_warnings();
+        app
+    }
+
+    pub fn refresh_warnings(&mut self) {
+        self.warnings = match self.config.validate(&self.roles, &self.agents) {
+            Ok(ws) => ws.iter().map(ToString::to_string).collect(),
+            Err(e) => vec![e.to_string()],
+        };
     }
 
     fn is_running(&self) -> bool {
@@ -378,6 +391,7 @@ impl App {
                             if self.config.step_marker != new_marker {
                                 self.config.step_marker = new_marker;
                             }
+                            self.refresh_warnings();
                             self.modal = Modal::None;
                             vec![AppAction::IngestPlan(path)]
                         }
@@ -409,6 +423,7 @@ impl App {
                             text.parse::<usize>().unwrap_or(0)
                         };
                         self.config.cycle_count = n;
+                        self.refresh_warnings();
                         self.modal = Modal::None;
                         vec![AppAction::SetCycles(n)]
                     }
@@ -489,10 +504,28 @@ impl App {
                 };
             }
             // Row 5: Help / Settings
-            Modal::Help | Modal::Settings => {
+            Modal::Help => {
                 return match key.code {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                         self.modal = Modal::None;
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            Modal::Settings => {
+                return match key.code {
+                    KeyCode::Up => {
+                        self.settings_scroll = self.settings_scroll.saturating_sub(1);
+                        Vec::new()
+                    }
+                    KeyCode::Down => {
+                        self.settings_scroll = self.settings_scroll.saturating_add(1).min(500);
+                        Vec::new()
+                    }
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                        self.modal = Modal::None;
+                        self.settings_scroll = 0;
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -561,6 +594,7 @@ impl App {
                 Ok(()) => {
                     let max_slot = self.unlocked_slots(self.stage_selected);
                     self.slot_selected = self.slot_selected.min(max_slot);
+                    self.refresh_warnings();
                     vec![AppAction::SetStageRole {
                         stage,
                         role_id: option,
@@ -585,6 +619,7 @@ impl App {
                         Ok(()) => {
                             let max_slot = self.unlocked_slots(self.stage_selected);
                             self.slot_selected = self.slot_selected.min(max_slot);
+                            self.refresh_warnings();
                             vec![AppAction::UnassignAgent { stage, agent_id }]
                         }
                         Err(err) => {
@@ -594,10 +629,13 @@ impl App {
                     }
                 } else {
                     match self.config.assign_agent(stage, option.clone()) {
-                        Ok(()) => vec![AppAction::AssignAgent {
-                            stage,
-                            agent_id: option,
-                        }],
+                        Ok(()) => {
+                            self.refresh_warnings();
+                            vec![AppAction::AssignAgent {
+                                stage,
+                                agent_id: option,
+                            }]
+                        }
                         Err(err) => {
                             self.status_message = Some(err.to_string());
                             Vec::new()
@@ -630,6 +668,7 @@ impl App {
                 }
                 let max_slot = self.unlocked_slots(self.stage_selected);
                 self.slot_selected = self.slot_selected.min(max_slot);
+                self.refresh_warnings();
                 vec![AppAction::SetStageCount(next)]
             }
             Err(err) => {
@@ -667,6 +706,7 @@ impl App {
                         ExecutionMode::Loop => ExecutionMode::Run,
                     };
                     self.config.execution_mode = toggled;
+                    self.refresh_warnings();
                     vec![AppAction::SetMode(toggled)]
                 }
                 2 => {
@@ -692,6 +732,7 @@ impl App {
                         self.config.cycle_count.saturating_sub(1)
                     };
                     self.config.cycle_count = next;
+                    self.refresh_warnings();
                     vec![AppAction::SetCycles(next)]
                 }
                 4 | 5 => {
@@ -781,6 +822,7 @@ impl App {
                     Ok(()) => {
                         let max_slot = self.unlocked_slots(self.stage_selected);
                         self.slot_selected = self.slot_selected.min(max_slot);
+                        self.refresh_warnings();
                         vec![AppAction::UnassignAgent {
                             stage: self.stage_selected,
                             agent_id,
@@ -1115,7 +1157,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orrery_core::config::{AgentBackend, RoleKind};
+    use orrery_core::config::{AgentBackend, RoleKind, ValidationMode};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2210,5 +2252,61 @@ mod tests {
             status: StepStatus::Passed,
         });
         assert_eq!(app.run_passed, 2);
+    }
+
+    #[test]
+    fn warnings_refreshed_after_edit() {
+        let mut config = ProjectConfig::default_template("demo");
+        config.stages.pop();
+        assert!(config.gate_tools.is_empty());
+        let mut app = App::new(PathBuf::from("."), config, sample_roles(), sample_agents());
+        assert_eq!(
+            app.config.effective_validation_mode(&app.roles),
+            ValidationMode::GateAndOperator
+        );
+        assert_eq!(app.warnings.len(), 1);
+
+        // Set stage 1 role to validator via the Selector edit path, making effective validation_mode Agents.
+        app.focus = Focus::StageCanvas;
+        app.stage_selected = 1;
+        app.slot_selected = 0;
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        app.handle_key_event(key(KeyCode::Down));
+        let actions = app.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(
+            actions,
+            vec![AppAction::SetStageRole {
+                stage: 1,
+                role_id: "validator".to_string()
+            }]
+        );
+        assert_eq!(
+            app.config.effective_validation_mode(&app.roles),
+            ValidationMode::Agents
+        );
+        assert_eq!(app.warnings.len(), 0);
+    }
+
+    #[test]
+    fn settings_scroll_keys() {
+        let mut app = make_app();
+        app.focus = Focus::FooterMenu;
+        app.footer_index = 3;
+        app.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(app.modal, Modal::Settings);
+        assert_eq!(app.settings_scroll, 0);
+
+        for _ in 0..3 {
+            app.handle_key_event(key(KeyCode::Down));
+        }
+        assert_eq!(app.settings_scroll, 3);
+
+        app.handle_key_event(key(KeyCode::Up));
+        assert_eq!(app.settings_scroll, 2);
+
+        app.handle_key_event(key(KeyCode::Esc));
+        assert_eq!(app.modal, Modal::None);
+        assert_eq!(app.settings_scroll, 0);
     }
 }
