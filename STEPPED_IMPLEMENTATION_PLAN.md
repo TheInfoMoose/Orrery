@@ -19,7 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs` | — |
+| 1 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs`, `crates/orrery-tui/src/widgets.rs` | — |
 | 2 | **STEP 48** | `/goal` | TUI cycles entry, Loop progress, ingest marker | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-tui/src/bridge.rs` | — |
 | 3 | **STEP 49** | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
 | 4 | **STEP 50** | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs` (NEW), `crates/orrery-core/Cargo.toml` | — |
@@ -2601,19 +2601,21 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 * **Recommended Command:** `/boost`
 
-Scope note: `approve_visible()` requires `GateAndOperator`, so in `Agents` mode (the default 3-stage workflow) a TUI user can't answer an escalation, exhausted retries or a `Halt` hook. A step left awaiting by `orrery run` also shows no Approve/Reject until Run is pressed, and Approve then has no engine to talk to. `approve_hidden_unless_gate_and_operator` is replaced, not weakened: its new form asserts the new rule.
+Scope note: `approve_visible()` requires `GateAndOperator`, so in `Agents` mode (the default 3-stage workflow) a TUI user can't answer an escalation, exhausted retries or a `Halt` hook. A step left awaiting by `orrery run` also shows no Approve/Reject until Run is pressed, and Approve then has no engine to talk to. `approve_hidden_unless_gate_and_operator` is replaced, not weakened: its new form asserts the new rule. The same goes for `widgets::tests::approve_reject_only_when_awaiting_gate_and_operator` (added 2026-11-16 after the first run halted on it).
 
 ```text
 [STEP_ID]
-STEP 47: app.rs + bridge.rs — approve_visible = awaiting_operator in every mode; load_initial_app restores the awaiting state; Approve/Reject without a running engine save operator_decision and start the engine
+STEP 47: app.rs + bridge.rs + widgets.rs — approve_visible = awaiting_operator in every mode; load_initial_app restores the awaiting state; Approve/Reject without a running engine save operator_decision and start the engine
 
 [SCOPE_LOCK]
 ALLOWED_FILES:
   - crates/orrery-tui/src/app.rs
   - crates/orrery-tui/src/bridge.rs
+  - crates/orrery-tui/src/widgets.rs
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1268-1272 (§9.11.10; binding)
   - crates/orrery-tui/src/app.rs:204-207 (approve_visible), 1532-1575 (approve_hidden_unless_gate_and_operator)
+  - crates/orrery-tui/src/widgets.rs:1107-1133 (approve_reject_only_when_awaiting_gate_and_operator)
   - crates/orrery-tui/src/bridge.rs load_initial_app, EngineController::handle (Approve, Reject, Run)
   - crates/orrery-cli/src/commands.rs approve/reject handlers (the same checkpoint write)
 FORBIDDEN_SCOPE:
@@ -2631,9 +2633,10 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
    - `initial_app_shows_awaiting_step`: a project whose saved checkpoint has step 1 `AwaitingOperator` with `awaiting_reason = Some("escalated")` → `load_initial_app` gives `status == AwaitingOperator`, `awaiting_operator`, `status_message == Some("escalated")`.
    - `approve_without_running_engine_resumes` (`#[tokio::test]`): that checkpoint plus a mock driver scripted to pass step 1; `handle(&Approve, ..)`; `shutdown` → the saved checkpoint has step 1 `Passed` and `operator_decision == None`.
    - `approve_without_awaiting_step_sets_message` (`#[tokio::test]`): a checkpoint with step 1 `Pending` → `handle(&Approve, ..)` is `Ok`, `status_message == Some("no step awaiting operator")`, no engine started.
+6. widgets.rs (tests only; no non-test code changes): rename `approve_reject_only_when_awaiting_gate_and_operator` to `approve_reject_whenever_awaiting`. Keep its idle block (`GateAndOperator`, not awaiting → no `[Approve]`/`[Reject]`, `[Mouse: OFF]`) and its `GateAndOperator` + awaiting block (both shown). The `Agents` + awaiting block now asserts `[Approve]` and `[Reject]` are present. Add one block: `Agents`, `awaiting_operator = false`, `status = Idle` → neither shown.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'approve_hidden_unless_gate_and_operator' crates/orrery-tui/src/app.rs && ! sed -n '/pub fn approve_visible/,/^    }/p' crates/orrery-tui/src/app.rs | grep -q 'GateAndOperator' && grep -q 'no step awaiting operator' crates/orrery-tui/src/bridge.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(app::tests::approve_visible_whenever_awaiting|bridge::tests::(initial_app_shows_awaiting_step|approve_without_running_engine_resumes|approve_without_awaiting_step_sets_message)): test$')" -eq 4
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'approve_hidden_unless_gate_and_operator' crates/orrery-tui/src/app.rs && ! sed -n '/pub fn approve_visible/,/^    }/p' crates/orrery-tui/src/app.rs | grep -q 'GateAndOperator' && grep -q 'no step awaiting operator' crates/orrery-tui/src/bridge.rs && ! grep -q 'approve_reject_only_when_awaiting_gate_and_operator' crates/orrery-tui/src/widgets.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(app::tests::approve_visible_whenever_awaiting|bridge::tests::(initial_app_shows_awaiting_step|approve_without_running_engine_resumes|approve_without_awaiting_step_sets_message)|widgets::tests::approve_reject_whenever_awaiting): test$')" -eq 5
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
