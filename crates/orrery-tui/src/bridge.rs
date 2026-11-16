@@ -96,11 +96,10 @@ pub fn step(app: &mut App, regions: &UiLayoutRegions, input: BridgeInput) -> Eff
 
 pub struct EngineController {
     store: ConfigStore,
-    make_backends: Box<dyn Fn() -> Result<Backends> + Send + Sync>,
+    make_backends: Arc<dyn Fn() -> Result<Backends> + Send + Sync>,
     cancel: CancellationToken,
     operator_tx: Option<mpsc::Sender<OperatorDecision>>,
     task: Option<JoinHandle<Result<RunOutcome>>>,
-    forward_task: Option<JoinHandle<()>>,
     engine_tx: mpsc::Sender<EngineEvent>,
     engine_rx: mpsc::Receiver<EngineEvent>,
     stream_tx: mpsc::Sender<StreamEvent>,
@@ -116,11 +115,10 @@ impl EngineController {
         let (stream_tx, stream_rx) = mpsc::channel(CHANNEL_CAPACITY);
         Self {
             store,
-            make_backends,
+            make_backends: Arc::from(make_backends),
             cancel: CancellationToken::new(),
             operator_tx: None,
             task: None,
-            forward_task: None,
             engine_tx,
             engine_rx,
             stream_tx,
@@ -144,24 +142,11 @@ impl EngineController {
         }
     }
 
-    pub async fn poll_finished(&mut self, app: &mut App) -> bool {
-        let finished = self.task.as_ref().is_some_and(JoinHandle::is_finished);
-        if !finished {
-            return false;
-        }
-        let Some(handle) = self.task.take() else {
-            return false;
-        };
-        if let Some(fwd) = self.forward_task.take() {
-            let _ = fwd.await;
-        }
-        while let Ok(ev) = self.engine_rx.try_recv() {
-            app.apply_engine_event(&ev);
-        }
-        while let Ok(ev) = self.stream_rx.try_recv() {
-            app.push_stream_event(ev);
-        }
-        match handle.await {
+    fn apply_task_result(
+        app: &mut App,
+        res: std::result::Result<Result<RunOutcome>, String>,
+    ) -> bool {
+        match res {
             Ok(Ok(_)) => false,
             Ok(Err(err)) => {
                 app.status = RunStatus::Error;
@@ -172,8 +157,62 @@ impl EngineController {
             Err(join_err) => {
                 app.status = RunStatus::Error;
                 app.awaiting_operator = false;
-                app.status_message = Some(join_err.to_string());
+                app.status_message = Some(join_err);
                 true
+            }
+        }
+    }
+
+    pub async fn poll_finished(&mut self, app: &mut App) -> bool {
+        let finished = self.task.as_ref().is_some_and(JoinHandle::is_finished);
+        if !finished {
+            return false;
+        }
+        let Some(handle) = self.task.take() else {
+            return false;
+        };
+        while let Ok(ev) = self.engine_rx.try_recv() {
+            app.apply_engine_event(&ev);
+        }
+        while let Ok(ev) = self.stream_rx.try_recv() {
+            app.push_stream_event(ev);
+        }
+        Self::apply_task_result(app, handle.await.map_err(|join_err| join_err.to_string()))
+    }
+
+    pub async fn shutdown(&mut self, app: &mut App) {
+        self.cancel.cancel();
+        let Some(mut handle) = self.task.take() else {
+            return;
+        };
+        let timed = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    res = &mut handle => break res,
+                    Some(ev) = self.engine_rx.recv() => {
+                        app.apply_engine_event(&ev);
+                    }
+                    Some(sev) = self.stream_rx.recv() => {
+                        app.push_stream_event(sev);
+                    }
+                }
+            }
+        })
+        .await;
+
+        match timed {
+            Ok(join_res) => {
+                while let Ok(ev) = self.engine_rx.try_recv() {
+                    app.apply_engine_event(&ev);
+                }
+                while let Ok(ev) = self.stream_rx.try_recv() {
+                    app.push_stream_event(ev);
+                }
+                let _ =
+                    Self::apply_task_result(app, join_res.map_err(|join_err| join_err.to_string()));
+            }
+            Err(_) => {
+                handle.abort();
             }
         }
     }
@@ -210,49 +249,76 @@ impl EngineController {
                     self.task = Some(prev);
                     return Ok(());
                 }
-                if let Some(fwd) = self.forward_task.take() {
-                    fwd.abort();
-                }
 
-                let backends = (self.make_backends)()?;
-                let engine = Arc::new(build_engine(&self.store, backends).await?);
-
-                let mut eng_sub = engine.subscribe();
-                let mut stream_sub = engine.subscribe_stream();
-                self.operator_tx = Some(engine.operator_sender());
+                let (op_tx, mut op_rx) = mpsc::channel::<OperatorDecision>(8);
+                self.operator_tx = Some(op_tx);
                 self.cancel = CancellationToken::new();
                 let child_token = self.cancel.child_token();
-                let run_done = CancellationToken::new();
-                let run_done_fwd = run_done.clone();
 
-                let eng_tx_fwd = self.engine_tx.clone();
-                let stream_tx_fwd = self.stream_tx.clone();
+                app.status = RunStatus::Running;
+                app.awaiting_operator = false;
 
-                self.forward_task = Some(tokio::spawn(async move {
+                let store = self.store.clone();
+                let make_backends = Arc::clone(&self.make_backends);
+                let eng_tx = self.engine_tx.clone();
+                let stream_tx = self.stream_tx.clone();
+
+                self.task = Some(tokio::spawn(async move {
+                    let backends = (make_backends)()?;
+                    let engine = build_engine(&store, backends).await?;
+
+                    let mut eng_sub = engine.subscribe();
+                    let mut stream_sub = engine.subscribe_stream();
+                    let eng_op_tx = engine.operator_sender();
+                    let stream_tx_reserve = stream_tx.clone();
+
+                    let opts = RunOptions {
+                        wait_for_operator: true,
+                        ..RunOptions::default()
+                    };
+                    let run_fut = engine.run(opts, child_token);
+                    tokio::pin!(run_fut);
+
+                    let mut op_open = true;
                     let mut stream_open = true;
                     let mut events_open = true;
-                    loop {
+                    let mut dropped: u64 = 0;
+
+                    let res = loop {
                         tokio::select! {
                             biased;
+                            maybe_dec = op_rx.recv(), if op_open => {
+                                match maybe_dec {
+                                    Some(dec) => {
+                                        let _ = eng_op_tx.send(dec).await;
+                                    }
+                                    None => {
+                                        op_open = false;
+                                    }
+                                }
+                            }
                             res = stream_sub.recv(), if stream_open => {
                                 match res {
                                     Ok(sev) => {
-                                        let _ = stream_tx_fwd.send(sev).await;
+                                        forward_stream_event(&stream_tx, &mut dropped, sev);
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                        let _ = stream_tx_fwd
-                                            .send(StreamEvent::notice(format!("{n} stream events dropped")))
-                                            .await;
+                                        dropped += n;
+                                        let _ = flush_dropped_notice(&stream_tx, &mut dropped);
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                         stream_open = false;
                                     }
                                 }
                             }
+                            Ok(permit) = stream_tx_reserve.reserve(), if dropped > 0 => {
+                                let n = std::mem::take(&mut dropped);
+                                permit.send(StreamEvent::notice(format!("{n} stream events dropped")));
+                            }
                             res = eng_sub.recv(), if events_open => {
                                 match res {
                                     Ok(ev) => {
-                                        let _ = eng_tx_fwd.send(ev).await;
+                                        let _ = eng_tx.send(ev).await;
                                     }
                                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                         events_open = false;
@@ -260,67 +326,52 @@ impl EngineController {
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                                 }
                             }
-                            () = run_done_fwd.cancelled() => {
-                                drain_remaining(&mut stream_sub, &mut eng_sub, &stream_tx_fwd, &eng_tx_fwd).await;
-                                break;
+                            res = &mut run_fut => {
+                                break res;
                             }
                         }
-                    }
-                }));
-
-                app.status = RunStatus::Running;
-                app.awaiting_operator = false;
-
-                let stream_tx_task = self.stream_tx.clone();
-                let engine_run = Arc::clone(&engine);
-                self.task = Some(tokio::spawn(async move {
-                    let opts = RunOptions {
-                        wait_for_operator: true,
-                        ..RunOptions::default()
                     };
-                    let res = engine_run.run(opts, child_token).await;
+
+                    drain_remaining(
+                        &mut stream_sub,
+                        &mut eng_sub,
+                        &stream_tx,
+                        &eng_tx,
+                        &mut dropped,
+                    )
+                    .await;
+
                     if let Err(ref err) = res {
-                        let _ = stream_tx_task
-                            .send(StreamEvent {
-                                kind: StreamEventKind::Error,
-                                text: err.to_string(),
-                                ..StreamEvent::notice("")
-                            })
-                            .await;
+                        let _ = stream_tx.try_send(StreamEvent {
+                            kind: StreamEventKind::Error,
+                            text: err.to_string(),
+                            ..StreamEvent::notice("")
+                        });
                     }
-                    run_done.cancel();
+
                     res
                 }));
             }
             AppAction::Interrupt => {
                 self.cancel.cancel();
-                if let Some(handle) = self.task.take() {
-                    let _ = handle.await;
-                }
-                if let Some(fwd) = self.forward_task.take() {
-                    let _ = fwd.await;
-                }
-                while let Ok(ev) = self.engine_rx.try_recv() {
-                    app.apply_engine_event(&ev);
-                }
-                while let Ok(ev) = self.stream_rx.try_recv() {
-                    app.push_stream_event(ev);
-                }
-                app.status = RunStatus::Idle;
-                app.awaiting_operator = false;
+                app.status_message = Some("Stopping…".into());
             }
             AppAction::Approve => {
-                if let Some(tx) = &self.operator_tx {
-                    let _ = tx.send(OperatorDecision::Approve).await;
+                if let Some(tx) = &self.operator_tx
+                    && let Err(mpsc::error::TrySendError::Full(_)) =
+                        tx.try_send(OperatorDecision::Approve)
+                {
+                    app.status_message = Some("operator decision dropped: channel full".into());
                 }
             }
             AppAction::Reject(feedback) => {
-                if let Some(tx) = &self.operator_tx {
-                    let _ = tx
-                        .send(OperatorDecision::Reject {
+                if let Some(tx) = &self.operator_tx
+                    && let Err(mpsc::error::TrySendError::Full(_)) =
+                        tx.try_send(OperatorDecision::Reject {
                             feedback: feedback.clone(),
                         })
-                        .await;
+                {
+                    app.status_message = Some("operator decision dropped: channel full".into());
                 }
             }
             AppAction::SetMouseCapture(_) | AppAction::Quit => {}
@@ -329,21 +380,49 @@ impl EngineController {
     }
 }
 
+fn flush_dropped_notice(stream_tx: &mpsc::Sender<StreamEvent>, dropped: &mut u64) -> bool {
+    if *dropped == 0 {
+        return true;
+    }
+    let notice = StreamEvent::notice(format!("{} stream events dropped", *dropped));
+    match stream_tx.try_send(notice) {
+        Ok(()) => {
+            *dropped = 0;
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => false,
+    }
+}
+
+fn forward_stream_event(
+    stream_tx: &mpsc::Sender<StreamEvent>,
+    dropped: &mut u64,
+    sev: StreamEvent,
+) {
+    if flush_dropped_notice(stream_tx, dropped) {
+        if let Err(mpsc::error::TrySendError::Full(_)) = stream_tx.try_send(sev) {
+            *dropped += 1;
+        }
+    } else {
+        *dropped += 1;
+    }
+}
+
 async fn drain_remaining(
     stream_sub: &mut tokio::sync::broadcast::Receiver<StreamEvent>,
     eng_sub: &mut tokio::sync::broadcast::Receiver<EngineEvent>,
     stream_tx: &mpsc::Sender<StreamEvent>,
     eng_tx: &mpsc::Sender<EngineEvent>,
+    dropped: &mut u64,
 ) {
     loop {
         match stream_sub.try_recv() {
             Ok(sev) => {
-                let _ = stream_tx.send(sev).await;
+                forward_stream_event(stream_tx, dropped, sev);
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                let _ = stream_tx
-                    .send(StreamEvent::notice(format!("{n} stream events dropped")))
-                    .await;
+                *dropped += n;
+                let _ = flush_dropped_notice(stream_tx, dropped);
             }
             Err(
                 tokio::sync::broadcast::error::TryRecvError::Empty
@@ -351,6 +430,7 @@ async fn drain_remaining(
             ) => break,
         }
     }
+    let _ = flush_dropped_notice(stream_tx, dropped);
     loop {
         match eng_sub.try_recv() {
             Ok(ev) => {
@@ -568,6 +648,7 @@ pub async fn run_tui(project_root: PathBuf) -> Result<()> {
         }
     }
 
+    controller.shutdown(&mut app).await;
     Ok(())
 }
 
@@ -841,9 +922,16 @@ mod tests {
         assert_eq!(app.status, RunStatus::Running);
 
         controller
+            .handle(&AppAction::Run, &mut app)
+            .await
+            .expect("second Run while running is no-op");
+
+        controller
             .handle(&AppAction::Interrupt, &mut app)
             .await
             .expect("clean up running task");
+        controller.shutdown(&mut app).await;
+        controller.shutdown(&mut app).await;
     }
 
     #[tokio::test]
@@ -891,8 +979,111 @@ mod tests {
             .handle(&AppAction::Interrupt, &mut app)
             .await
             .expect("handle Interrupt");
+        controller.shutdown(&mut app).await;
 
         assert_eq!(app.status, RunStatus::Idle);
+        let cp = checkpoints
+            .load_state()
+            .expect("load checkpoint")
+            .expect("checkpoint exists");
+        assert_eq!(cp.step_statuses[0], StepStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn run_build_failure_reported_via_poll() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::GateAndOperator);
+        let mut controller = EngineController::new(
+            store,
+            Box::new(|| {
+                Err(Error::Validation {
+                    field: "x".into(),
+                    message: "no backends".into(),
+                })
+            }),
+        );
+
+        controller
+            .handle(&AppAction::Run, &mut app)
+            .await
+            .expect("handle Run");
+        assert_eq!(app.status, RunStatus::Running);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if controller.poll_finished(&mut app).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("poll_finished timed out");
+
+        assert_eq!(app.status, RunStatus::Error);
+        assert!(
+            app.status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("no backends")),
+            "expected status_message containing 'no backends', got {:?}",
+            app.status_message
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_returns_without_waiting() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::GateAndOperator);
+        let regions = UiLayoutRegions::compute(Rect::new(0, 0, 100, 30), 2, 0, 0);
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.set_delay(Duration::from_secs(10));
+        driver.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::StepPassed,
+                summary: "passed".into(),
+                target_stage: None,
+                allocations: Vec::new(),
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        let driver_for_factory = Arc::clone(&driver);
+
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver_for_factory) as _))),
+        );
+
+        controller
+            .handle(&AppAction::Run, &mut app)
+            .await
+            .expect("handle Run");
+
+        loop {
+            let input = tokio::time::timeout(Duration::from_secs(5), controller.next_event())
+                .await
+                .expect("timed out");
+            let is_round = matches!(input, BridgeInput::Engine(EngineEvent::RoundStarted { .. }));
+            let _ = step(&mut app, &regions, input);
+            if is_round {
+                break;
+            }
+        }
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            controller.handle(&AppAction::Interrupt, &mut app),
+        )
+        .await
+        .expect("Interrupt did not return within 100 ms")
+        .expect("handle Interrupt");
+
+        assert_eq!(app.status_message.as_deref(), Some("Stopping…"));
+
+        tokio::time::timeout(Duration::from_secs(5), controller.shutdown(&mut app))
+            .await
+            .expect("shutdown timed out");
+
         let cp = checkpoints
             .load_state()
             .expect("load checkpoint")
@@ -1054,6 +1245,53 @@ mod tests {
             .handle(&AppAction::Reject("nope".into()), &mut app)
             .await
             .expect("reject with no active channel");
+
+        let (op_tx, _op_rx) = mpsc::channel(1);
+        op_tx
+            .try_send(OperatorDecision::Approve)
+            .expect("fill 1-slot op channel");
+        controller.operator_tx = Some(op_tx);
+        controller
+            .handle(&AppAction::Approve, &mut app)
+            .await
+            .expect("approve on full channel");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("operator decision dropped: channel full")
+        );
+        app.status_message = None;
+        controller
+            .handle(&AppAction::Reject("nope".into()), &mut app)
+            .await
+            .expect("reject on full channel");
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("operator decision dropped: channel full")
+        );
+
+        let (st_tx, mut st_rx) = mpsc::channel(2);
+        let mut dropped = 0;
+        forward_stream_event(&st_tx, &mut dropped, StreamEvent::notice("e1"));
+        forward_stream_event(&st_tx, &mut dropped, StreamEvent::notice("e2"));
+        assert_eq!(dropped, 0);
+        forward_stream_event(&st_tx, &mut dropped, StreamEvent::notice("e3"));
+        forward_stream_event(&st_tx, &mut dropped, StreamEvent::notice("e4"));
+        assert_eq!(dropped, 2);
+        assert_eq!(st_rx.try_recv().expect("e1").text, "e1");
+        forward_stream_event(&st_tx, &mut dropped, StreamEvent::notice("e5"));
+        assert_eq!(dropped, 1);
+        assert_eq!(st_rx.try_recv().expect("e2").text, "e2");
+        assert_eq!(
+            st_rx.try_recv().expect("dropped notice").text,
+            "2 stream events dropped"
+        );
+        assert!(flush_dropped_notice(&st_tx, &mut dropped));
+        assert_eq!(dropped, 0);
+        assert_eq!(
+            st_rx.try_recv().expect("second dropped notice").text,
+            "1 stream events dropped"
+        );
+
         controller
             .handle(&AppAction::SetMouseCapture(false), &mut app)
             .await
