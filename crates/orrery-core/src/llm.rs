@@ -327,6 +327,13 @@ pub fn endpoint_for(agent: &AgentConfig, inference: &[InferenceConfig]) -> Resul
     }
 }
 
+pub fn estimate_tokens(body: &serde_json::Value) -> usize {
+    match serde_json::to_string(body) {
+        Ok(s) => s.len().div_ceil(4),
+        Err(_) => usize::MAX,
+    }
+}
+
 pub fn build_chat_request(
     inv: &AgentInvocation,
     messages: &[serde_json::Value],
@@ -344,17 +351,16 @@ pub fn build_chat_request(
     let mut tools: Vec<serde_json::Value> = inv
         .tools
         .iter()
-        .map(|tool| {
-            let mapped_name = format_mapped_tool_name(&tool.server_id, &tool.name)
-                .unwrap_or_else(|_| format!("{}__{}", tool.server_id, tool.name));
-            serde_json::json!({
+        .filter_map(|tool| {
+            let mapped_name = format_mapped_tool_name(&tool.server_id, &tool.name).ok()?;
+            Some(serde_json::json!({
                 "type": "function",
                 "function": {
                     "name": mapped_name,
                     "description": tool.description,
                     "parameters": tool.input_schema,
                 }
-            })
+            }))
         })
         .collect();
 
@@ -977,6 +983,23 @@ impl AgentDriver for HttpChatDriver {
 
         loop {
             let body = build_chat_request(inv, state.messages());
+            if let AgentBackend::LocalModel {
+                max_context_tokens, ..
+            }
+            | AgentBackend::CloudApi {
+                max_context_tokens, ..
+            } = &inv.agent.backend
+            {
+                let est = estimate_tokens(&body);
+                if est > *max_context_tokens {
+                    return Err(Error::Agent {
+                        agent_id: inv.agent.agent_id.clone(),
+                        message: format!(
+                            "prompt is about {est} tokens, over max_context_tokens {max_context_tokens}"
+                        ),
+                    });
+                }
+            }
             let mut req = self.client.post(&url).json(&body);
             if let Some(value) = auth_header_value(&inv.agent, self.secrets.as_ref())? {
                 req = req.header(reqwest::header::AUTHORIZATION, value);
@@ -3418,5 +3441,87 @@ mod tests {
         let v = hdr.expect("expected Some header value for CloudApi");
         assert!(v.is_sensitive());
         assert_eq!(v.to_str().unwrap(), "Bearer test-token-123");
+    }
+
+    #[test]
+    fn estimate_tokens_bytes_div_4() {
+        let s = serde_json::json!("abcd");
+        assert_eq!(serde_json::to_string(&s).unwrap().len(), 6);
+        assert_eq!(estimate_tokens(&s), 2);
+
+        let obj = serde_json::json!({});
+        assert_eq!(serde_json::to_string(&obj).unwrap().len(), 2);
+        assert_eq!(estimate_tokens(&obj), 1);
+    }
+
+    #[tokio::test]
+    async fn context_preflight_rejects_before_request() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let inference = vec![sample_inference("local-1", "http://127.0.0.1:9")];
+        let driver = HttpChatDriver::new(secrets, inference);
+
+        let mut inv = sample_invocation("coder-1");
+        inv.agent.backend = AgentBackend::LocalModel {
+            inference_id: "local-1".to_string(),
+            model: "qwen-coder".to_string(),
+            temperature: 0.2,
+            max_context_tokens: 10,
+        };
+
+        let err = driver.run_turn(&inv, &mcp, &hub).await.unwrap_err();
+        match err {
+            Error::Agent { agent_id, message } => {
+                assert_eq!(agent_id, "coder-1");
+                assert!(
+                    message.starts_with("prompt is about "),
+                    "unexpected message: {message}"
+                );
+                assert!(
+                    message.contains("over max_context_tokens 10"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Error::Agent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmappable_tool_left_out_of_request() {
+        let mut inv = sample_invocation("coder-1");
+        inv.tools = vec![
+            McpToolSchema {
+                server_id: "fs".to_string(),
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            McpToolSchema {
+                server_id: "fs".to_string(),
+                name: "read.file".to_string(),
+                description: "Read a file with dot".to_string(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ];
+
+        let messages = vec![
+            serde_json::json!({"role": "system", "content": inv.system_prompt}),
+            serde_json::json!({"role": "user", "content": inv.user_prompt}),
+        ];
+        let req = build_chat_request(&inv, &messages);
+        let names: Vec<&str> = req["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["fs__read_file", "submit_report"]);
     }
 }
