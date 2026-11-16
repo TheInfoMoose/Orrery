@@ -154,15 +154,21 @@ fn render_top_menu(frame: &mut Frame, app: &App, regions: &UiLayoutRegions) {
     let block = panel_block(focused, " Controls ");
     frame.render_widget(block, regions.top_menu);
 
-    let passed_count = app
-        .step_statuses
-        .iter()
-        .filter(|&&s| s == StepStatus::Passed)
-        .count();
-    let total_steps = app
-        .plan
-        .as_ref()
-        .map_or(app.step_statuses.len(), |p| p.steps.len());
+    let (passed_x, passed_y) =
+        if app.config.execution_mode == ExecutionMode::Loop && app.config.cycle_count > 0 {
+            (app.run_passed, app.config.cycle_count)
+        } else {
+            let passed_count = app
+                .step_statuses
+                .iter()
+                .filter(|&&s| s == StepStatus::Passed)
+                .count();
+            let total_steps = app
+                .plan
+                .as_ref()
+                .map_or(app.step_statuses.len(), |p| p.steps.len());
+            (passed_count, total_steps)
+        };
 
     for (idx, &(region, rect)) in regions.top_items.iter().enumerate() {
         let selected = focused && app.top_index == idx;
@@ -189,10 +195,7 @@ fn render_top_menu(frame: &mut Frame, app: &App, regions: &UiLayoutRegions) {
                 };
                 (format!("[Cycles: {}]", app.config.cycle_count), style)
             }
-            UiRegion::PassedCounter => (
-                format!("[Passed: {passed_count}/{total_steps}]"),
-                muted().bg(bg),
-            ),
+            UiRegion::PassedCounter => (format!("[Passed: {passed_x}/{passed_y}]"), muted().bg(bg)),
             UiRegion::StagesMinus => ("[-]".to_string(), Style::default().fg(AMBER_PRIMARY).bg(bg)),
             UiRegion::StagesPlus => ("[+]".to_string(), Style::default().fg(AMBER_PRIMARY).bg(bg)),
             _ => continue,
@@ -563,19 +566,48 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     match &app.modal {
         Modal::None => {}
-        Modal::Ingest { input } => {
+        Modal::Ingest {
+            input,
+            marker,
+            marker_focused,
+        } => {
             let block = focused_block().title(" Ingest Plan ");
+            let focused_style = Style::default()
+                .fg(AMBER_BRIGHT)
+                .bg(PANEL_BG)
+                .add_modifier(Modifier::BOLD);
+            let normal_style = Style::default().fg(AMBER_PRIMARY).bg(PANEL_BG);
+            let (path_style, marker_style) = if *marker_focused {
+                (normal_style, focused_style)
+            } else {
+                (focused_style, normal_style)
+            };
             let lines = vec![
+                Line::from(Span::styled(format!("Path: {input}"), path_style)),
+                Line::from(Span::styled(format!("Marker: {marker}"), marker_style)),
                 Line::from(Span::styled(
-                    "Enter plan file path (Enter to ingest, Esc to cancel):",
+                    "Tab switches field (Enter to ingest, Esc to cancel)",
                     Style::default().fg(AMBER_DIM).bg(PANEL_BG),
                 )),
+            ];
+            let widget = Paragraph::new(lines)
+                .block(block)
+                .style(Style::default().fg(AMBER_PRIMARY).bg(PANEL_BG));
+            frame.render_widget(widget, modal_rect);
+        }
+        Modal::CyclesEntry { input } => {
+            let block = focused_block().title(" Set Cycles ");
+            let lines = vec![
                 Line::from(Span::styled(
-                    format!("> {input}_"),
+                    format!("Cycles (0 = until out of steps): {input}"),
                     Style::default()
                         .fg(AMBER_BRIGHT)
                         .bg(PANEL_BG)
                         .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "Enter to apply, Esc to cancel",
+                    Style::default().fg(AMBER_DIM).bg(PANEL_BG),
                 )),
             ];
             let widget = Paragraph::new(lines)
@@ -1174,7 +1206,15 @@ mod tests {
             Modal::None,
             Modal::Ingest {
                 input: "STEPPED_IMPLEMENTATION_PLAN.md".into(),
+                marker: "## Step ".into(),
+                marker_focused: false,
             },
+            Modal::Ingest {
+                input: "STEPPED_IMPLEMENTATION_PLAN.md".into(),
+                marker: "## Step ".into(),
+                marker_focused: true,
+            },
+            Modal::CyclesEntry { input: "12".into() },
             Modal::Settings,
             Modal::Help,
             Modal::QuitConfirm,
@@ -1249,6 +1289,30 @@ mod tests {
         assert!(
             text.contains("MCP servers: fs"),
             "expected 'MCP servers: fs' in Settings modal, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn passed_counter_shows_loop_progress() {
+        let mut app = test_app();
+        app.step_statuses = vec![StepStatus::Passed, StepStatus::Pending, StepStatus::Pending];
+        app.config.execution_mode = ExecutionMode::Loop;
+        app.config.cycle_count = 5;
+        app.run_passed = 2;
+
+        let (buf_loop, regions_loop) = draw_app(&app, 80, 24);
+        let top_loop = rect_text(&buf_loop, regions_loop.top_menu);
+        assert!(
+            top_loop.contains("[Passed: 2/5]"),
+            "expected '[Passed: 2/5]' in Loop mode, got:\n{top_loop}"
+        );
+
+        app.config.execution_mode = ExecutionMode::Run;
+        let (buf_run, regions_run) = draw_app(&app, 80, 24);
+        let top_run = rect_text(&buf_run, regions_run.top_menu);
+        assert!(
+            top_run.contains("[Passed: 1/3]"),
+            "expected '[Passed: 1/3]' in Run mode, got:\n{top_run}"
         );
     }
 }

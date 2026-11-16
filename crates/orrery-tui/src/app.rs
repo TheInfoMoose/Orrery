@@ -82,6 +82,11 @@ pub enum Modal {
     None,
     Ingest {
         input: String,
+        marker: String,
+        marker_focused: bool,
+    },
+    CyclesEntry {
+        input: String,
     },
     Settings,
     Help,
@@ -135,6 +140,7 @@ pub struct App {
     pub awaiting_operator: bool,
     pub status_message: Option<String>,
     pub should_quit: bool,
+    pub run_passed: usize,
 }
 
 impl App {
@@ -169,6 +175,7 @@ impl App {
             awaiting_operator: false,
             status_message: None,
             should_quit: false,
+            run_passed: 0,
         }
     }
 
@@ -268,7 +275,10 @@ impl App {
                         self.status = RunStatus::Running;
                         self.awaiting_operator = false;
                     }
-                    StepStatus::Pending | StepStatus::Passed => {}
+                    StepStatus::Passed => {
+                        self.run_passed = self.run_passed.saturating_add(1);
+                    }
+                    StepStatus::Pending => {}
                 }
             }
             EngineEvent::RoundStarted { .. } => {
@@ -331,11 +341,60 @@ impl App {
 
         // Rows 2-5: Modal handling.
         match &mut self.modal {
-            // Row 2: Text modal (Ingest, RejectFeedback)
-            Modal::Ingest { input } => {
+            // Row 2: Text modal (Ingest, CyclesEntry, RejectFeedback)
+            Modal::Ingest {
+                input,
+                marker,
+                marker_focused,
+            } => {
                 return match key.code {
+                    KeyCode::Tab | KeyCode::BackTab => {
+                        *marker_focused = !*marker_focused;
+                        Vec::new()
+                    }
                     KeyCode::Char(c) if !c.is_control() => {
-                        input.push(c);
+                        if *marker_focused {
+                            marker.push(c);
+                        } else {
+                            input.push(c);
+                        }
+                        Vec::new()
+                    }
+                    KeyCode::Backspace => {
+                        if *marker_focused {
+                            marker.pop();
+                        } else {
+                            input.pop();
+                        }
+                        Vec::new()
+                    }
+                    KeyCode::Enter => {
+                        if marker.trim().is_empty() {
+                            self.status_message = Some("step marker must not be empty".to_string());
+                            Vec::new()
+                        } else {
+                            let path = PathBuf::from(std::mem::take(input));
+                            let new_marker = std::mem::take(marker);
+                            if self.config.step_marker != new_marker {
+                                self.config.step_marker = new_marker;
+                            }
+                            self.modal = Modal::None;
+                            vec![AppAction::IngestPlan(path)]
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.modal = Modal::None;
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            Modal::CyclesEntry { input } => {
+                return match key.code {
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        if input.len() < 3 {
+                            input.push(c);
+                        }
                         Vec::new()
                     }
                     KeyCode::Backspace => {
@@ -343,9 +402,15 @@ impl App {
                         Vec::new()
                     }
                     KeyCode::Enter => {
-                        let path = PathBuf::from(std::mem::take(input));
+                        let text = std::mem::take(input);
+                        let n = if text.is_empty() {
+                            0
+                        } else {
+                            text.parse::<usize>().unwrap_or(0)
+                        };
+                        self.config.cycle_count = n;
                         self.modal = Modal::None;
-                        vec![AppAction::IngestPlan(path)]
+                        vec![AppAction::SetCycles(n)]
                     }
                     KeyCode::Esc => {
                         self.modal = Modal::None;
@@ -591,6 +656,8 @@ impl App {
                 0 => {
                     self.modal = Modal::Ingest {
                         input: String::new(),
+                        marker: self.config.step_marker.clone(),
+                        marker_focused: false,
                     };
                     Vec::new()
                 }
@@ -601,6 +668,14 @@ impl App {
                     };
                     self.config.execution_mode = toggled;
                     vec![AppAction::SetMode(toggled)]
+                }
+                2 => {
+                    if self.config.execution_mode == ExecutionMode::Loop {
+                        self.modal = Modal::CyclesEntry {
+                            input: self.config.cycle_count.to_string(),
+                        };
+                    }
+                    Vec::new()
                 }
                 4 => self.change_stage_count(-1),
                 5 => self.change_stage_count(1),
@@ -1253,7 +1328,9 @@ mod tests {
         assert_eq!(
             app.modal,
             Modal::Ingest {
-                input: String::new()
+                input: String::new(),
+                marker: app.config.step_marker.clone(),
+                marker_focused: false,
             }
         );
 
@@ -1265,7 +1342,9 @@ mod tests {
         assert_eq!(
             app.modal,
             Modal::Ingest {
-                input: "qm?".to_string()
+                input: "qm?".to_string(),
+                marker: app.config.step_marker.clone(),
+                marker_focused: false,
             }
         );
 
@@ -1273,7 +1352,9 @@ mod tests {
         assert_eq!(
             app.modal,
             Modal::Ingest {
-                input: "qm".to_string()
+                input: "qm".to_string(),
+                marker: app.config.step_marker.clone(),
+                marker_focused: false,
             }
         );
     }
@@ -1753,7 +1834,9 @@ mod tests {
         assert_eq!(
             app.modal,
             Modal::Ingest {
-                input: String::new()
+                input: String::new(),
+                marker: app.config.step_marker.clone(),
+                marker_focused: false,
             }
         );
     }
@@ -2027,5 +2110,105 @@ mod tests {
         assert!(actions.is_empty());
         assert_eq!(app.focus, Focus::StepsPanel);
         assert_eq!(app.step_selected, 12);
+    }
+
+    #[test]
+    fn cycles_entry_sets_cycles() {
+        let mut app = make_app();
+        app.config.execution_mode = ExecutionMode::Loop;
+        app.top_index = 2;
+        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            app.modal,
+            Modal::CyclesEntry {
+                input: "0".to_string()
+            }
+        );
+
+        assert!(app.handle_key_event(key(KeyCode::Backspace)).is_empty());
+        assert_eq!(
+            app.modal,
+            Modal::CyclesEntry {
+                input: String::new()
+            }
+        );
+
+        for c in ['1', '2'] {
+            assert!(app.handle_key_event(key(KeyCode::Char(c))).is_empty());
+        }
+        let actions = app.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(actions, vec![AppAction::SetCycles(12)]);
+        assert_eq!(app.config.cycle_count, 12);
+        assert_eq!(app.modal, Modal::None);
+    }
+
+    #[test]
+    fn cycles_entry_ignored_in_run_mode() {
+        let mut app = make_app();
+        assert_eq!(app.config.execution_mode, ExecutionMode::Run);
+        app.top_index = 2;
+        assert!(app.handle_key_event(key(KeyCode::Enter)).is_empty());
+        assert_eq!(app.modal, Modal::None);
+    }
+
+    #[test]
+    fn ingest_modal_edits_marker() {
+        let mut app = make_app();
+        app.handle_key_event(key(KeyCode::Enter));
+        for c in "plan.md".chars() {
+            app.handle_key_event(key(KeyCode::Char(c)));
+        }
+        app.handle_key_event(key(KeyCode::Tab));
+        for _ in 0..app.config.step_marker.len() {
+            app.handle_key_event(key(KeyCode::Backspace));
+        }
+        for c in "### STEP ".chars() {
+            app.handle_key_event(key(KeyCode::Char(c)));
+        }
+        let actions = app.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(
+            actions,
+            vec![AppAction::IngestPlan(PathBuf::from("plan.md"))]
+        );
+        assert_eq!(app.config.step_marker, "### STEP ");
+        assert_eq!(app.modal, Modal::None);
+    }
+
+    #[test]
+    fn ingest_empty_marker_rejected() {
+        let mut app = make_app();
+        app.handle_key_event(key(KeyCode::Enter));
+        for c in "plan.md".chars() {
+            app.handle_key_event(key(KeyCode::Char(c)));
+        }
+        app.handle_key_event(key(KeyCode::Tab));
+        for _ in 0..app.config.step_marker.len() {
+            app.handle_key_event(key(KeyCode::Backspace));
+        }
+        for c in "   ".chars() {
+            app.handle_key_event(key(KeyCode::Char(c)));
+        }
+        let actions = app.handle_key_event(key(KeyCode::Enter));
+        assert!(actions.is_empty());
+        assert!(matches!(app.modal, Modal::Ingest { .. }));
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("step marker must not be empty")
+        );
+    }
+
+    #[test]
+    fn run_passed_counts_passed_events() {
+        let mut app = make_app();
+        assert_eq!(app.run_passed, 0);
+        app.apply_engine_event(&EngineEvent::StepStatusChanged {
+            step_number: 1,
+            status: StepStatus::Passed,
+        });
+        app.apply_engine_event(&EngineEvent::StepStatusChanged {
+            step_number: 2,
+            status: StepStatus::Passed,
+        });
+        assert_eq!(app.run_passed, 2);
     }
 }

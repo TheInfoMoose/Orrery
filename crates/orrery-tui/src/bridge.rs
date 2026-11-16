@@ -336,8 +336,20 @@ impl EngineController {
                 self.store.save_project(&app.config)?;
             }
             AppAction::IngestPlan(path) => {
-                let resolved = self.store.resolve_safe_path(path)?;
-                let plan = ImplementationPlan::from_file(&resolved, &app.config.step_marker)?;
+                let resolved = match self.store.resolve_safe_path(path) {
+                    Ok(p) => p,
+                    Err(err) => {
+                        app.config.step_marker = self.store.load_project()?.step_marker;
+                        return Err(err);
+                    }
+                };
+                let plan = match ImplementationPlan::from_file(&resolved, &app.config.step_marker) {
+                    Ok(plan) => plan,
+                    Err(err) => {
+                        app.config.step_marker = self.store.load_project()?.step_marker;
+                        return Err(err);
+                    }
+                };
                 let step_count = plan.steps.len();
                 app.config.plan_path = path.clone();
                 if app.config.step_marker.trim().is_empty() {
@@ -354,6 +366,7 @@ impl EngineController {
                 if self.has_running_task() {
                     return Ok(());
                 }
+                app.run_passed = 0;
                 self.start_run(app);
             }
             AppAction::Interrupt => {
@@ -1656,5 +1669,30 @@ mod tests {
             Some("no step awaiting operator")
         );
         assert!(controller.task.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_ingest_restores_marker() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::Auto);
+        assert_eq!(
+            store.load_project().expect("load project").step_marker,
+            "## Step "
+        );
+
+        let driver = Arc::new(MockAgentDriver::new());
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver) as _))),
+        );
+
+        app.config.step_marker = "@@ ".into();
+        let res = controller
+            .handle(
+                &AppAction::IngestPlan(PathBuf::from("missing.md")),
+                &mut app,
+            )
+            .await;
+        assert!(res.is_err());
+        assert_eq!(app.config.step_marker, "## Step ");
     }
 }
