@@ -19,15 +19,14 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 43** | `/goal` | Connect referenced MCP servers only, cap hook history | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | — |
-| 2 | **STEP 44** | `/boost` | Halted step-pass hook: Approve re-runs the hook | `crates/orrery-core/src/engine.rs` | — |
-| 3 | **STEP 45** | `/goal` | CLI error causes, status hint, log follower | `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/src/main.rs`, `crates/orrery-core/src/stream_log.rs` | — |
-| 4 | **STEP 46** | `/boost` | TUI controller never blocks the render loop | `crates/orrery-tui/src/bridge.rs` | — |
-| 5 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs` | — |
-| 6 | **STEP 48** | `/goal` | TUI cycles entry, Loop progress, ingest marker | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-tui/src/bridge.rs` | — |
-| 7 | **STEP 49** | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
-| 8 | **STEP 50** | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs` (NEW), `crates/orrery-core/Cargo.toml` | — |
-| 9 | **STEP 51** | `/goal` | Operator README | `README.md` (NEW) | — |
+| 1 | **STEP 44** | `/boost` | Halted step-pass hook: Approve re-runs the hook | `crates/orrery-core/src/engine.rs` | — |
+| 2 | **STEP 45** | `/goal` | CLI error causes, status hint, log follower | `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/src/main.rs`, `crates/orrery-core/src/stream_log.rs` | — |
+| 3 | **STEP 46** | `/boost` | TUI controller never blocks the render loop | `crates/orrery-tui/src/bridge.rs` | — |
+| 4 | **STEP 47** | `/boost` | TUI operator answers in every mode and after restart | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/bridge.rs` | — |
+| 5 | **STEP 48** | `/goal` | TUI cycles entry, Loop progress, ingest marker | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs`, `crates/orrery-tui/src/bridge.rs` | — |
+| 6 | **STEP 49** | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` | — |
+| 7 | **STEP 50** | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs` (NEW), `crates/orrery-core/Cargo.toml` | — |
+| 8 | **STEP 51** | `/goal` | Operator README | `README.md` (NEW) | — |
 
 ### Completed
 
@@ -76,6 +75,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 40** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Chat idle timeout, sensitive header, limits wiring | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 41** | **COMPLETED** (2026-11-15, validate-step PASS) | `/boost` | Live stream writer thread, configured sizes | `crates/orrery-core/src/stream_log.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 42** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Context preflight, unmappable tool names | `crates/orrery-core/src/llm.rs` |
+| **STEP 43** | **COMPLETED** (2026-11-15, validate-step PASS) | `/goal` | Connect referenced MCP servers only, cap hook history | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` |
 
 ---
 
