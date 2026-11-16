@@ -1858,6 +1858,7 @@ impl Backends {
             secrets: Arc::clone(&secrets),
             project_root: store.project_root().to_path_buf(),
             search_path: std::env::var_os("PATH"),
+            stream: std::sync::OnceLock::new(),
         });
         let drivers = DriverSet {
             chat: Arc::new(HttpChatDriver::new(Arc::clone(&secrets), inference)),
@@ -1931,6 +1932,7 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
         LiveStreamConfig::default(),
         redactor,
     )?);
+    backends.connector.attach_stream(Arc::clone(&stream));
 
     let mut gatekeeper = McpGatekeeper::new();
     for server in &servers {
@@ -5388,5 +5390,42 @@ mod tests {
             Error::Mcp { server_id, .. } => assert_eq!(server_id, "unknown_srv"),
             other => panic!("expected Error::Mcp, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn build_engine_attaches_stream_to_connector() {
+        use crate::mcp::{McpConnector, McpTransport};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RecordingConnector {
+            inner: MockMcpConnector,
+            attached: Arc<AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl McpConnector for RecordingConnector {
+            async fn connect(
+                &self,
+                server: &McpServerConfig,
+            ) -> crate::Result<Arc<dyn McpTransport>> {
+                self.inner.connect(server).await
+            }
+
+            fn attach_stream(&self, _stream: Arc<LiveStreamHub>) {
+                self.attached.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut backends, _mock_driver, _secrets) =
+            init_project_with_agents(dir.path(), true);
+        let attached = Arc::new(AtomicBool::new(false));
+        backends.connector = Arc::new(RecordingConnector {
+            inner: MockMcpConnector::default(),
+            attached: Arc::clone(&attached),
+        });
+
+        let _engine = build_engine(&store, backends).await.unwrap();
+        assert!(attached.load(Ordering::SeqCst));
     }
 }

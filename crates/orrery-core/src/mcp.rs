@@ -11,6 +11,7 @@ use crate::config::{
     validate_concrete_tool_ref, validate_safe_relative_path,
 };
 use crate::security::SecretStore;
+use crate::stream_log::{LiveStreamHub, StreamEvent};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub trait McpTransport: Send + Sync {
 #[async_trait]
 pub trait McpConnector: Send + Sync {
     async fn connect(&self, server: &McpServerConfig) -> Result<Arc<dyn McpTransport>>;
+    fn attach_stream(&self, _stream: Arc<LiveStreamHub>) {}
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -454,16 +456,41 @@ impl RmcpTransport {
         secrets: &dyn SecretStore,
         workdir: &Path,
     ) -> Result<Self> {
+        Self::connect_with_stream(server, secrets, workdir, None).await
+    }
+
+    pub async fn connect_with_stream(
+        server: &McpServerConfig,
+        secrets: &dyn SecretStore,
+        workdir: &Path,
+        stream: Option<Arc<LiveStreamHub>>,
+    ) -> Result<Self> {
         let server_id = server.server_id.clone();
         let service = match &server.transport {
             McpTransportConfig::Stdio { command, args } => {
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(args).current_dir(workdir);
-                let transport =
-                    rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| Error::Mcp {
-                        server_id: server_id.clone(),
-                        source: Box::new(e),
-                    })?;
+                let transport = match stream {
+                    None => {
+                        rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| Error::Mcp {
+                            server_id: server_id.clone(),
+                            source: Box::new(e),
+                        })?
+                    }
+                    Some(hub) => {
+                        let (transport, stderr) = rmcp::transport::TokioChildProcess::builder(cmd)
+                            .stderr(std::process::Stdio::piped())
+                            .spawn()
+                            .map_err(|e| Error::Mcp {
+                                server_id: server_id.clone(),
+                                source: Box::new(e),
+                            })?;
+                        if let Some(handle) = stderr {
+                            spawn_stderr_forwarder(server_id.clone(), handle, hub);
+                        }
+                        transport
+                    }
+                };
                 rmcp::ServiceExt::serve((), transport)
                     .await
                     .map_err(|e| Error::Mcp {
@@ -506,6 +533,25 @@ impl RmcpTransport {
 
         Ok(Self { server_id, service })
     }
+}
+
+pub fn spawn_stderr_forwarder<R>(
+    server_id: String,
+    stderr: R,
+    stream: Arc<LiveStreamHub>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !line.trim().is_empty() {
+                let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {line}")));
+            }
+        }
+    })
 }
 
 #[async_trait]
@@ -560,6 +606,7 @@ pub struct RmcpConnector {
     pub secrets: Arc<dyn SecretStore>,
     pub project_root: PathBuf,
     pub search_path: Option<OsString>,
+    pub stream: std::sync::OnceLock<Arc<LiveStreamHub>>,
 }
 
 #[async_trait]
@@ -585,13 +632,23 @@ impl McpConnector for RmcpConnector {
                     command: command_str,
                     args: args.clone(),
                 };
-                RmcpTransport::connect_in(&clone, self.secrets.as_ref(), &self.project_root).await?
+                RmcpTransport::connect_with_stream(
+                    &clone,
+                    self.secrets.as_ref(),
+                    &self.project_root,
+                    self.stream.get().cloned(),
+                )
+                .await?
             }
             McpTransportConfig::StreamableHttp { .. } => {
                 RmcpTransport::connect(server, self.secrets.as_ref()).await?
             }
         };
         Ok(Arc::new(transport))
+    }
+
+    fn attach_stream(&self, stream: Arc<LiveStreamHub>) {
+        let _ = self.stream.set(stream);
     }
 }
 
@@ -627,11 +684,12 @@ mod tests {
     use super::{
         McpConnector, McpGatekeeper, McpTransport, MockMcpConnector, MockMcpTransport,
         RmcpConnector, RmcpTransport, WriteScope, resolve_stdio_command, scopes_overlap,
-        tool_result_is_error, tool_result_text,
+        spawn_stderr_forwarder, tool_result_is_error, tool_result_text,
     };
     use crate::Error;
     use crate::config::{McpServerConfig, McpTransportConfig, RoleConfig, RoleKind, WriteToolSpec};
-    use crate::security::InMemorySecretStore;
+    use crate::security::{InMemorySecretStore, SecretRedactor, SecretValue};
+    use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEventKind};
 
     fn test_role(allowed_mcp_tools: Vec<&str>) -> RoleConfig {
         RoleConfig {
@@ -1032,6 +1090,7 @@ mod tests {
             secrets: Arc::new(InMemorySecretStore::new()),
             project_root: dir.path().to_path_buf(),
             search_path: None,
+            stream: std::sync::OnceLock::new(),
         };
         let conn_err = match connector.connect(&server).await {
             Ok(_) => panic!("expected Error::Keychain from RmcpConnector"),
@@ -1059,6 +1118,7 @@ mod tests {
             secrets: Arc::new(InMemorySecretStore::new()),
             project_root: dir.path().to_path_buf(),
             search_path: None,
+            stream: std::sync::OnceLock::new(),
         };
         let conn_res = connector.connect(&server).await;
         assert!(matches!(conn_res, Err(Error::Validation { .. })));
@@ -1213,5 +1273,62 @@ mod tests {
             Error::Validation { field, .. } => assert_eq!(field, "transport.command"),
             other => panic!("expected Error::Validation, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn stderr_forwarder_emits_redacted_notices() {
+        let redactor = Arc::new(SecretRedactor::new());
+        redactor
+            .register(&SecretValue::new("hunter2-secret-value"))
+            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs"),
+                LiveStreamConfig::default(),
+                redactor,
+            )
+            .unwrap(),
+        );
+        let input = &b"first line\n\n   \nleaks hunter2-secret-value\n"[..];
+        let handle = spawn_stderr_forwarder("fs".to_string(), input, Arc::clone(&hub));
+        handle.await.unwrap();
+
+        let events = hub.recent(10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, StreamEventKind::SystemNotice);
+        assert_eq!(events[0].text, "[mcp:fs] first line");
+        assert_eq!(events[1].kind, StreamEventKind::SystemNotice);
+        assert_eq!(events[1].text, "[mcp:fs] leaks [REDACTED]");
+    }
+
+    #[test]
+    fn attach_stream_first_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub_a = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs_a"),
+                LiveStreamConfig::default(),
+                Arc::new(SecretRedactor::new()),
+            )
+            .unwrap(),
+        );
+        let hub_b = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs_b"),
+                LiveStreamConfig::default(),
+                Arc::new(SecretRedactor::new()),
+            )
+            .unwrap(),
+        );
+        let connector = RmcpConnector {
+            secrets: Arc::new(InMemorySecretStore::new()),
+            project_root: tmp.path().to_path_buf(),
+            search_path: None,
+            stream: std::sync::OnceLock::new(),
+        };
+        connector.attach_stream(Arc::clone(&hub_a));
+        connector.attach_stream(Arc::clone(&hub_b));
+        assert!(Arc::ptr_eq(connector.stream.get().unwrap(), &hub_a));
     }
 }
