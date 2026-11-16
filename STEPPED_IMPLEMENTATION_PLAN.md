@@ -19,12 +19,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 52** | `/goal` | Zeroized Bearer header copy | `crates/orrery-core/src/llm.rs` | — |
-| 2 | **STEP 53** | `/goal` | Report hidden MCP tools | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` | — |
-| 3 | **STEP 54** | `/goal` | Byte-safe log follower | `crates/orrery-core/src/stream_log.rs` | — |
-| 4 | **STEP 55** | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` | STEP 54 (same file) |
-| 5 | **STEP 56** | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` | — |
-| 6 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
+| 1 | **STEP 53** | `/goal` | Report hidden MCP tools | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` | — |
+| 2 | **STEP 54** | `/goal` | Byte-safe log follower | `crates/orrery-core/src/stream_log.rs` | — |
+| 3 | **STEP 55** | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` | STEP 54 (same file) |
+| 4 | **STEP 56** | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` | — |
+| 5 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
 
 ### Completed
 
@@ -82,6 +81,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 49** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | TUI Settings warnings and agent details | `crates/orrery-tui/src/app.rs`, `crates/orrery-tui/src/widgets.rs` |
 | **STEP 50** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Live tests: CloudApi, AgentCli, real-backends run | `crates/orrery-core/tests/live_llm.rs`, `crates/orrery-core/tests/live_docker.rs`, `crates/orrery-core/tests/live_engine.rs`, `crates/orrery-core/Cargo.toml` |
 | **STEP 51** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Operator README | `README.md` |
+| **STEP 52** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Zeroized Bearer header copy | `crates/orrery-core/src/llm.rs` |
 
 ---
 
