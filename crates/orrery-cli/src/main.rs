@@ -12,7 +12,7 @@ use orrery_core::engine::Backends;
 use orrery_core::security::OsKeyringStore;
 
 use crate::args::Cli;
-use crate::commands::{CliContext, dispatch, exit_code_for};
+use crate::commands::{CliContext, dispatch, exit_code_for, render_error};
 
 fn read_secret_from_stdin() -> orrery_core::Result<String> {
     let mut line = String::new();
@@ -50,7 +50,7 @@ async fn main() -> ExitCode {
     let secrets = match OsKeyringStore::new() {
         Ok(store) => Arc::new(store),
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("{}", render_error(&err));
             return ExitCode::from(exit_code_for(&err));
         }
     };
@@ -66,7 +66,7 @@ async fn main() -> ExitCode {
     match dispatch(command, &project, &mut ctx).await {
         Ok(code) => ExitCode::from(code),
         Err(err) => {
-            let _ = writeln!(ctx.err, "{err}");
+            let _ = writeln!(ctx.err, "{}", render_error(&err));
             ExitCode::from(exit_code_for(&err))
         }
     }

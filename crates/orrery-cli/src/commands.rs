@@ -15,7 +15,7 @@ use orrery_core::config::{
 use orrery_core::engine::{Backends, RunOptions, RunOutcome, build_engine};
 use orrery_core::plan::ImplementationPlan;
 use orrery_core::security::{KeyringBackend, OsKeyringStore, SecretStore, SecretValue};
-use orrery_core::stream_log::{StreamEvent, tail_log};
+use orrery_core::stream_log::{LogFollower, StreamEvent, tail_log};
 use orrery_core::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +32,16 @@ pub struct CliContext {
     pub secrets: Arc<dyn SecretStore>,
     pub read_secret: ReadSecretFn,
     pub make_backends: MakeBackendsFn,
+}
+
+pub fn render_error(err: &Error) -> String {
+    let mut out = err.to_string();
+    let mut current = std::error::Error::source(err);
+    while let Some(source) = current {
+        out.push_str(&format!(": {source}"));
+        current = source.source();
+    }
+    out
 }
 
 pub fn exit_code_for(err: &Error) -> u8 {
@@ -420,10 +430,7 @@ fn dispatch_agent(command: AgentCmd, project: &Path, ctx: &mut CliContext) -> Re
             write_stdout_line(ctx, &format!("display_name: {}", agent.display_name))?;
             write_stdout_line(ctx, &format!("backend: {:?}", agent.backend))?;
             if matches!(agent.backend, AgentBackend::AgentCli { .. }) {
-                write_stdout_line(
-                    ctx,
-                    "Guardrails: The MCP gatekeeper does not see a CLI's built-in tools. Guardrails are: workspace_mount, container isolation, memory/time limits, and whatever tool config the image ships.",
-                )?;
+                write_stdout_line(ctx, orrery_core::config::AGENT_CLI_GUARDRAIL_NOTE)?;
             }
             Ok(0)
         }
@@ -821,6 +828,15 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
     let store = ConfigStore::new(project, None)?;
     let cfg = store.load_project()?;
     let resolved = store.resolve_safe_path(&cfg.plan_path)?;
+    if !resolved.is_file() {
+        return Err(Error::Validation {
+            field: "plan_path".into(),
+            message: format!(
+                "plan file '{}' not found; run `orrery ingest <MD_FILE>` first",
+                cfg.plan_path.display()
+            ),
+        });
+    }
     let plan = ImplementationPlan::from_file(&resolved, &cfg.step_marker)?;
     let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
     let state = checkpoints.load_state()?;
@@ -915,21 +931,18 @@ async fn dispatch_logs(
         write_stdout_line(ctx, line)?;
     }
     if follow {
-        let mut seen = tail_log(&log_dir, usize::MAX)?.len();
+        let mut follower = LogFollower::new(&log_dir)?;
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
+                _ = &mut ctrl_c => {
                     return Ok(130);
                 }
                 () = tokio::time::sleep(Duration::from_millis(500)) => {
-                    let all = tail_log(&log_dir, usize::MAX)?;
-                    if all.len() < seen {
-                        seen = 0;
+                    for line in follower.poll()? {
+                        write_stdout_line(ctx, &line)?;
                     }
-                    for line in all.iter().skip(seen) {
-                        write_stdout_line(ctx, line)?;
-                    }
-                    seen = all.len();
                 }
             }
         }
@@ -3271,6 +3284,48 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn render_error_includes_source() {
+        let err = Error::Io {
+            path: "plan.md".into(),
+            source: io::Error::new(io::ErrorKind::NotFound, "missing"),
+        };
+        let rendered = render_error(&err);
+        assert!(rendered.contains("plan.md"), "rendered: {rendered}");
+        assert!(rendered.contains("missing"), "rendered: {rendered}");
+    }
+
+    #[tokio::test]
+    async fn status_before_ingest_hints_ingest() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("demo".into()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let err = dispatch(Command::Status { json: false }, dir.path(), &mut ctx)
+            .await
+            .expect_err("status before ingest should fail");
+        match err {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "plan_path");
+                assert!(
+                    message.contains("orrery ingest"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
         }
     }
 }

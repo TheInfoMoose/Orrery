@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -330,6 +331,112 @@ pub fn tail_log(log_dir: &Path, limit: usize) -> Result<Vec<String>> {
     Ok(lines.into_iter().skip(skip).collect())
 }
 
+pub struct LogFollower {
+    path: PathBuf,
+    file: Option<File>,
+    offset: u64,
+    ino: u64,
+    partial: String,
+}
+
+impl LogFollower {
+    pub fn new(log_dir: &Path) -> Result<Self> {
+        let path = log_dir.join(LOG_FILE);
+        match File::open(&path) {
+            Ok(mut file) => {
+                let meta = file.metadata().map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                let offset = file.seek(SeekFrom::End(0)).map_err(|source| Error::Io {
+                    path: path.clone(),
+                    source,
+                })?;
+                Ok(Self {
+                    path,
+                    file: Some(file),
+                    offset,
+                    ino: meta.ino(),
+                    partial: String::new(),
+                })
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self {
+                path,
+                file: None,
+                offset: 0,
+                ino: 0,
+                partial: String::new(),
+            }),
+            Err(source) => Err(Error::Io { path, source }),
+        }
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<String>> {
+        if let Some(file) = self.file.as_mut() {
+            file.seek(SeekFrom::Start(self.offset))
+                .map_err(|source| Error::Io {
+                    path: self.path.clone(),
+                    source,
+                })?;
+            let read_bytes =
+                file.read_to_string(&mut self.partial)
+                    .map_err(|source| Error::Io {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+            self.offset += read_bytes as u64;
+        }
+
+        match fs::metadata(&self.path) {
+            Ok(meta) => {
+                if self.file.is_none() || meta.ino() != self.ino || meta.len() < self.offset {
+                    match File::open(&self.path) {
+                        Ok(mut file) => {
+                            let open_meta = file.metadata().map_err(|source| Error::Io {
+                                path: self.path.clone(),
+                                source,
+                            })?;
+                            self.ino = open_meta.ino();
+                            self.offset = 0;
+                            let read_bytes =
+                                file.read_to_string(&mut self.partial).map_err(|source| {
+                                    Error::Io {
+                                        path: self.path.clone(),
+                                        source,
+                                    }
+                                })?;
+                            self.offset = read_bytes as u64;
+                            self.file = Some(file);
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                        Err(source) => {
+                            return Err(Error::Io {
+                                path: self.path.clone(),
+                                source,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: self.path.clone(),
+                    source,
+                });
+            }
+        }
+
+        let mut lines = Vec::new();
+        while let Some(pos) = self.partial.find('\n') {
+            let line = self.partial[..pos].trim_end_matches('\r').to_string();
+            lines.push(line);
+            self.partial.drain(..=pos);
+        }
+        Ok(lines)
+    }
+}
+
 fn rotated_log_path(log_dir: &Path, index: usize) -> PathBuf {
     log_dir.join(format!("{LOG_FILE}.{index}"))
 }
@@ -402,15 +509,16 @@ fn fit_event_line(event: &StreamEvent, max_file_bytes: u64) -> Result<Option<Str
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
     use std::sync::Arc;
 
     use chrono::Utc;
     use tempfile::TempDir;
 
     use super::{
-        LOG_FILE, LiveStreamConfig, LiveStreamHub, StreamEvent, StreamEventKind, rotated_log_path,
-        tail_log,
+        LOG_FILE, LiveStreamConfig, LiveStreamHub, LogFollower, StreamEvent, StreamEventKind,
+        rotated_log_path, tail_log,
     };
     use crate::security::{REDACTED, SecretRedactor, SecretValue};
 
@@ -789,5 +897,75 @@ mod tests {
             let len = fs::metadata(path).expect("metadata").len();
             assert!(len <= 300, "{} had {len} bytes (> 300)", path.display());
         }
+    }
+
+    #[test]
+    fn follower_reads_appended_lines() {
+        let dir = TempDir::new().expect("tempdir");
+        let log_path = dir.path().join(LOG_FILE);
+        fs::write(&log_path, "a\n").expect("write a");
+
+        let mut follower = LogFollower::new(dir.path()).expect("new follower");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        f.write_all(b"b\nc\n").expect("append b, c");
+        f.flush().expect("flush");
+
+        assert_eq!(
+            follower.poll().expect("first poll"),
+            vec!["b".to_string(), "c".to_string()]
+        );
+        assert!(follower.poll().expect("second poll").is_empty());
+    }
+
+    #[test]
+    fn follower_survives_rotation() {
+        let dir = TempDir::new().expect("tempdir");
+        let log_path = dir.path().join(LOG_FILE);
+        fs::write(&log_path, "a\n").expect("write a");
+
+        let mut follower = LogFollower::new(dir.path()).expect("new follower");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        f.write_all(b"b\n").expect("append b");
+        f.flush().expect("flush");
+        drop(f);
+
+        fs::rename(&log_path, dir.path().join("live_stream.log.1")).expect("rename");
+        fs::write(&log_path, "c\n").expect("write c");
+
+        assert_eq!(
+            follower.poll().expect("poll across rotation"),
+            vec!["b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn follower_keeps_partial_line() {
+        let dir = TempDir::new().expect("tempdir");
+        let log_path = dir.path().join(LOG_FILE);
+        fs::write(&log_path, "").expect("write empty");
+
+        let mut follower = LogFollower::new(dir.path()).expect("new follower");
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("open log");
+        f.write_all(b"par").expect("append par");
+        f.flush().expect("flush");
+
+        assert!(follower.poll().expect("poll partial").is_empty());
+
+        f.write_all(b"tial\n").expect("append tial");
+        f.flush().expect("flush");
+
+        assert_eq!(
+            follower.poll().expect("poll completed"),
+            vec!["partial".to_string()]
+        );
     }
 }
