@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1295,7 +1295,7 @@ impl WorkflowEngine {
         let redacted = self.ctx.stream.redactor().redact(&raw_output)?;
         let output = truncate_utf8(redacted, MAX_HOOK_OUTPUT_BYTES);
 
-        state.hook_results.push(HookResult {
+        state.push_hook_result(HookResult {
             event,
             step_number: step.number,
             tool: hook_cfg.tool.clone(),
@@ -1884,6 +1884,38 @@ impl Backends {
     }
 }
 
+pub fn referenced_mcp_servers(project: &ProjectConfig, roles: &[RoleConfig]) -> BTreeSet<String> {
+    let mut servers = BTreeSet::new();
+    for role in roles {
+        if project.stages.iter().any(|s| s.role_id == role.role_id) {
+            for entry in &role.allowed_mcp_tools {
+                if let Some((server_id, _)) = entry.split_once(':') {
+                    servers.insert(server_id.to_string());
+                }
+            }
+        }
+    }
+    for entry in &project.gate_tools {
+        if let Some((server_id, _)) = entry.split_once(':') {
+            servers.insert(server_id.to_string());
+        }
+    }
+    for hook in [
+        &project.hooks.on_step_start,
+        &project.hooks.on_step_pass,
+        &project.hooks.on_step_retry,
+        &project.hooks.on_halt,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some((server_id, _)) = hook.tool.split_once(':') {
+            servers.insert(server_id.to_string());
+        }
+    }
+    servers
+}
+
 pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<WorkflowEngine> {
     let project = store.load_project()?;
     let roles = store.load_roles()?;
@@ -1944,14 +1976,22 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
     )?);
     backends.connector.attach_stream(Arc::clone(&stream));
 
+    let referenced = referenced_mcp_servers(&project, &roles);
     let mut gatekeeper = McpGatekeeper::new();
     for server in &servers {
-        let transport = backends.connector.connect(server).await?;
-        gatekeeper.register(
-            server.server_id.clone(),
-            transport,
-            server.write_tools.clone(),
-        );
+        if referenced.contains(&server.server_id) {
+            let transport = backends.connector.connect(server).await?;
+            gatekeeper.register(
+                server.server_id.clone(),
+                transport,
+                server.write_tools.clone(),
+            );
+        } else {
+            stream.emit(StreamEvent::notice(format!(
+                "MCP server '{}' is not used by this workflow; not connected",
+                server.server_id
+            )))?;
+        }
     }
     for role in &roles {
         for pattern in &role.allowed_mcp_tools {
@@ -1999,7 +2039,7 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -5441,5 +5481,103 @@ mod tests {
 
         let _engine = build_engine(&store, backends).await.unwrap();
         assert!(attached.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn referenced_servers_from_stages_gates_hooks() {
+        let mut project = ProjectConfig::default_template("test-project");
+        project.gate_tools = vec!["cargo:test".to_string()];
+        project.hooks.on_step_pass = Some(HookConfig {
+            tool: "notify:send".to_string(),
+            on_failure: HookFailure::Warn,
+        });
+
+        let roles = vec![
+            RoleConfig {
+                role_id: "orchestrator".to_string(),
+                display_name: "Orchestrator".to_string(),
+                kind: RoleKind::Orchestrator,
+                rules_file: "orchestrator.md".to_string(),
+                allowed_mcp_tools: vec!["fs:read_file".to_string()],
+            },
+            RoleConfig {
+                role_id: "coder".to_string(),
+                display_name: "Coder".to_string(),
+                kind: RoleKind::Implementer,
+                rules_file: "coder.md".to_string(),
+                allowed_mcp_tools: vec!["git:*".to_string()],
+            },
+            RoleConfig {
+                role_id: "validator".to_string(),
+                display_name: "Validator".to_string(),
+                kind: RoleKind::Validator,
+                rules_file: "validator.md".to_string(),
+                allowed_mcp_tools: Vec::new(),
+            },
+            RoleConfig {
+                role_id: "researcher".to_string(),
+                display_name: "Researcher".to_string(),
+                kind: RoleKind::Implementer,
+                rules_file: "researcher.md".to_string(),
+                allowed_mcp_tools: vec!["web:fetch".to_string()],
+            },
+        ];
+
+        let referenced = super::referenced_mcp_servers(&project, &roles);
+        let expected: BTreeSet<String> = ["cargo", "fs", "git", "notify"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(referenced, expected);
+        assert!(!referenced.contains("web"));
+    }
+
+    #[tokio::test]
+    async fn build_engine_skips_unused_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, mut backends, _mock_driver, _secrets) =
+            init_project_with_agents(dir.path(), true);
+
+        let mut coder_role = store
+            .load_roles()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .unwrap();
+        let coder_rules = store.load_role_rules("coder").unwrap();
+        coder_role.allowed_mcp_tools = vec!["fs:read_file".to_string()];
+        store.save_role(&coder_role, &coder_rules).unwrap();
+
+        for server_id in ["fs", "unused"] {
+            store
+                .save_mcp_server(&McpServerConfig {
+                    server_id: server_id.to_string(),
+                    transport: McpTransportConfig::Stdio {
+                        command: "fake-mcp".to_string(),
+                        args: Vec::new(),
+                    },
+                    write_tools: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        let mut connector = MockMcpConnector::default();
+        connector.transports.insert(
+            "fs".to_string(),
+            Arc::new(MockMcpTransport::new("fs").with_tool(
+                "read_file",
+                serde_json::json!({
+                    "content": [{ "type": "text", "text": "ok" }]
+                }),
+            )),
+        );
+        backends.connector = Arc::new(connector);
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        let events = engine.ctx.stream.recent(10).unwrap();
+        assert!(events.iter().any(|ev| {
+            ev.kind == StreamEventKind::SystemNotice
+                && ev.text == "MCP server 'unused' is not used by this workflow; not connected"
+        }));
     }
 }

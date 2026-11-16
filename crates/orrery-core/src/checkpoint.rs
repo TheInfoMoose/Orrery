@@ -244,6 +244,8 @@ pub enum OperatorDecision {
     Reject { feedback: String },
 }
 
+pub const MAX_HOOK_RESULTS: usize = 200;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookResult {
@@ -402,6 +404,13 @@ impl WorkflowCheckpoint {
         self.awaiting_reason = None;
         self.operator_decision = None;
         Ok(())
+    }
+
+    pub fn push_hook_result(&mut self, result: HookResult) {
+        self.hook_results.push(result);
+        while self.hook_results.len() > MAX_HOOK_RESULTS {
+            self.hook_results.remove(0);
+        }
     }
 }
 
@@ -1234,5 +1243,24 @@ extra = 123
         let mgr = CheckpointManager::new(cp_dir);
         let err = mgr.load_state().unwrap_err();
         assert!(matches!(err, Error::TomlDe { .. }));
+    }
+
+    #[test]
+    fn hook_results_capped() {
+        let plan = three_step_plan();
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        for step_number in 1..=205 {
+            cp.push_hook_result(HookResult {
+                event: HookEvent::StepStart,
+                step_number,
+                tool: "git:status".to_string(),
+                success: true,
+                output: "ok".to_string(),
+                recorded_at: Utc.with_ymd_and_hms(2026, 11, 13, 19, 30, 0).unwrap(),
+            });
+        }
+        assert_eq!(cp.hook_results.len(), 200);
+        assert_eq!(cp.hook_results[0].step_number, 6);
+        assert_eq!(cp.hook_results[199].step_number, 205);
     }
 }
