@@ -49,5 +49,9 @@ required-features = ["live-backends"]
 name = "live_llm"
 required-features = ["live-backends"]
 
+[[test]]
+name = "live_engine"
+required-features = ["live-backends"]
+
 [lints]
 workspace = true
