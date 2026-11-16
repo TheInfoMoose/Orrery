@@ -187,7 +187,7 @@ Stage index = position in `stages` (0-based). There is no separate `column_index
 - `plan_path` resolves inside `project_root` (no `..`, no symlink escape).
 - `validation_mode` resolution (`ProjectConfig::effective_validation_mode`): `Auto` → `Agents` if any stage's role has `is_validator = true`, otherwise `GateAndOperator`.
 - `GateAndOperator` with empty `gate_tools` is allowed (operator-only validation) but `validate` returns a warning list that the CLI/TUI shows.
-- `max_concurrent_agents >= 1`.
+- `max_concurrent_agents >= 1`. `[limits]` per §9.11.2 (amended).
 
 ### 4.2 Roles — `roles/<role_id>.toml` + `.md`
 
@@ -351,7 +351,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
   - Errors: empty marker, zero steps, unclosed fence at EOF (`PlanParse` with line number).
   - If titles begin with a number (`1:`, `1.`, `1 `), numbers must be contiguous starting at 1; otherwise `PlanParse`.
 - `ImplementationPlan::from_file(path, step_marker)`, `plan_sha256(&self)`.
-- **Acceptance fixture:** parsing `STEPPED_IMPLEMENTATION_PLAN.md` with marker `### STEP ` yields exactly the plan's step count (37, numbered 1..=37). That marker is specific to Orrery's own plan, whose headings follow the Nebulous format; the product default `step_marker` stays `"## Step "` (§4.1).
+- **Acceptance fixture:** parsing `STEPPED_IMPLEMENTATION_PLAN.md` with marker `### STEP ` yields exactly the plan's step count (51, numbered 1..=51). That marker is specific to Orrery's own plan, whose headings follow the Nebulous format; the product default `step_marker` stays `"## Step "` (§4.1).
 
 ### 5.5 `checkpoint.rs` — Reports & State
 
@@ -384,7 +384,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
 - `StreamEventKind { Output, Reasoning, SystemNotice, ToolCall, ReportSaved, GateResult, Error }`; `StreamEvent { timestamp, step_number, stage_index, agent_id, kind, text }`.
 - `LiveStreamConfig { ring_capacity: 2_000, max_file_bytes: 10 MiB, max_files: 3 }`.
 - `LiveStreamHub::new(log_dir, config, Arc<SecretRedactor>)`; `emit(&self, event)` redacts, pushes to the ring buffer (evicting oldest), appends to `live_stream.log`, rotates `.log → .log.1 → .log.2` (oldest dropped) **before** a write would exceed `max_file_bytes`; `subscribe(&self) -> tokio::sync::broadcast::Receiver<StreamEvent>`; `recent(&self, limit)`.
-- Interior mutability (`Mutex` held only for non-async sections); the hub is shared as `Arc<LiveStreamHub>`.
+- Interior mutability (`Mutex` held only for non-async sections); the hub is shared as `Arc<LiveStreamHub>`. (amended: §9.11.4, file IO on a writer thread)
 - Invariant: total log bytes ≤ `max_file_bytes * max_files`.
 - `Reasoning` events appear only when a backend exposes reasoning tokens.
 
@@ -418,7 +418,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
 ### 5.8 `mcp.rs` — MCP Gatekeeper
 
 - `#[async_trait] trait McpTransport: Send + Sync { async fn list_tools(&self) -> Result<Vec<McpToolSchema>>; async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value>; }`
-- `RmcpTransport` — wraps an `rmcp` client (stdio child process or Streamable HTTP); performs the MCP `initialize` handshake on connect; HTTP auth header from `SecretStore`.
+- `RmcpTransport` — wraps an `rmcp` client (stdio child process or Streamable HTTP); performs the MCP `initialize` handshake on connect; HTTP auth header from `SecretStore`. (amended: §9.11.1, stdio stderr goes to the live stream)
 - `MockMcpTransport` — programmable registry for tests.
 - `McpToolSchema { server_id, name, description, input_schema }`.
 - `McpGatekeeper`:
@@ -426,7 +426,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
   - `is_tool_allowed(role, server_id, tool) -> bool` — patterns `server:tool`, `server:*`. (`*:*` is not supported.)
   - `tools_for_role(&self, role) -> Vec<McpToolSchema>`
   - `execute_for_role(&self, role, scope: &WriteScope, server_id, tool, args) -> Result<Value>` — rejects disallowed tools with `Error::Security` before any transport call; for write tools, rejects any `path_args` value outside `scope` (normalized, no `..`).
-- **Tool-name mapping** (`llm.rs`): function names exposed to models are `<server_id>__<tool>`, restricted to `[A-Za-z0-9_-]{1,64}`; ids that can't map are rejected at config validation.
+- **Tool-name mapping** (`llm.rs`): function names exposed to models are `<server_id>__<tool>`, restricted to `[A-Za-z0-9_-]{1,64}`; ids that can't map are rejected at config validation. (amended: §9.11.5)
 
 ### 5.9 `llm.rs` — Agent Drivers
 
@@ -434,7 +434,7 @@ Variants that wrap a crate's error are added in the step that adds that crate. N
 - `build_system_prompt(role: &RoleConfig, backend: &AgentBackend) -> String` — role rules + report instructions (function tool or `report.toml` path).
 - `build_user_prompt(step: &PlanStep, allocation: Option<&SubtaskAllocation>, prior: &[StampedReport]) -> String` — only step text, the agent's allocation, and summaries/feedback of prior **validated** reports for this plan step. Never live-stream content.
 - `#[async_trait] trait AgentDriver: Send + Sync { async fn run_turn(&self, inv: &AgentInvocation, mcp: &McpGatekeeper, stream: &LiveStreamHub) -> Result<AgentReport>; }`
-- `HttpChatDriver` (`LocalModel` → `InferenceConfig::chat_url()`; `CloudApi` → `endpoint_url` with `Authorization: Bearer` from `SecretStore`): streams output to the hub, runs the tool-call loop through the gatekeeper (max 50 tool calls per turn, configurable), ends on `submit_report`.
+- `HttpChatDriver` (`LocalModel` → `InferenceConfig::chat_url()`; `CloudApi` → `endpoint_url` with `Authorization: Bearer` from `SecretStore`): streams output to the hub, runs the tool-call loop through the gatekeeper (max 50 tool calls per turn, configurable), ends on `submit_report`. (amended: §9.11.3 timeouts and limits, §9.11.5 context preflight)
 - `CliContainerDriver`: writes the prompt to `/orrery/in/prompt.md`, runs the container via `ContainerBackend::run_to_completion`, streams stdout lines to the hub, reads and validates `/orrery/out/report.toml`. Enforces `timeout_secs`.
 - `MockAgentDriver`: scripted reports for engine tests.
 
@@ -477,7 +477,7 @@ stateDiagram-v2
 #### 5.10.4 Lifecycle hooks
 - On each event, Orrery calls the configured MCP tool via the gatekeeper with a reserved system role whose allowlist is exactly the configured hook tools. Arguments: `{ "orrery": { "project_name", "run_id", "step_number", "step_title", "plan_step_sha256", "event" } }`.
 - The tool's text result (redacted, truncated to 4 KiB) is stored in `WorkflowCheckpoint.hook_results`.
-- `on_failure = "Halt"` → `AwaitingOperator`; `"Warn"` → stream a `SystemNotice` and continue.
+- `on_failure = "Halt"` → `AwaitingOperator`; `"Warn"` → stream a `SystemNotice` and continue. (amended: §9.11.7 for `on_step_pass`; §9.11.6 caps `hook_results`)
 
 #### 5.10.5 Modes
 - **Run:** one plan step to `Passed`, save checkpoint, stop.
@@ -515,8 +515,8 @@ At 80×24: 3 + 3 + 9 + 6 + 3 = 24. No unused rows.
 - **Steps panel:** plan steps with badges `[ ]` pending, `[>]` in progress, `[✓]` passed, `[?]` awaiting operator, `[!]` failed.
 - **Stage canvas:** header = role selector. Slots locked until a role is chosen. Orchestrator: 1 slot. Other roles: choosing an agent in slot k unlocks slot k+1, up to 15. Each slot shows the backend kind tag (`LM`, `CLI`, `API`).
 - **Live stream:** redacted events from `LiveStreamHub::subscribe`, newest at the bottom, scrollable; auto-follows unless the user scrolled up.
-- **Footer:** `[Run]`/`[Stop]`, `[Approve]`/`[Reject]` (only in `AWAITING OPERATOR` + `GateAndOperator`), `[Settings]`, `[Help]`, `[Mouse: ON|OFF]`, `[Quit]`.
-- **Modals:** Ingest path entry; Settings (read-only lists of roles, agents, MCP servers, hooks — editing is via CLI in v1); Help (key list); Quit confirm (only while RUNNING); Reject feedback entry.
+- **Footer:** `[Run]`/`[Stop]`, `[Approve]`/`[Reject]` (only in `AWAITING OPERATOR` + `GateAndOperator`; amended: §9.11.10, any mode), `[Settings]`, `[Help]`, `[Mouse: ON|OFF]`, `[Quit]`.
+- **Modals:** Ingest path entry; Settings (read-only lists of roles, agents, MCP servers, hooks — editing is via CLI in v1; amended: §9.11.12); Help (key list); Quit confirm (only while RUNNING); Reject feedback entry.
 
 ### 6.3 Theme & Banner (`theme.rs`)
 
@@ -574,7 +574,7 @@ Compact header content (1 row, inside the bordered 3-row header; status badge ri
 ### 6.5 Engine bridge (`bridge.rs`)
 - `run_tui(project_root: PathBuf) -> Result<()>` owns the terminal (raw mode, alternate screen, restores on drop and on panic).
 - The loop body is `fn step(app: &mut App, input: BridgeInput) -> Effects` (pure, testable without a terminal); `run_tui` only does terminal I/O around it.
-- The engine runs on a Tokio task. The TUI receives `EngineEvent`s and `StreamEvent`s through channels and sends `AppAction`s (`Run`, `Stop`, `Approve`, `Reject(feedback)`, config edits) back. The render loop never blocks on engine work.
+- The engine runs on a Tokio task. The TUI receives `EngineEvent`s and `StreamEvent`s through channels and sends `AppAction`s (`Run`, `Stop`, `Approve`, `Reject(feedback)`, config edits) back. The render loop never blocks on engine work. (amended: §9.11.9)
 
 ---
 
@@ -636,7 +636,7 @@ cargo llvm-cov --workspace --locked --fail-under-lines 80
 - `[workspace.lints]`: `rust.unsafe_code = "forbid"`, `clippy.unwrap_used = "deny"`, `clippy.expect_used = "deny"`. Tests may unwrap through `clippy.toml` (`allow-unwrap-in-tests = true`, `allow-expect-in-tests = true`), not through `#[allow]` attributes.
 - No `#[ignore]`, no empty/assertion-free tests, no `#[allow(...)]` in non-test code.
 - Tests cover behaviors and invariants. Trivial tests (e.g. asserting an error's `Display` string) don't count toward intent; coverage floor is the measured gate.
-- **Live-backend tests** (real Docker, a real local model server, real MCP servers) live in `crates/orrery-core/tests/live_*.rs` with `required-features = ["live-backends"]`. They aren't compiled in the default gate, and the operator runs them with `cargo test --workspace --locked --features live-backends`. `live_keyring` uses the real OS keychain (service `orrery.test`, account `testuser`) and needs no env var. Other inputs come from env vars: `ORRERY_LIVE_MCP_CMD` (stdio MCP server command), `ORRERY_LIVE_IMAGE` (small test image), `ORRERY_LIVE_CONTAINER` (an existing container Orrery may start and stop; never removed), `ORRERY_LIVE_LLM_URL` + `ORRERY_LIVE_LLM_MODEL` (OpenAI-compatible endpoint). A missing var fails the test with a clear message; it never silently passes.
+- **Live-backend tests** (real Docker, a real local model server, real MCP servers) live in `crates/orrery-core/tests/live_*.rs` with `required-features = ["live-backends"]`. They aren't compiled in the default gate, and the operator runs them with `cargo test --workspace --locked --features live-backends`. `live_keyring` uses the real OS keychain (service `orrery.test`, account `testuser`) and needs no env var. Other inputs come from env vars: `ORRERY_LIVE_MCP_CMD` (stdio MCP server command), `ORRERY_LIVE_IMAGE` (small test image), `ORRERY_LIVE_CONTAINER` (an existing container Orrery may start and stop; never removed), `ORRERY_LIVE_LLM_URL` + `ORRERY_LIVE_LLM_MODEL` (OpenAI-compatible endpoint). A missing var fails the test with a clear message; it never silently passes. (amended: §9.11.13)
 - Fixtures use reserved placeholders only: `example.com`/`.test` domains, `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `testuser`. No absolute host paths in code, tests or docs.
 - NIST alignment: SP 800-218 (SSDF) practices via these gates and `cargo deny`; FIPS 180-4 SHA-256 for integrity; SP 800-63B-aligned secret handling (§5.3).
 
@@ -1037,7 +1037,7 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
 - `agents_pass_rule`: find the last record with `kind == Validator` (none → `Err`); every `expected_agents` entry has `Confirmed` in it; no `Implementer` record after it; `gate_ok`. `Err` text names the first failed condition.
 - Gates run at pass-check time (when the orchestrator reports `StepPassed`), in both modes — that is "after the last implementer turn" because a passing step has no implementer turn after it. A gate run calls each `gate_tools` entry in order through `execute_for_role` with role `"__orrery_gate"` (allowlist = `gate_tools`), `WriteScope::anywhere()`, args = the §5.10.4 `orrery` object; success = `Ok` and not `tool_result_is_error`; stop at the first failure; emit one `GateResult` event per tool.
 - Hooks use role `"__orrery_hooks"` (allowlist = the configured hook tools), `WriteScope::anywhere()`, the same args object with `event` = `"step_start" | "step_pass" | "step_retry" | "halt"`.
-- Operator decisions: awaiting after a pass check (`GateAndOperator`) → `Approve` passes the step, `Reject` counts a retry and adds the feedback as a note. Awaiting after `Escalate`, exhausted retries, a protocol violation repeated twice, or a `Halt` hook → `Approve` resets `retry_count` to 0 and restarts the round's orchestrator turn; `Reject` does the same and adds the feedback as a note. There is no "abort" decision; the operator stops the run (§5.10.1's abort edge = stop).
+- Operator decisions: awaiting after a pass check (`GateAndOperator`) → `Approve` passes the step, `Reject` counts a retry and adds the feedback as a note. Awaiting after `Escalate`, exhausted retries, a protocol violation repeated twice, or a `Halt` hook → `Approve` resets `retry_count` to 0 and restarts the round's orchestrator turn; `Reject` does the same and adds the feedback as a note. There is no "abort" decision; the operator stops the run (§5.10.1's abort edge = stop). (amended: §9.11.7)
 - `wait_for_operator = true` (TUI): await the operator channel. `false` (CLI): save the checkpoint with `AwaitingOperator`, `awaiting_reason`, and return `RunOutcome::AwaitingOperator`. A later `run` that finds `operator_decision` set applies it, clears it, and continues.
 - `steps_passed_this_run` resets to 0 when `run` starts with no `InProgress`/`AwaitingOperator` step; otherwise it is kept.
 - Cancel: every await inside `run` is raced with `cancel.cancelled()` via `tokio::select!`. On cancel: take `current_lease` and `end_stage` it (the stage-turn future is dropped first, so no clone of the lease remains); a step already `AwaitingOperator` keeps that status, phase and `awaiting_reason`, is saved, and returns `RunOutcome::Interrupted` without re-running `on_halt` (amended 2026-11-15); otherwise set the step `InProgress`, `phase = OrchestratorTurn`, keep `round`; save; run `on_halt`; return `RunOutcome::Interrupted`. On resume of an `InProgress` step: `delete_reports(step, round)` then restart that round from its orchestrator turn.
@@ -1085,7 +1085,7 @@ impl App {
     pub fn apply_engine_event(&mut self, event: &EngineEvent);
     pub fn push_stream_event(&mut self, event: StreamEvent);   // cap 2_000, pop front
     pub fn unlocked_slots(&self, stage: usize) -> usize;       // no role → 0; orchestrator → 1; else min(15, agents + 1)
-    pub fn approve_visible(&self) -> bool;                     // awaiting_operator && effective mode == GateAndOperator
+    pub fn approve_visible(&self) -> bool;                     // awaiting_operator && effective mode == GateAndOperator (amended: §9.11.10)
 }
 ```
 Key table (`handle_key_event`), first matching row wins:
@@ -1131,3 +1131,166 @@ pub fn exit_code_for(err: &Error) -> u8;   // 130 for Interrupted, else 1
 - JSON shapes: `workflow show --json` → `{"validation_mode": str, "stages": [{"index", "role_id", "agent_ids"}], "warnings": [str]}`. `status --json` → `{"run_id", "phase", "current_step", "round", "retry_count", "awaiting_reason", "steps": [{"number", "title", "status"}]}`. `agent list --json` → array of `AgentConfig`. `role list --json`, `mcp list --json`, `inference list --json` → arrays of their config types.
 - `run` prints each live-stream event as `"[{kind:?}] {agent_id or -}: {text}"` and maps `RunOutcome` to exit codes: `Completed`/`NoPendingSteps` → 0, `AwaitingOperator` → 3, `Interrupted` → 130. Ctrl+C: `tokio::signal::ctrl_c()` cancels the token.
 - `approve` / `reject --feedback` set `operator_decision` on a checkpoint whose current step is `AwaitingOperator` (else exit 1, "no step awaiting operator") and save it. `resume` = `run` with no overrides.
+
+### 9.11 Phase D amendments (Steps 38–51)
+Written 2026-11-15 from the post-Step-37 review. Binding like the rest of §9. Where a line here differs from earlier text, this section wins; the earlier line carries an "(amended: §9.11.x)" tag.
+
+#### 9.11.1 MCP child stderr (Step 38)
+```rust
+// mcp.rs
+#[async_trait] pub trait McpConnector: Send + Sync {
+    async fn connect(&self, server: &McpServerConfig) -> Result<Arc<dyn McpTransport>>;
+    fn attach_stream(&self, _stream: Arc<LiveStreamHub>) {}          // default: no-op (MockMcpConnector keeps it)
+}
+pub struct RmcpConnector { pub secrets: Arc<dyn SecretStore>, pub project_root: PathBuf, pub search_path: Option<std::ffi::OsString>,
+                           pub stream: std::sync::OnceLock<Arc<LiveStreamHub>> }
+impl RmcpTransport {
+    pub async fn connect_with_stream(server: &McpServerConfig, secrets: &dyn SecretStore, workdir: &Path,
+                                     stream: Option<Arc<LiveStreamHub>>) -> Result<Self>;
+}
+pub fn spawn_stderr_forwarder<R>(server_id: String, stderr: R, stream: Arc<LiveStreamHub>) -> tokio::task::JoinHandle<()>
+    where R: tokio::io::AsyncRead + Unpin + Send + 'static;
+```
+- `connect_in(server, secrets, workdir)` = `connect_with_stream(server, secrets, workdir, None)`. `connect` is unchanged.
+- `connect_with_stream`, `Stdio`: `stream` is `None` → `TokioChildProcess::new(cmd)` as before (stderr inherited; the CLI's `mcp add-stdio` / `mcp tools` keep printing server errors to the terminal). `Some(hub)` → `TokioChildProcess::builder(cmd).stderr(std::process::Stdio::piped()).spawn()` returns `(transport, Option<ChildStderr>)`; when the handle is `Some`, call `spawn_stderr_forwarder(server_id, handle, hub)` before `serve`. Spawn errors map to `Error::Mcp` as today. `StreamableHttp` ignores `stream`.
+- `spawn_stderr_forwarder`: `tokio::spawn` a task that reads `tokio::io::BufReader::new(stderr).lines()`. Each `Ok(Some(line))` whose `trim()` is non-empty → `stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {line}")))`, ignoring an `Err`. The task ends on `Ok(None)` or `Err`. Redaction happens in `emit`.
+- `RmcpConnector::attach_stream` → `let _ = self.stream.set(stream);` (first attach wins). `RmcpConnector::connect`, `Stdio` → `RmcpTransport::connect_with_stream(&clone, .., &self.project_root, self.stream.get().cloned())`.
+- `build_engine`: right after the `LiveStreamHub` is created and before any `connect`, call `backends.connector.attach_stream(Arc::clone(&stream))`.
+
+#### 9.11.2 Runtime limits and the guardrail note (Step 39)
+```rust
+// config.rs
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeLimits {
+    pub max_tool_calls: usize,              // default 50
+    pub model_idle_timeout_secs: u64,       // default 300
+    pub live_stream_ring_capacity: usize,   // default 2_000
+    pub live_stream_max_file_bytes: u64,    // default 10 * 1024 * 1024
+    pub live_stream_max_files: usize,       // default 3
+}
+impl Default for RuntimeLimits { /* the defaults above */ }
+impl RuntimeLimits {
+    pub fn validate(&self) -> Result<()>;
+    pub fn is_default(&self) -> bool;       // self == &Self::default()
+}
+// ProjectConfig gains one field, after `inference`:
+//     #[serde(default, skip_serializing_if = "RuntimeLimits::is_default")] pub limits: RuntimeLimits,
+pub const AGENT_CLI_GUARDRAIL_NOTE: &str = "Guardrails: The MCP gatekeeper does not see a CLI's built-in tools. Guardrails are: workspace_mount, container isolation, memory/time limits, and whatever tool config the image ships.";
+```
+- `validate` rules, checked in this order; the first failure returns `Error::Validation { field: "limits.<name>", message: "<name> must be <rule>" }`: `max_tool_calls` in `1..=1000`; `model_idle_timeout_secs` in `1..=86_400`; `live_stream_ring_capacity >= 1`; `live_stream_max_file_bytes >= 4096`; `live_stream_max_files` in `1..=10`.
+- `ProjectConfig::validate_staging` calls `self.limits.validate()?` right after `self.hooks.validate()?`.
+- `project.toml` (§4.1) may hold an optional table; omitted keys take the defaults:
+```toml
+[limits]
+max_tool_calls = 50               # Tool calls per agent turn (§5.9)
+model_idle_timeout_secs = 300     # LocalModel/CloudApi: max wait for the response to start or for the next chunk
+live_stream_ring_capacity = 2000  # Events kept in memory (§5.6)
+live_stream_max_file_bytes = 10485760
+live_stream_max_files = 3
+```
+
+#### 9.11.3 Chat driver timeouts and header (Step 40)
+```rust
+// llm.rs
+impl HttpChatDriver { pub fn with_idle_timeout(self, timeout: std::time::Duration) -> Self; }   // default 300 s
+```
+- `run_turn`: `tokio::time::timeout(idle, req.send())` and, for every chunk, `tokio::time::timeout(idle, byte_stream.next())`. Elapsed → `Error::Agent { agent_id, message: format!("no response from model within {}s", idle.as_secs()) }`. A slow but steady stream never times out; only a gap longer than `idle` does.
+- `Authorization`: build `reqwest::header::HeaderValue::from_str(auth.expose())` (error → `Error::Validation { field: "keychain", message: "API key is not a valid HTTP header value" }`), call `set_sensitive(true)` on it, then `req.header(reqwest::header::AUTHORIZATION, value)`.
+- `Backends::real`: `let limits = store.load_project()?.limits;` and the chat driver is `HttpChatDriver::new(..).with_max_tool_calls(limits.max_tool_calls).with_idle_timeout(Duration::from_secs(limits.model_idle_timeout_secs))`. Every `Backends::real` caller already needs an initialized project.
+
+#### 9.11.4 Live stream writer thread (Step 41) (overrides §9.4 `emit` order and the hub's `Mutex` contents)
+```rust
+// stream_log.rs
+impl LiveStreamHub { pub fn flush(&self) -> Result<()>; }
+impl Drop for LiveStreamHub { /* drop the writer's sender, then join the writer thread */ }
+```
+- The hub keeps the ring buffer under its `Mutex` and hands file IO to one writer thread (`std::thread::Builder::new().name("orrery-log-writer".into()).spawn(..)`; a spawn error → `Error::Io { path: log_dir, source }`). The thread owns the current file size, an open append handle (opened on first write, reopened after each rotation) and the first write error. Messages travel on a `std::sync::mpsc` channel (private `enum WriterMsg { Line(String), Flush(std::sync::mpsc::Sender<Option<String>>) }`).
+- `new`: as before (create `log_dir`, current size = existing file length), then start the thread.
+- `emit` order: redact `text` → ring push (pop front when full) → when `max_files > 0` and `fit_event_line` gives `Some(line)`, send `WriterMsg::Line(line)` (send error → `Error::Security { message: "LiveStreamHub writer stopped" }`) → broadcast. `emit` never touches the file system.
+- Writer: `Line` → the §9.4 rotation rule, then append. An IO error is kept as `"{path}: {err}"` if none is kept yet, and the thread carries on. `Flush(reply)` → `reply.send(kept_error.take())`.
+- `flush`: send `Flush`, wait for the reply. `None` → `Ok(())`; `Some(msg)` → `Err(Error::Io { path: log_dir.join(LOG_FILE), source: std::io::Error::other(msg) })`; channel closed → `Error::Security { message: "LiveStreamHub writer stopped" }`. It blocks the calling thread, so only tests and shutdown paths call it.
+- `Drop`: lines sent before the drop are all written before the thread exits.
+- `build_engine` builds the hub with `LiveStreamConfig { ring_capacity: project.limits.live_stream_ring_capacity, max_file_bytes: project.limits.live_stream_max_file_bytes, max_files: project.limits.live_stream_max_files }` instead of `LiveStreamConfig::default()`.
+
+#### 9.11.5 Context preflight and tool names (Step 42) (overrides §9.7 `build_chat_request` tool names)
+```rust
+// llm.rs
+pub fn estimate_tokens(body: &serde_json::Value) -> usize;   // serde_json::to_string(body) byte length, div_ceil(4); serialize error → usize::MAX
+```
+- `run_turn`: for `LocalModel` and `CloudApi`, before every request in the turn loop, `estimate_tokens(&body) > max_context_tokens` → `Error::Agent { agent_id, message: format!("prompt is about {est} tokens, over max_context_tokens {max}") }`, with no request sent. Bytes / 4 undercounts tokens for code, so this catches clear overflow without rejecting prompts that fit. Orrery never trims history (every plan step starts a fresh agent).
+- `build_chat_request`: a tool whose `format_mapped_tool_name(server_id, name)` fails is left out (`filter_map`). There is no fallback name.
+- `build_engine`: after `gatekeeper.refresh_catalog()`, for each role in `roles` and each tool in `gatekeeper.tools_for_role(role)`, `format_mapped_tool_name(&tool.server_id, &tool.name)` failing → `Error::Validation { field: "allowed_mcp_tools", message: format!("role '{role_id}' would expose MCP tool '{server_id}:{name}', whose name can't map to a model function name ([A-Za-z0-9_-], 64 max)") }`.
+
+#### 9.11.6 Referenced MCP servers and hook history (Step 43)
+```rust
+// engine.rs
+pub fn referenced_mcp_servers(project: &ProjectConfig, roles: &[RoleConfig]) -> std::collections::BTreeSet<String>;
+// checkpoint.rs
+pub const MAX_HOOK_RESULTS: usize = 200;
+impl WorkflowCheckpoint { pub fn push_hook_result(&mut self, result: HookResult); }   // push, then remove from the front while len > MAX_HOOK_RESULTS
+```
+- `referenced_mcp_servers`: the text before the first `':'` of every `allowed_mcp_tools` entry of each role whose `role_id` appears in `project.stages`, of every `gate_tools` entry, and of every configured hook `tool`.
+- `build_engine` connects and registers only the servers in that set. For each other configured server it emits `StreamEvent::notice(format!("MCP server '{server_id}' is not used by this workflow; not connected"))`. The unknown-server check over every role's patterns is unchanged.
+- `run_hook` records results with `state.push_hook_result(..)`.
+
+#### 9.11.7 Halted `on_step_pass` hook (Step 44) (overrides §9.8 "Operator decisions" for this case)
+- `const STEP_PASS_HOOK_AWAITING_REASON: &str = "hook step_pass failed";` (private, `engine.rs`). A `Halt` from `on_step_pass` awaits the operator with this reason and a new private `AwaitingContext::StepPassHook`.
+- `Approve` → no agent turns: run `on_step_pass` again. Success → the step stays `Passed` and the run continues as after any pass (mode and cycle rules). Another `Halt` → await again with the same reason. `retry_count` is unchanged.
+- `Reject` → as for `HaltOrEscalation`: `retry_count = 0`, note `"operator rejected: {feedback}"`, restart the round's orchestrator turn.
+- Resume (`wait_for_operator = false`, decision saved by `orrery approve` / `reject`): a step `AwaitingOperator` whose `awaiting_reason == STEP_PASS_HOOK_AWAITING_REASON` uses `StepPassHook`. This check comes before the `PassCheck` rule.
+- `complete_step_pass` loops (no async recursion): `Approve` while `wait_for_operator = true` goes round the loop and re-runs the hook.
+
+#### 9.11.8 CLI errors, status and log follow (Step 45)
+```rust
+// commands.rs
+pub fn render_error(err: &Error) -> String;   // err.to_string(), then ": {source}" for each std::error::Error::source() in the chain
+// stream_log.rs
+pub struct LogFollower { /* path, file: Option<std::fs::File>, offset: u64, ino: u64, partial: String */ }
+impl LogFollower {
+    pub fn new(log_dir: &Path) -> Result<Self>;    // positioned at the current end of live_stream.log; no file yet → nothing open, offset 0
+    pub fn poll(&mut self) -> Result<Vec<String>>; // complete lines appended since the last poll, without '\n'
+}
+```
+- `main.rs` prints `render_error(&err)` at both error sites (`OsKeyringStore::new` and `dispatch`).
+- `status`: after `resolve_safe_path`, a plan path that isn't a regular file → `Error::Validation { field: "plan_path", message: format!("plan file '{}' not found; run `orrery ingest <MD_FILE>` first", cfg.plan_path.display()) }`.
+- `logs --follow`: print the tail as now, then `let mut follower = LogFollower::new(&log_dir)?;`, then one pinned `ctrl_c` future (`let ctrl_c = tokio::signal::ctrl_c(); tokio::pin!(ctrl_c);`) raced in a loop against a 500 ms sleep; each wake prints `follower.poll()?`. Ctrl+C → exit 130.
+- `LogFollower::poll` (Linux; inode via `std::os::unix::fs::MetadataExt::ino`): (1) if a file is open, read from `offset` to EOF into `partial` and advance `offset`; (2) stat the path: missing → skip to (4); no file open, a different inode, or `len < offset` → open the path, set `ino`, `offset = 0`, read it to EOF into `partial`; (3) none; (4) split `partial` on `'\n'`, return the complete lines and keep the remainder. Rotation renames `.log` to `.log.1`, so the open handle still points at the old inode and (1) drains its tail before (2) moves to the new file.
+- `agent show` prints `orrery_core::config::AGENT_CLI_GUARDRAIL_NOTE` instead of its own literal.
+
+#### 9.11.9 TUI engine controller never blocks (Step 46) (overrides §6.5 for `Run` / `Interrupt`)
+- `EngineController::handle(Run)` does no `make_backends` or `build_engine` call inline. It spawns one task that calls `make_backends()`, then `build_engine`, subscribes, forwards events and runs the engine. A failure in either comes back as the task's `Err`, and `poll_finished` shows it (status `Error`, message = the error). `make_backends` is stored as `Arc<dyn Fn() -> Result<Backends> + Send + Sync>` (the constructor still takes the `Box` and converts it); the store is cloned into the task.
+- Operator decisions: `handle(Run)` creates `mpsc::channel::<OperatorDecision>(8)`, keeps the sender as `operator_tx`, and the task forwards the receiver into `engine.operator_sender()`. `Approve` / `Reject` use `try_send`; a full channel sets `status_message = "operator decision dropped: channel full"`.
+- Forwarding: stream events use `try_send`; when full, count the drop and, once the channel has room again, send one `StreamEvent::notice(format!("{n} stream events dropped"))`. Engine events use `send().await` (never dropped; the render loop drains them every iteration). The task's own error notice uses `try_send`.
+- `handle(Interrupt)`: `self.cancel.cancel()`, `app.status_message = Some("Stopping…".into())`, return. No await. The task's end reaches the app through `RunFinished` and `poll_finished`.
+- New `pub async fn shutdown(&mut self, app: &mut App)`: cancel; if a task exists, `tokio::time::timeout(30 s, ..)` over a loop that selects the task's handle (done → apply its result as `poll_finished` does, stop), `engine_rx.recv()` (→ `apply_engine_event`) and `stream_rx.recv()` (→ `push_stream_event`). On timeout, abort the task. `run_tui` calls it after the loop exits, before the terminal guard drops, so Quit while running still lets `on_halt` and the checkpoint save finish.
+
+#### 9.11.10 TUI operator answers in every mode (Step 47) (overrides §6.2 Footer and §9.9 `approve_visible`)
+- `App::approve_visible(&self) -> bool` = `self.awaiting_operator`, in every validation mode. Escalations, exhausted retries and `Halt` hooks await the operator in `Agents` mode too, and the TUI had no way to answer them.
+- `load_initial_app`: when the checkpoint's current step is `AwaitingOperator`, set `app.status = RunStatus::AwaitingOperator`, `app.awaiting_operator = true`, `app.status_message = cp.awaiting_reason`.
+- `EngineController::handle(Approve | Reject(feedback))` with no running task (none, or finished): load the checkpoint (`CheckpointManager::new(store.orrery_dir().join("checkpoints"))`). Current step not `AwaitingOperator` → `status_message = "no step awaiting operator"`, `Ok(())`. Otherwise set `operator_decision` to `Approve` / `Reject { feedback }`, save, then start the engine exactly as `Run` does (the engine applies the saved decision, §9.8). With a running task: `try_send` as in §9.11.9.
+
+#### 9.11.11 TUI cycles entry, run progress, ingest marker (Step 48) (overrides §9.9 `Modal` and key rows 2, 7)
+- `Modal` gains `CyclesEntry { input: String }`, and `Ingest` becomes `Ingest { input: String, marker: String, marker_focused: bool }`.
+- Top menu `Enter`/`Space` on Cycles (index 2): `Loop` → open `CyclesEntry { input: cycle_count.to_string() }`; `Run` → nothing. A click on `CyclesControl` already routes to `Enter`. `+`/`-` keep working.
+- `CyclesEntry`: ASCII digit appends (at most 3 chars); `Backspace` pops; `Enter` parses (empty → 0), sets `config.cycle_count`, returns `[SetCycles(n)]` and closes; `Esc` closes; other keys do nothing.
+- `Ingest` opens with `marker = config.step_marker.clone()`, `marker_focused = false`. `Tab` / `BackTab` toggle `marker_focused`. Printable chars and `Backspace` edit the focused field. `Enter`: a marker that is empty after `trim()` → `status_message = "step marker must not be empty"`, modal stays open, `[]`; otherwise set `config.step_marker = marker` when it differs, return `[IngestPlan(path)]` and close. `Esc` closes.
+- `bridge.rs` `IngestPlan`: when `ImplementationPlan::from_file` fails, set `app.config.step_marker = self.store.load_project()?.step_marker` before returning the error, so a failed ingest never leaves an unsaved marker in memory.
+- `App` gains `pub run_passed: usize` (0 in `new`). `apply_engine_event(StepStatusChanged { status: Passed, .. })` adds 1. `EngineController::handle(Run)` sets it to 0 when it starts a run.
+- `[Passed: X/Y]`: `Loop` mode with `cycle_count > 0` → `X = run_passed`, `Y = cycle_count`; otherwise passed plan steps / all plan steps, as now.
+- Widgets: the Ingest modal shows `Path: {input}` and `Marker: {marker}` with the focused line highlighted, plus `Tab switches field`. `CyclesEntry` shows `Cycles (0 = until out of steps): {input}`.
+
+#### 9.11.12 TUI Settings: warnings and agent details (Step 49) (overrides §6.2 Settings, adds to §5.7.2)
+- `App` gains `pub warnings: Vec<String>` and `pub settings_scroll: u16`. `pub fn refresh_warnings(&mut self)`: `self.warnings = match self.config.validate(&self.roles, &self.agents) { Ok(ws) => ws.iter().map(ToString::to_string).collect(), Err(e) => vec![e.to_string()] }`. Called at the end of `App::new` and after every config edit that succeeds.
+- The Settings modal title is `" Settings (read-only — edit via CLI) "`, or `" Settings — {n} warning(s) "` when `warnings` is non-empty. Lines, in order: Roles; `Warnings:` then one `"  {w}"` per warning or `"  (none)"`; `Agents:` then per agent `"  {agent_id} [{tag}] {display_name}"` and one detail line: `LocalModel` → `"    inference {inference_id}, model {model}, context {max_context_tokens}"`; `CloudApi` → `"    endpoint {endpoint_url}, model {model}, context {max_context_tokens}"`; `AgentCli` → `"    image {image}, mount {workspace_mount:?}, memory {memory_limit_mb} MB, timeout {timeout_secs}s"` plus `"    "` + `AGENT_CLI_GUARDRAIL_NOTE` in the alert style; then MCP servers, Gate tools, Hooks and the close hint as now.
+- Render with `Paragraph::wrap(Wrap { trim: false })` and `.scroll((app.settings_scroll, 0))`.
+- Settings keys: `Up` / `Down` change `settings_scroll` by 1 (saturating; `Down` stops at 500). `Esc`, `Enter`, `q` close and reset `settings_scroll` to 0.
+
+#### 9.11.13 Live tests (Step 50) (adds to §8)
+- `tests/live_llm.rs` `live_cloud_api_turn`: env `ORRERY_LIVE_CLOUD_URL` (full chat-completions URL) and `ORRERY_LIVE_CLOUD_MODEL`; the key comes from `OsKeyringStore` at service `orrery.test.cloud`, account `testuser` (the operator stores it first with `orrery secret set --service orrery.test.cloud --account testuser`). Assertions as `live_single_turn`.
+- `tests/live_docker.rs` `live_cli_driver_reads_report`: env `ORRERY_LIVE_IMAGE` (needs `/bin/sh`). `CliContainerDriver` over `BollardContainerBackend`; the agent's command writes a valid report to `/orrery/out/report.toml`; the report comes back `Complete`, and the container is gone afterwards.
+- `tests/live_engine.rs` (new) `live_engine_run_with_real_backends`: env `ORRERY_LIVE_LLM_URL`, `ORRERY_LIVE_LLM_MODEL`. A `TempDir` project with one `LocalModel` agent on all three default stages, run through `build_engine(&store, Backends::real(root)?)` with `wait_for_operator: false`. Any `Ok` outcome passes (a small model may escalate); `Err` fails.
+- The operator command is unchanged: `cargo test --workspace --locked --features orrery-core/live-backends`.
+
+#### 9.11.14 README (Step 51)
+- `README.md` at the repo root, for operators: what Orrery does; requirements (Linux only, Docker or a `DOCKER_HOST`, an OpenAI-compatible llama.cpp server, build packages `libdbus-1-dev` and `pkg-config`); build; a quickstart (`init`, `inference add`, `agent add-local-model`, `workflow assign`, `ingest`, `workflow show`, `run`, `approve` / `reject`, `status`, `logs`); TUI keys (§6.4); the `.orrery/` layout (§4); security notes (keys only in the OS keychain, the AgentCli guardrail note and residual risks from §5.7.2); the live-test command and env vars (§8, §9.11.13), plus the `live_docker` setup (an existing idle container and a small image with `/bin/sh`, e.g. `busybox:1.37`; the container command traps TERM so `docker stop` is immediate). Placeholders only (§8 fixtures rule).
