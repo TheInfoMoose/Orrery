@@ -370,6 +370,17 @@ impl EngineController {
                 self.start_run(app);
             }
             AppAction::Interrupt => {
+                if !self.has_running_task() {
+                    app.status_message = Some(
+                        if app.awaiting_operator {
+                            "no run in progress; Approve or Reject the waiting step"
+                        } else {
+                            "no run in progress"
+                        }
+                        .into(),
+                    );
+                    return Ok(());
+                }
                 self.cancel.cancel();
                 app.status_message = Some("Stopping…".into());
             }
@@ -382,10 +393,21 @@ impl EngineController {
                     _ => unreachable!(),
                 };
                 if self.has_running_task() {
-                    if let Some(tx) = &self.operator_tx
-                        && let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(decision)
-                    {
-                        app.status_message = Some("operator decision dropped: channel full".into());
+                    if let Some(tx) = &self.operator_tx {
+                        match tx.try_send(decision) {
+                            Ok(()) => {
+                                app.awaiting_operator = false;
+                                app.status = RunStatus::Running;
+                            }
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                app.status_message =
+                                    Some("operator decision dropped: channel full".into());
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                app.status_message =
+                                    Some("engine stopped; decision not sent".into());
+                            }
+                        }
                     }
                 } else {
                     let checkpoints =
@@ -632,79 +654,83 @@ pub async fn run_tui(project_root: PathBuf) -> Result<()> {
     let mut area = Rect::new(0, 0, size.width, size.height);
     let mut regions = compute_regions_with_selection(area, &mut app);
 
-    loop {
-        if needs_redraw {
-            regions = compute_regions_with_selection(area, &mut app);
-            terminal
-                .draw(|frame| render(frame, &app, &regions))
-                .map_err(|source| Error::Io {
-                    path: PathBuf::from("<terminal>"),
-                    source,
-                })?;
-            needs_redraw = false;
-        }
+    let loop_result: Result<()> = async {
+        loop {
+            if needs_redraw {
+                regions = compute_regions_with_selection(area, &mut app);
+                terminal
+                    .draw(|frame| render(frame, &app, &regions))
+                    .map_err(|source| Error::Io {
+                        path: PathBuf::from("<terminal>"),
+                        source,
+                    })?;
+                needs_redraw = false;
+            }
 
-        if app.should_quit {
-            break;
-        }
+            if app.should_quit {
+                break;
+            }
 
-        let maybe_input = tokio::select! {
-            maybe_evt = event_stream.next() => {
-                match maybe_evt {
-                    Some(Ok(Event::Key(key))) => Some(BridgeInput::Key(key)),
-                    Some(Ok(Event::Mouse(mouse))) => Some(BridgeInput::Mouse(mouse)),
-                    Some(Ok(Event::Resize(w, h))) => {
-                        area = Rect::new(0, 0, w, h);
-                        Some(BridgeInput::Resize(w, h))
+            let maybe_input = tokio::select! {
+                maybe_evt = event_stream.next() => {
+                    match maybe_evt {
+                        Some(Ok(Event::Key(key))) => Some(BridgeInput::Key(key)),
+                        Some(Ok(Event::Mouse(mouse))) => Some(BridgeInput::Mouse(mouse)),
+                        Some(Ok(Event::Resize(w, h))) => {
+                            area = Rect::new(0, 0, w, h);
+                            Some(BridgeInput::Resize(w, h))
+                        }
+                        Some(Ok(_)) => None,
+                        Some(Err(source)) => {
+                            return Err(Error::Io {
+                                path: PathBuf::from("<terminal>"),
+                                source,
+                            });
+                        }
+                        None => break,
                     }
-                    Some(Ok(_)) => None,
-                    Some(Err(source)) => {
-                        return Err(Error::Io {
-                            path: PathBuf::from("<terminal>"),
-                            source,
-                        });
-                    }
-                    None => break,
                 }
-            }
-            ctrl_input = controller.next_event() => {
-                Some(ctrl_input)
-            }
-            _ = tick_interval.tick() => {
-                Some(BridgeInput::Tick)
-            }
-        };
+                ctrl_input = controller.next_event() => {
+                    Some(ctrl_input)
+                }
+                _ = tick_interval.tick() => {
+                    Some(BridgeInput::Tick)
+                }
+            };
 
-        let Some(input) = maybe_input else {
-            continue;
-        };
+            let Some(input) = maybe_input else {
+                continue;
+            };
 
-        let effects = step(&mut app, &regions, input);
-        if effects.redraw {
-            needs_redraw = true;
-        }
-
-        for action in &effects.actions {
-            if let AppAction::SetMouseCapture(enable) = action {
-                guard.set_mouse_capture(*enable)?;
-            }
-            if let Err(err) = controller.handle(action, &mut app).await {
-                app.status_message = Some(err.to_string());
+            let effects = step(&mut app, &regions, input);
+            if effects.redraw {
                 needs_redraw = true;
             }
-        }
 
-        if controller.poll_finished(&mut app).await {
-            needs_redraw = true;
-        }
+            for action in &effects.actions {
+                if let AppAction::SetMouseCapture(enable) = action {
+                    guard.set_mouse_capture(*enable)?;
+                }
+                if let Err(err) = controller.handle(action, &mut app).await {
+                    app.status_message = Some(err.to_string());
+                    needs_redraw = true;
+                }
+            }
 
-        if effects.quit || app.should_quit {
-            break;
+            if controller.poll_finished(&mut app).await {
+                needs_redraw = true;
+            }
+
+            if effects.quit || app.should_quit {
+                break;
+            }
         }
+        Ok(())
     }
+    .await;
 
     controller.shutdown(&mut app).await;
-    Ok(())
+    loop_result
 }
 
 #[cfg(test)]
@@ -1744,5 +1770,126 @@ mod tests {
         assert!(stream_rx.try_recv().is_err());
         assert_eq!(eng_op_rx.try_recv().unwrap(), OperatorDecision::Approve);
         assert!(eng_op_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn approve_while_running_clears_awaiting() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::GateAndOperator);
+        app.step_statuses = vec![StepStatus::Pending];
+        let regions = UiLayoutRegions::compute(Rect::new(0, 0, 100, 30), 2, 0, 0);
+
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::Dispatch,
+                summary: "dispatch to coder".into(),
+                target_stage: Some(1),
+                allocations: vec![SubtaskAllocation {
+                    target_agent_id: "coder_1".into(),
+                    instructions: "do step 1".into(),
+                    write_scope: Vec::new(),
+                }],
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        driver.push(
+            "coder_1",
+            Ok(AgentReport {
+                status: ReportStatus::Complete,
+                summary: "implemented step 1".into(),
+                target_stage: None,
+                allocations: Vec::new(),
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        driver.push(
+            "orch",
+            Ok(AgentReport {
+                status: ReportStatus::StepPassed,
+                summary: "step 1 ready for operator approval".into(),
+                target_stage: None,
+                allocations: Vec::new(),
+                feedback: None,
+                artifacts: Vec::new(),
+            }),
+        );
+        let driver_for_factory = Arc::clone(&driver);
+
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver_for_factory) as _))),
+        );
+
+        controller
+            .handle(&AppAction::Run, &mut app)
+            .await
+            .expect("handle Run");
+
+        loop {
+            let input = tokio::time::timeout(Duration::from_secs(5), controller.next_event())
+                .await
+                .expect("timed out");
+            let is_awaiting = matches!(
+                input,
+                BridgeInput::Engine(EngineEvent::AwaitingOperator { .. })
+            );
+            let _ = step(&mut app, &regions, input);
+            if is_awaiting {
+                break;
+            }
+        }
+        assert_eq!(app.status, RunStatus::AwaitingOperator);
+        assert!(app.awaiting_operator);
+
+        controller
+            .handle(&AppAction::Approve, &mut app)
+            .await
+            .expect("handle Approve");
+        assert!(!app.awaiting_operator);
+        assert_eq!(app.status, RunStatus::Running);
+
+        controller.shutdown(&mut app).await;
+    }
+
+    #[tokio::test]
+    async fn interrupt_without_task_keeps_awaiting_state() {
+        let (_tmp, store, app) = setup_project_dir(ValidationMode::Auto);
+        let plan_path = store
+            .resolve_safe_path(&app.config.plan_path)
+            .expect("plan path");
+        let plan =
+            ImplementationPlan::from_file(&plan_path, &app.config.step_marker).expect("parse plan");
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_statuses[0] = StepStatus::AwaitingOperator;
+        cp.phase = EnginePhase::AwaitingOperator;
+        cp.awaiting_reason = Some("escalated".into());
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        checkpoints.save_state(&cp).expect("save checkpoint");
+
+        let mut app = load_initial_app(&store, store.project_root()).expect("load_initial_app");
+        assert_eq!(app.status, RunStatus::AwaitingOperator);
+        assert!(app.awaiting_operator);
+
+        let driver = Arc::new(MockAgentDriver::new());
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver) as _))),
+        );
+
+        controller
+            .handle(&AppAction::Interrupt, &mut app)
+            .await
+            .expect("handle Interrupt");
+
+        assert_eq!(app.status, RunStatus::AwaitingOperator);
+        assert!(app.awaiting_operator);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("no run in progress; Approve or Reject the waiting step")
+        );
+        assert!(!controller.cancel.is_cancelled());
     }
 }
