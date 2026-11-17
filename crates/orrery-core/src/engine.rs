@@ -1992,6 +1992,7 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
 
     let referenced = referenced_mcp_servers(&project, &roles);
     let mut gatekeeper = McpGatekeeper::new();
+    gatekeeper.set_project_root(store.project_root().to_path_buf());
     for server in &servers {
         if referenced.contains(&server.server_id) {
             let transport = backends.connector.connect(server).await?;

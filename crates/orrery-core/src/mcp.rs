@@ -61,6 +61,9 @@ impl WriteScope {
         let Some(path_segs) = normalize_path_segments(path) else {
             return false;
         };
+        if path_segs.first() == Some(&".orrery") {
+            return false;
+        }
         if self.prefixes.is_empty() {
             return true;
         }
@@ -97,6 +100,40 @@ pub fn scopes_overlap(a: &str, b: &str) -> bool {
     a_segs.starts_with(&b_segs) || b_segs.starts_with(&a_segs)
 }
 
+pub fn resolve_write_path(root: &Path, rel: &str) -> Result<PathBuf> {
+    let mut current = std::fs::canonicalize(root).map_err(|source| Error::Io {
+        path: root.to_path_buf(),
+        source,
+    })?;
+    let Some(segments) = normalize_path_segments(rel) else {
+        return Err(Error::Security {
+            message: format!("invalid relative path '{rel}'"),
+        });
+    };
+    let mut iter = segments.into_iter();
+    while let Some(seg) = iter.next() {
+        let next = current.join(seg);
+        match std::fs::symlink_metadata(&next) {
+            Ok(_) => {
+                current = std::fs::canonicalize(&next).map_err(|_| Error::Security {
+                    message: format!("path '{rel}' contains an unresolvable entry"),
+                })?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                current = next;
+                for rem in iter {
+                    current.push(rem);
+                }
+                break;
+            }
+            Err(source) => {
+                return Err(Error::Io { path: next, source });
+            }
+        }
+    }
+    Ok(current)
+}
+
 pub fn tool_result_is_error(result: &serde_json::Value) -> bool {
     result
         .get("isError")
@@ -123,11 +160,16 @@ pub struct McpGatekeeper {
     transports: HashMap<String, Arc<dyn McpTransport>>,
     write_tools: HashMap<String, Vec<WriteToolSpec>>,
     catalog: Vec<McpToolSchema>,
+    project_root: Option<PathBuf>,
 }
 
 impl McpGatekeeper {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_project_root(&mut self, root: PathBuf) {
+        self.project_root = Some(root);
     }
 
     pub fn register(
@@ -233,18 +275,50 @@ impl McpGatekeeper {
         if let Some(specs) = self.write_tools.get(server_id) {
             for spec in specs.iter().filter(|spec| spec.tool == tool) {
                 for arg_name in &spec.path_args {
-                    if let Some(val) = args.get(arg_name) {
-                        let Some(path_str) = val.as_str() else {
+                    let Some(val) = args.get(arg_name) else {
+                        return Err(Error::Security {
+                            message: format!(
+                                "write tool '{server_id}:{tool}' is missing path argument '{arg_name}'"
+                            ),
+                        });
+                    };
+                    let Some(path_str) = val.as_str() else {
+                        return Err(Error::Security {
+                            message: format!(
+                                "write tool '{server_id}:{tool}' argument '{arg_name}' must be a JSON string"
+                            ),
+                        });
+                    };
+                    if !scope.contains(path_str) {
+                        return Err(Error::Security {
+                            message: format!(
+                                "write tool '{server_id}:{tool}' argument '{arg_name}' path '{path_str}' is outside write scope"
+                            ),
+                        });
+                    }
+                    if let Some(root) = &self.project_root {
+                        let canonical_root =
+                            std::fs::canonicalize(root).map_err(|source| Error::Io {
+                                path: root.clone(),
+                                source,
+                            })?;
+                        let resolved = resolve_write_path(root, path_str)?;
+                        let mut in_scope = resolved.starts_with(&canonical_root)
+                            && !resolved.starts_with(canonical_root.join(".orrery"));
+                        if in_scope && !scope.prefixes().is_empty() {
+                            in_scope = false;
+                            for prefix in scope.prefixes() {
+                                let resolved_prefix = resolve_write_path(root, prefix)?;
+                                if resolved.starts_with(&resolved_prefix) {
+                                    in_scope = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !in_scope {
                             return Err(Error::Security {
                                 message: format!(
-                                    "write tool '{server_id}:{tool}' argument '{arg_name}' must be a JSON string"
-                                ),
-                            });
-                        };
-                        if !scope.contains(path_str) {
-                            return Err(Error::Security {
-                                message: format!(
-                                    "write tool '{server_id}:{tool}' argument '{arg_name}' path '{path_str}' is outside write scope"
+                                    "write tool '{server_id}:{tool}' argument '{arg_name}' resolves outside its write scope"
                                 ),
                             });
                         }
@@ -1353,5 +1427,127 @@ mod tests {
             .map(|t| t.name.as_str())
             .collect();
         assert_eq!(names, vec!["read_file", "read.file"]);
+    }
+
+    #[test]
+    fn write_scope_rejects_orrery_first_segment() {
+        let scope = WriteScope::anywhere();
+        assert!(!scope.contains(".orrery/project.toml"));
+        assert!(!scope.contains("./.orrery/x"));
+        assert!(scope.contains("src/.orrery/x"));
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_path_arg() {
+        let role = test_role(vec!["fs:write_file"]);
+        let mock = Arc::new(MockMcpTransport::new("fs").with_tool("write_file", json!({})));
+        let mut gatekeeper = McpGatekeeper::new();
+        gatekeeper.register(
+            "fs",
+            mock.clone(),
+            vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string()],
+            }],
+        );
+
+        let err = gatekeeper
+            .execute_for_role(
+                &role,
+                &WriteScope::anywhere(),
+                "fs",
+                "write_file",
+                json!({}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Security { .. }));
+        assert!(mock.calls().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_rejects_symlink_escape() {
+        let root_dir = tempfile::TempDir::new().unwrap();
+        let outside_dir = tempfile::TempDir::new().unwrap();
+        let r = root_dir.path();
+        std::fs::create_dir_all(r.join("src")).unwrap();
+        std::os::unix::fs::symlink(outside_dir.path(), r.join("src/escape")).unwrap();
+
+        let role = test_role(vec!["fs:write_file"]);
+        let mock = Arc::new(MockMcpTransport::new("fs").with_tool("write_file", json!({})));
+        let mut gatekeeper = McpGatekeeper::new();
+        gatekeeper.set_project_root(r.to_path_buf());
+        gatekeeper.register(
+            "fs",
+            mock.clone(),
+            vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string()],
+            }],
+        );
+        let scope = WriteScope::new(vec!["src".to_string()]).unwrap();
+
+        let err = gatekeeper
+            .execute_for_role(
+                &role,
+                &scope,
+                "fs",
+                "write_file",
+                json!({"path": "src/escape/x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Security { .. }));
+        assert!(mock.calls().is_empty());
+
+        let ok = gatekeeper
+            .execute_for_role(
+                &role,
+                &scope,
+                "fs",
+                "write_file",
+                json!({"path": "src/ok.txt"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok, json!({}));
+        assert_eq!(mock.calls().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_rejects_symlink_into_orrery() {
+        let root_dir = tempfile::TempDir::new().unwrap();
+        let r = root_dir.path();
+        std::fs::create_dir_all(r.join(".orrery")).unwrap();
+        std::fs::create_dir_all(r.join("src")).unwrap();
+        std::os::unix::fs::symlink(r.join(".orrery"), r.join("src/o")).unwrap();
+
+        let role = test_role(vec!["fs:write_file"]);
+        let mock = Arc::new(MockMcpTransport::new("fs").with_tool("write_file", json!({})));
+        let mut gatekeeper = McpGatekeeper::new();
+        gatekeeper.set_project_root(r.to_path_buf());
+        gatekeeper.register(
+            "fs",
+            mock.clone(),
+            vec![WriteToolSpec {
+                tool: "write_file".to_string(),
+                path_args: vec!["path".to_string()],
+            }],
+        );
+
+        let err = gatekeeper
+            .execute_for_role(
+                &role,
+                &WriteScope::anywhere(),
+                "fs",
+                "write_file",
+                json!({"path": "src/o/x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Security { .. }));
+        assert!(mock.calls().is_empty());
     }
 }
