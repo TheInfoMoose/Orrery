@@ -77,7 +77,13 @@ Launch the TUI with `orrery` (or `orrery <PATH>`).
 | Key / Input | Action |
 | :--- | :--- |
 | `Tab` / `BackTab` | Cycle focus: `TopMenu` → `StepsPanel` → `StageCanvas` → `LiveStream` → `FooterMenu` |
-| `Up` / `Down` / `Left` / `Right` | Move within the focused panel; scroll when the panel is a list or in the `Settings` modal (`Help` does not scroll) |
+| `Left` / `Right` | `TopMenu` and `FooterMenu`: move between items |
+| `Up` / `Down` | `StepsPanel`: move the step selection |
+| `Left` / `Right`, `Up` / `Down` | `StageCanvas`: `Left` / `Right` move between stages; `Up` / `Down` move between the stage header and agent slots |
+| `Delete` | `StageCanvas`: unassign the agent in the selected slot (not the header) |
+| `Up` / `Down`, `PageUp` / `PageDown`, `End` | `LiveStream`: `Up` / `Down` scroll one line, `PageUp` / `PageDown` scroll 10 lines (`STREAM_PAGE_STEP`), `End` returns to follow mode |
+| `Up` / `Down` | Selector modal: move the choice; `Settings` modal: scroll (`Help` does not scroll) |
+| `y` / `Enter`, `n` / `Esc` | Quit confirmation (shown by `q` while a workflow runs): `y` / `Enter` quits; `n` / `Esc` cancels |
 | `Enter` / `Space` | Activate the focused control, open a role/agent selector, open the `Cycles` modal in `Loop` mode, or confirm a modal |
 | `+` / `-` | Adjust the focused numeric control (`Cycles` in `Loop` mode, `Stages`) |
 | `Esc` | Close the active modal or cancel text entry (in `Help` and `Settings`, `Esc`, `Enter`, or `q` close the modal) |
