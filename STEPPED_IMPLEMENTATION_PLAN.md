@@ -2198,7 +2198,7 @@ Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
-- `README.md:80` TUI keys arrow row — Settings scrolls with `Up`/`Down` only (`app.rs` `Modal::Settings`), but the row lists all four arrows next to "in the `Settings` modal" — reword to "`Up`/`Down` scroll the `Settings` modal". Found validating Step 57; the §9.12.7 spec said "arrows".
+- `README.md:80` TUI keys arrow row — vague about which arrows do what. Per `app.rs`: `Left`/`Right` move between items in TopMenu (`handle_top_menu_key`), between stages in StageCanvas (`handle_stage_canvas_key`) and between buttons in FooterMenu (`handle_footer_menu_key`); `Up`/`Down` move in StepsPanel, between agent slots in StageCanvas, in the Selector modal, and scroll LiveStream and the Settings modal. LiveStream also takes `PageUp`/`PageDown`/`End`, which the README doesn't list — give arrows a row per panel and add the paging keys. Found validating Step 57; the §9.12.7 spec said "arrows".
 
 ---
 
