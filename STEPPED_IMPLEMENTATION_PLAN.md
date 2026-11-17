@@ -3242,6 +3242,7 @@ Rules:
 - **F64-4** to **F64-7** accepted on the quoted evidence, Low. In order: the `OsKeyringStore` probe bypasses `ctx.secrets`; stdin secret copies aren't zeroized and errors aren't redacted in `main`; the README layout omits `inference.toml` (confirmed against `README.md:95-99`); and there are CLI test gaps.
 
 **Phase G totals:** 41 findings and 39 distinct defects (F60-1 and F61-4 duplicate F59-4): 5 High, 18 Medium, 16 Low. For Claude re-review: F63-4 (does the engine drain stale operator decisions?), F61-1's 409-on-resume claim, the symlink half of F62-1, F62-5 (what the rmcp `auth_header` API allows), and F59-2 (operator's call on reset semantics).
+- **F59-2 settled** (operator, 2026-11-16): an operator decision resets `consecutive_violations` and `stage_ran_since_gate_failure`, as the code does now. No code change; the next phase writes this rule into the spec.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
