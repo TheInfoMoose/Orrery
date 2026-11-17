@@ -19,15 +19,14 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 68** | `/goal` | MCP stderr bytes and log tail | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/stream_log.rs` | — |
-| 2 | **STEP 69** | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` | — |
-| 3 | **STEP 70** | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | STEP 69 |
-| 4 | **STEP 71** | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` | STEP 70 |
-| 5 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
-| 6 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
-| 7 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
-| 8 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
-| 9 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
+| 1 | **STEP 69** | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` | — |
+| 2 | **STEP 70** | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | STEP 69 |
+| 3 | **STEP 71** | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` | STEP 70 |
+| 4 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
+| 5 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
+| 6 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
+| 7 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
+| 8 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -101,6 +100,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 65** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Config ID integrity | `crates/orrery-core/src/config.rs` |
 | **STEP 66** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | MCP write-scope hardening | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 67** | **COMPLETED** (2026-11-17, validate-step PASS after a gate fix; not a strike) | `/goal` | MCP timeouts | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` |
+| **STEP 68** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | MCP stderr bytes and log tail | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/stream_log.rs` |
 
 ---
 
@@ -2220,6 +2220,7 @@ Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs th
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
 - `crates/orrery-core/src/config.rs:1800-1809` `remove_role`: the role's TOML is deleted before the peer scan that Step 65 made fallible, so an unreadable peer file makes the command fail with the role already gone (the shared rules file is kept, so it fails safe). Fix: read the peers before `remove_file`. Found validating Step 65; the §9.14.1 spec didn't set the order.
 - `crates/orrery-core` `chrono` use (`Utc::now`, `DateTime<Utc>` in `stream_log.rs`, `checkpoint.rs`, `llm.rs`) — RUSTSEC-2026-0543 marks chrono unmaintained; `deny.toml` ignores it (operator, 2026-11-17) because rmcp 3.9 depends on it too. Migrate orrery-core to `jiff` or `time` to cut our direct use, and drop the ignore once rmcp no longer pulls chrono. Low.
+- `crates/orrery-core/src/mcp.rs` `spawn_stderr_forwarder` 4096-byte cut — `pending.drain(..4096)` can split a multi-byte UTF-8 character, which then shows as U+FFFD on both sides — cut at the last char boundary (`from_utf8(..).valid_up_to()`), as Step 72's `LineSplitter` does, or reuse `LineSplitter`. Found validating Step 68; the §9.14.4 spec didn't ask for it. Low.
 
 ---
 
