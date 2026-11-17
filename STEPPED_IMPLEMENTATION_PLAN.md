@@ -2219,6 +2219,7 @@ Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs th
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
 - `crates/orrery-core/src/config.rs:1800-1809` `remove_role`: the role's TOML is deleted before the peer scan that Step 65 made fallible, so an unreadable peer file makes the command fail with the role already gone (the shared rules file is kept, so it fails safe). Fix: read the peers before `remove_file`. Found validating Step 65; the §9.14.1 spec didn't set the order.
+- `crates/orrery-core` `chrono` use (`Utc::now`, `DateTime<Utc>` in `stream_log.rs`, `checkpoint.rs`, `llm.rs`) — RUSTSEC-2026-0543 marks chrono unmaintained; `deny.toml` ignores it (operator, 2026-11-17) because rmcp 3.9 depends on it too. Migrate orrery-core to `jiff` or `time` to cut our direct use, and drop the ignore once rmcp no longer pulls chrono. Low.
 
 ---
 
