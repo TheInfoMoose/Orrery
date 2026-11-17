@@ -3070,7 +3070,8 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 Written 2026-11-16 against `7dba031`. LIVE-2 and Step 58 don't depend on each other. Any LIVE-2 failure is parked and reviewed at phase end, like any side finding.
 
-### User Step: LIVE-2 — live-backend suite after Phase E
+### User Step: LIVE-2 — live-backend suite after Phase E (COMPLETED 2026-11-16)
+Done by the operator; every live test passed. Values: `qwen25-coder-3b-q4` on `127.0.0.1:8080` for `ORRERY_LIVE_LLM_*` and for `ORRERY_LIVE_CLOUD_*` (the CloudApi path against a local OpenAI-compatible server, not a real cloud provider); `npx -y @modelcontextprotocol/server-everything` for `ORRERY_LIVE_MCP_CMD`; busybox and `orrery-live-test` for Docker. The only warnings came from npm deprecation and update notices.
 The operator runs this; it needs their endpoints and API key. It is the first real run of `live_cloud_api_turn`, `live_cli_driver_reads_report` and `live_engine_run_with_real_backends` (Step 50). It also exercises the Step 52 Bearer path, the Step 53 hidden-tool scan and the Step 55 log path.
 ```bash
 cargo run -p orrery-cli --locked -- secret set --service orrery.test.cloud --account testuser
