@@ -19,9 +19,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 55** | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` | — |
-| 2 | **STEP 56** | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` | — |
-| 3 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
+| 1 | **STEP 56** | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` | — |
+| 2 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
 
 ### Completed
 
@@ -82,6 +81,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 52** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Zeroized Bearer header copy | `crates/orrery-core/src/llm.rs` |
 | **STEP 53** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Report hidden MCP tools | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 54** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Byte-safe log follower | `crates/orrery-core/src/stream_log.rs` |
+| **STEP 55** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` |
 
 ---
 
