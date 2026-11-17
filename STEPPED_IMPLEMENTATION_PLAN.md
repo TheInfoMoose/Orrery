@@ -19,8 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 78** | `/goal` | MCP stderr uses the line splitter | `crates/orrery-core/src/mcp.rs` | STEP 77 |
-| 2 | **STEP 79** | `/goal` | remove_role checks peers first | `crates/orrery-core/src/config.rs` | — |
+| 1 | **STEP 79** | `/goal` | remove_role checks peers first | `crates/orrery-core/src/config.rs` | — |
 
 ### Completed
 
@@ -104,6 +103,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 75** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` |
 | **STEP 76** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 77** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Line splitter caps every line | `crates/orrery-core/src/docker.rs` |
+| **STEP 78** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | MCP stderr uses the line splitter | `crates/orrery-core/src/mcp.rs` |
 
 ---
 
