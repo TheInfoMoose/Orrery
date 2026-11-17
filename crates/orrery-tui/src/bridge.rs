@@ -296,7 +296,11 @@ impl EngineController {
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 events_open = false;
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                let _ = stream_tx.try_send(StreamEvent::notice(format!(
+                                    "{n} engine events dropped; statuses may be stale"
+                                )));
+                            }
                         }
                     }
                     res = &mut run_fut => {
@@ -357,11 +361,11 @@ impl EngineController {
                     app.config.step_marker = "## Step ".to_string();
                 }
                 self.store.save_project(&app.config)?;
-                app.plan = Some(plan);
-                app.step_statuses = vec![StepStatus::Pending; step_count];
                 app.step_selected = 0;
                 app.step_scroll = 0;
                 app.status_message = Some(format!("Ingested {step_count} steps"));
+                app.step_statuses = load_step_statuses(&self.store, &plan, app);
+                app.plan = Some(plan);
             }
             AppAction::Run => {
                 if self.has_running_task() {
@@ -591,20 +595,15 @@ fn compute_regions_with_selection(area: Rect, app: &mut App) -> UiLayoutRegions 
     regions
 }
 
-fn load_initial_app(store: &ConfigStore, project_root: &Path) -> Result<App> {
-    let config = store.load_project()?;
-    let roles = store.load_roles()?;
-    let agents = store.load_agents()?;
-    let mcp_servers = store.load_mcp_servers()?;
-    let mut app = App::new(project_root.to_path_buf(), config, roles, agents);
-    app.mcp_servers = mcp_servers;
-
-    if let Ok(plan_path) = store.resolve_safe_path(&app.config.plan_path)
-        && let Ok(plan) = ImplementationPlan::from_file(&plan_path, &app.config.step_marker)
-    {
-        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
-        let statuses = match checkpoints.load_state() {
-            Ok(Some(cp)) if cp.step_statuses.len() == plan.steps.len() => {
+fn load_step_statuses(
+    store: &ConfigStore,
+    plan: &ImplementationPlan,
+    app: &mut App,
+) -> Vec<StepStatus> {
+    let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+    match checkpoints.load_state() {
+        Ok(Some(mut cp)) => match cp.reconcile(plan) {
+            Ok(_) => {
                 if cp.step_statuses.get(cp.current_step_index)
                     == Some(&StepStatus::AwaitingOperator)
                 {
@@ -614,10 +613,38 @@ fn load_initial_app(store: &ConfigStore, project_root: &Path) -> Result<App> {
                 }
                 cp.step_statuses
             }
-            _ => vec![StepStatus::Pending; plan.steps.len()],
-        };
-        app.step_statuses = statuses;
-        app.plan = Some(plan);
+            Err(e) => {
+                app.status_message = Some(e.to_string());
+                vec![StepStatus::Pending; plan.steps.len()]
+            }
+        },
+        Ok(None) => vec![StepStatus::Pending; plan.steps.len()],
+        Err(e) => {
+            app.status_message = Some(e.to_string());
+            vec![StepStatus::Pending; plan.steps.len()]
+        }
+    }
+}
+
+fn load_initial_app(store: &ConfigStore, project_root: &Path) -> Result<App> {
+    let config = store.load_project()?;
+    let roles = store.load_roles()?;
+    let agents = store.load_agents()?;
+    let mcp_servers = store.load_mcp_servers()?;
+    let mut app = App::new(project_root.to_path_buf(), config, roles, agents);
+    app.mcp_servers = mcp_servers;
+
+    match store
+        .resolve_safe_path(&app.config.plan_path)
+        .and_then(|plan_path| ImplementationPlan::from_file(&plan_path, &app.config.step_marker))
+    {
+        Ok(plan) => {
+            app.step_statuses = load_step_statuses(store, &plan, &mut app);
+            app.plan = Some(plan);
+        }
+        Err(e) => {
+            app.status_message = Some(format!("plan not loaded: {e}"));
+        }
     }
 
     Ok(app)
@@ -703,6 +730,8 @@ pub async fn run_tui(project_root: PathBuf) -> Result<()> {
             };
 
             let effects = step(&mut app, &regions, input);
+            controller.drain_channels(&mut app, &regions);
+            needs_redraw = true;
             if effects.redraw {
                 needs_redraw = true;
             }
@@ -1891,5 +1920,133 @@ mod tests {
             Some("no run in progress; Approve or Reject the waiting step")
         );
         assert!(!controller.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn initial_load_reconciles_appended_step() {
+        let (_tmp, store, app) = setup_project_dir(ValidationMode::Auto);
+        let plan_path = store
+            .resolve_safe_path(&app.config.plan_path)
+            .expect("plan path");
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nbody 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n",
+        )
+        .expect("write 3-step plan");
+        let plan =
+            ImplementationPlan::from_file(&plan_path, &app.config.step_marker).expect("parse plan");
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_statuses[0] = StepStatus::Passed;
+        cp.current_step_index = 1;
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        checkpoints.save_state(&cp).expect("save checkpoint");
+
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nbody 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n## Step 4: Four\nbody 4\n",
+        )
+        .expect("write 4-step plan");
+
+        let loaded = load_initial_app(&store, store.project_root()).expect("load_initial_app");
+        assert_eq!(
+            loaded.step_statuses,
+            vec![
+                StepStatus::Passed,
+                StepStatus::Pending,
+                StepStatus::Pending,
+                StepStatus::Pending,
+            ]
+        );
+    }
+
+    #[test]
+    fn initial_load_reports_edited_step() {
+        let (_tmp, store, app) = setup_project_dir(ValidationMode::Auto);
+        let plan_path = store
+            .resolve_safe_path(&app.config.plan_path)
+            .expect("plan path");
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nbody 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n",
+        )
+        .expect("write 3-step plan");
+        let plan =
+            ImplementationPlan::from_file(&plan_path, &app.config.step_marker).expect("parse plan");
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_statuses[0] = StepStatus::Passed;
+        cp.current_step_index = 1;
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        checkpoints.save_state(&cp).expect("save checkpoint");
+
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nedited body 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n",
+        )
+        .expect("write edited plan");
+
+        let loaded = load_initial_app(&store, store.project_root()).expect("load_initial_app");
+        assert_eq!(
+            loaded.step_statuses,
+            vec![
+                StepStatus::Pending,
+                StepStatus::Pending,
+                StepStatus::Pending,
+            ]
+        );
+        assert!(
+            loaded
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.contains("step edited")),
+            "expected 'step edited' in status_message, got {:?}",
+            loaded.status_message
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_reconciles_checkpoint() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::Auto);
+        let plan_path = store
+            .resolve_safe_path(&app.config.plan_path)
+            .expect("plan path");
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nbody 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n",
+        )
+        .expect("write 3-step plan");
+        let plan =
+            ImplementationPlan::from_file(&plan_path, &app.config.step_marker).expect("parse plan");
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_statuses[0] = StepStatus::Passed;
+        cp.current_step_index = 1;
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        checkpoints.save_state(&cp).expect("save checkpoint");
+
+        std::fs::write(
+            &plan_path,
+            "## Step 1: One\nbody 1\n## Step 2: Two\nbody 2\n## Step 3: Three\nbody 3\n## Step 4: Four\nbody 4\n",
+        )
+        .expect("write 4-step plan");
+
+        let driver = Arc::new(MockAgentDriver::new());
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver) as _))),
+        );
+
+        controller
+            .handle(&AppAction::IngestPlan(PathBuf::from("PLAN.md")), &mut app)
+            .await
+            .expect("ingest PLAN.md");
+
+        assert_eq!(
+            app.step_statuses,
+            vec![
+                StepStatus::Passed,
+                StepStatus::Pending,
+                StepStatus::Pending,
+                StepStatus::Pending,
+            ]
+        );
     }
 }
