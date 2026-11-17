@@ -78,12 +78,17 @@ struct LogWriter {
     current_size: u64,
     file: Option<File>,
     kept_error: Option<String>,
+    shared_error: Arc<Mutex<Option<String>>>,
 }
 
 impl LogWriter {
     fn record_error(&mut self, path: &Path, err: &io::Error) {
         if self.kept_error.is_none() {
-            self.kept_error = Some(format!("{}: {err}", path.display()));
+            let msg = format!("{}: {err}", path.display());
+            self.kept_error = Some(msg.clone());
+            if let Ok(mut slot) = self.shared_error.lock() {
+                *slot = Some(msg.clone());
+            }
         }
     }
 
@@ -127,6 +132,7 @@ pub struct LiveStreamHub {
     ring: Mutex<VecDeque<StreamEvent>>,
     writer_tx: Mutex<Option<mpsc::Sender<WriterMsg>>>,
     writer_handle: Option<JoinHandle<()>>,
+    write_error: Arc<Mutex<Option<String>>>,
     sender: broadcast::Sender<StreamEvent>,
 }
 
@@ -157,6 +163,8 @@ impl LiveStreamHub {
         let writer_log_dir = log_dir.clone();
         let max_file_bytes = config.max_file_bytes;
         let max_files = config.max_files;
+        let write_error = Arc::new(Mutex::new(None));
+        let shared_error = Arc::clone(&write_error);
         let writer_handle = thread::Builder::new()
             .name("orrery-log-writer".into())
             .spawn(move || {
@@ -167,6 +175,7 @@ impl LiveStreamHub {
                     current_size,
                     file: None,
                     kept_error: None,
+                    shared_error,
                 };
                 while let Ok(msg) = rx.recv() {
                     match msg {
@@ -192,6 +201,7 @@ impl LiveStreamHub {
             ring: Mutex::new(VecDeque::with_capacity(config.ring_capacity)),
             writer_tx: Mutex::new(Some(tx)),
             writer_handle: Some(writer_handle),
+            write_error,
             sender,
         })
     }
@@ -228,6 +238,39 @@ impl LiveStreamHub {
         }
 
         let _ = self.sender.send(event);
+
+        let write_err = {
+            let mut slot = self.write_error.lock().map_err(|_| Error::Security {
+                message: "LiveStreamHub lock poisoned".into(),
+            })?;
+            slot.take()
+        };
+
+        if let Some(msg) = write_err {
+            let err_event = StreamEvent {
+                timestamp: Utc::now(),
+                step_number: None,
+                stage_index: None,
+                agent_id: None,
+                kind: StreamEventKind::Error,
+                text: self
+                    .redactor
+                    .redact(&format!("live stream log write failed: {msg}"))?,
+            };
+            {
+                let mut ring = self.ring.lock().map_err(|_| Error::Security {
+                    message: "LiveStreamHub lock poisoned".into(),
+                })?;
+                if self.config.ring_capacity > 0 {
+                    if ring.len() >= self.config.ring_capacity {
+                        ring.pop_front();
+                    }
+                    ring.push_back(err_event.clone());
+                }
+            }
+            let _ = self.sender.send(err_event);
+        }
+
         Ok(())
     }
 
@@ -997,6 +1040,36 @@ mod tests {
         assert_eq!(
             follower.poll().expect("poll completed utf8"),
             vec!["split é done".to_string()]
+        );
+    }
+
+    #[test]
+    fn write_error_broadcasts_once() {
+        let dir = TempDir::new().expect("tempdir");
+        let hub = LiveStreamHub::new(
+            dir.path().to_path_buf(),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .expect("create hub");
+        fs::create_dir(dir.path().join(LOG_FILE)).expect("create blocking directory");
+
+        hub.emit(StreamEvent::notice("a")).expect("emit a");
+        let err = hub.flush().expect_err("flush should return Err");
+        assert!(matches!(err, crate::Error::Io { .. }));
+
+        hub.emit(StreamEvent::notice("b")).expect("emit b");
+
+        let recent = hub.recent(20).expect("recent");
+        let errors: Vec<&StreamEvent> = recent
+            .iter()
+            .filter(|e| e.kind == StreamEventKind::Error)
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].text.starts_with("live stream log write failed: "),
+            "unexpected error text: {}",
+            errors[0].text
         );
     }
 }
