@@ -229,6 +229,7 @@ impl EngineController {
 
         app.status = RunStatus::Running;
         app.awaiting_operator = false;
+        app.run_passed = 0;
 
         let store = self.store.clone();
         let make_backends = Arc::clone(&self.make_backends);
@@ -262,7 +263,7 @@ impl EngineController {
                     maybe_dec = op_rx.recv(), if op_open => {
                         match maybe_dec {
                             Some(dec) => {
-                                let _ = eng_op_tx.send(dec).await;
+                                forward_operator_decision(&eng_op_tx, &stream_tx, dec);
                             }
                             None => {
                                 op_open = false;
@@ -366,7 +367,6 @@ impl EngineController {
                 if self.has_running_task() {
                     return Ok(());
                 }
-                app.run_passed = 0;
                 self.start_run(app);
             }
             AppAction::Interrupt => {
@@ -408,6 +408,21 @@ impl EngineController {
             AppAction::SetMouseCapture(_) | AppAction::Quit => {}
         }
         Ok(())
+    }
+}
+
+fn forward_operator_decision(
+    eng_op_tx: &mpsc::Sender<OperatorDecision>,
+    stream_tx: &mpsc::Sender<StreamEvent>,
+    dec: OperatorDecision,
+) {
+    match eng_op_tx.try_send(dec) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            let _ = stream_tx.try_send(StreamEvent::notice(
+                "operator decision dropped: channel full",
+            ));
+        }
     }
 }
 
@@ -1542,6 +1557,7 @@ mod tests {
         checkpoints.save_state(&cp).expect("save checkpoint");
 
         app = load_initial_app(&store, store.project_root()).expect("load_initial_app");
+        app.run_passed = 5;
         assert_eq!(app.status, RunStatus::AwaitingOperator);
         assert!(app.awaiting_operator);
 
@@ -1639,6 +1655,7 @@ mod tests {
             .expect("checkpoint exists");
         assert_eq!(saved.step_statuses[0], StepStatus::Passed);
         assert_eq!(saved.operator_decision, None);
+        assert_eq!(app.run_passed, 1);
     }
 
     #[tokio::test]
@@ -1694,5 +1711,38 @@ mod tests {
             .await;
         assert!(res.is_err());
         assert_eq!(app.config.step_marker, "## Step ");
+    }
+
+    #[tokio::test]
+    async fn forward_operator_decision_delivers() {
+        let (eng_op_tx, mut eng_op_rx) = mpsc::channel(1);
+        let (stream_tx, mut stream_rx) = mpsc::channel(1);
+
+        forward_operator_decision(&eng_op_tx, &stream_tx, OperatorDecision::Approve);
+
+        assert_eq!(eng_op_rx.try_recv().unwrap(), OperatorDecision::Approve);
+        assert!(stream_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn forward_operator_decision_full_sends_notice() {
+        let (eng_op_tx, mut eng_op_rx) = mpsc::channel(1);
+        let (stream_tx, mut stream_rx) = mpsc::channel(1);
+
+        eng_op_tx.try_send(OperatorDecision::Approve).unwrap();
+        forward_operator_decision(
+            &eng_op_tx,
+            &stream_tx,
+            OperatorDecision::Reject {
+                feedback: "x".into(),
+            },
+        );
+
+        let sev = stream_rx.try_recv().unwrap();
+        assert_eq!(sev.kind, StreamEventKind::SystemNotice);
+        assert_eq!(sev.text, "operator decision dropped: channel full");
+        assert!(stream_rx.try_recv().is_err());
+        assert_eq!(eng_op_rx.try_recv().unwrap(), OperatorDecision::Approve);
+        assert!(eng_op_rx.try_recv().is_err());
     }
 }
