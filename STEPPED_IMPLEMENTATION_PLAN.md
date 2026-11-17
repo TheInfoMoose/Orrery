@@ -19,7 +19,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 57** | `/goal` | README states only what is verified | `README.md` | — |
 
 ### Completed
 
@@ -82,6 +81,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 54** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Byte-safe log follower | `crates/orrery-core/src/stream_log.rs` |
 | **STEP 55** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` |
 | **STEP 56** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` |
+| **STEP 57** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README states only what is verified | `README.md` |
 
 ---
 
@@ -2198,6 +2198,7 @@ Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
+- `README.md:80` TUI keys arrow row — Settings scrolls with `Up`/`Down` only (`app.rs` `Modal::Settings`), but the row lists all four arrows next to "in the `Settings` modal" — reword to "`Up`/`Down` scroll the `Settings` modal". Found validating Step 57; the §9.12.7 spec said "arrows".
 
 ---
 
