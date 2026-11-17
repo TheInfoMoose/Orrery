@@ -1326,3 +1326,16 @@ impl LogFollower {
 - Requirements: the OS line states §9.12.1 (Linux x86_64 tested; aarch64 untested; macOS and Windows not supported yet, planned). The Rust line is "Rust 1.99.1 or newer (workspace `rust-version`), edition 2024". The Docker line says Docker Engine is tested, `DOCKER_HOST` is honored, and rootless Docker and Podman are untested.
 - TUI keys: arrows scroll the Settings modal only; Help doesn't scroll. In Help and Settings, `Esc`, `Enter` or `q` close the modal.
 - The seven `##` sections and everything else stay as they are.
+
+### 9.13 Phase F: README keys and live verification (Step 58, User Step LIVE-2)
+
+#### 9.13.1 README TUI keys per panel (Step 58) (overrides §9.12.7 TUI keys)
+- The single `Up` / `Down` / `Left` / `Right` row becomes one row per focus area, matching `crates/orrery-tui/src/app.rs`:
+  - `TopMenu` and `FooterMenu`: `Left` / `Right` move between items.
+  - `StepsPanel`: `Up` / `Down` move the step selection.
+  - `StageCanvas`: `Left` / `Right` move between stages; `Up` / `Down` move between the stage header and agent slots.
+  - `StageCanvas`: `Delete` unassigns the agent in the selected slot (not the header).
+  - `LiveStream`: `Up` / `Down` scroll one line, `PageUp` / `PageDown` scroll 10 lines (`STREAM_PAGE_STEP`), `End` returns to follow mode.
+  - Selector modal: `Up` / `Down` move the choice. `Settings` modal: `Up` / `Down` scroll. `Help` doesn't scroll.
+  - Quit confirmation (shown by `q` while a workflow runs): `y` or `Enter` quits; `n` or `Esc` cancels.
+- Rows that are wrong or missing per `app.rs` are fixed or added; every other row and section stays word for word.

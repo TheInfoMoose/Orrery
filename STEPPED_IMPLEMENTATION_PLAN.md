@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51) and Phase E (52–57). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57) and Phase F (58). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (57). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (58). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 58** | `/goal` | README TUI keys per panel | `README.md` | — |
 
 ### Completed
 
@@ -2195,10 +2196,10 @@ Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `
 
 ### Parked
 Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52–56). The rest stay parked.
+Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs the live suite.
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
-- `README.md:80` TUI keys arrow row — vague about which arrows do what. Per `app.rs`: `Left`/`Right` move between items in TopMenu (`handle_top_menu_key`), between stages in StageCanvas (`handle_stage_canvas_key`) and between buttons in FooterMenu (`handle_footer_menu_key`); `Up`/`Down` move in StepsPanel, between agent slots in StageCanvas, in the Selector modal, and scroll LiveStream and the Settings modal. LiveStream also takes `PageUp`/`PageDown`/`End`, which the README doesn't list — give arrows a row per panel and add the paging keys. Found validating Step 57; the §9.12.7 spec said "arrows".
 
 ---
 
@@ -3056,6 +3057,58 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 
 [POST_GATE]
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && test "$(grep -cE '^## (Requirements|Build|Quickstart|TUI keys|Project layout|Security|Live-backend tests)$' README.md)" -eq 7 && grep -q '1.99.1' README.md && grep -qi 'macOS and Windows are not supported yet' README.md && grep -qi 'untested' README.md && ! grep -qE 'modal \(`Settings`, `Help`\)' README.md && grep -q 'trap exit TERM' README.md && ! grep -qE '/(home|srv|Users|root)/' README.md && test "$(git diff --numstat -- README.md | awk '{print $1}')" -le 8
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+## Phase F — README keys and live verification (Step 58, User Step LIVE-2)
+
+**Phase goal (frozen until the phase ends):** the README's TUI keys table lists every key `app.rs` handles in each panel, so keyboard-only operation is documented as base function; and the operator runs the live-backend suite against Steps 50–57, since nothing from that range has touched a real backend yet. Design: spec §9.13 (`ORRERY_TECHNICAL_SPECIFICATION.md:1330-1341`).
+
+Written 2026-11-16 against `7dba031`. LIVE-2 and Step 58 don't depend on each other. Any LIVE-2 failure is parked and reviewed at phase end, like any side finding.
+
+### User Step: LIVE-2 — live-backend suite after Phase E
+The operator runs this; it needs their endpoints and API key. It is the first real run of `live_cloud_api_turn`, `live_cli_driver_reads_report` and `live_engine_run_with_real_backends` (Step 50). It also exercises the Step 52 Bearer path, the Step 53 hidden-tool scan and the Step 55 log path.
+```bash
+cargo run -p orrery-cli --locked -- secret set --service orrery.test.cloud --account testuser
+docker create --name orrery-live-test busybox:1.37 sh -c 'trap exit TERM; while :; do sleep 1; done'   # skip if it exists from LIVE-1
+ORRERY_LIVE_MCP_CMD=<stdio-mcp-cmd> ORRERY_LIVE_IMAGE=busybox:1.37 ORRERY_LIVE_CONTAINER=orrery-live-test ORRERY_LIVE_LLM_URL=<llama-url> ORRERY_LIVE_LLM_MODEL=<model> ORRERY_LIVE_CLOUD_URL=<full chat-completions url> ORRERY_LIVE_CLOUD_MODEL=<model> cargo test --workspace --locked --features orrery-core/live-backends
+```
+Report: pass/fail per test, and the panic text of any failure. `live_engine_run_with_real_backends` can take up to 600 s.
+
+### STEP 58: README TUI Keys Per Panel
+
+* **Recommended Command:** `/goal`
+
+Scope note: Found validating Step 57. The README folds all four arrows into one vague row, so `Left`/`Right` look unsupported even though TopMenu, StageCanvas and FooterMenu use them. It also leaves out LiveStream's `PageUp`/`PageDown`/`End`, StageCanvas `Delete` and the quit-confirmation keys.
+
+```text
+[STEP_ID]
+STEP 58: README.md — TUI keys table gets one arrow row per focus area plus LiveStream paging, StageCanvas Delete and quit-confirm keys
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1332-1341 (§9.13.1; binding)
+  - README.md:73-90 (TUI keys)
+  - crates/orrery-tui/src/app.rs:19 (STREAM_PAGE_STEP), 459-505 (Selector and QuitConfirm modals), 516-533 (Settings modal), 682-692 (handle_top_menu_key), 749-830 (handle_steps_panel_key, handle_stage_canvas_key incl. Delete), 879-903 (handle_live_stream_key), 905-916 (handle_footer_menu_key)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Only the TUI keys table changes. The seven `##` sections and every other section stay word for word. No host paths, real hostnames or real accounts.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^| `Up` / `Down` / `Left` / `Right` |' README.md && ! grep -q 'PageUp' README.md && sed -n 1332p $S | grep -q '^#### 9.13.1 '
+
+[MUTATION_SPEC]
+1. README.md TUI keys table: replace the `| \`Up\` / \`Down\` / \`Left\` / \`Right\` | … |` row with one row per §9.13.1 bullet, in that order (TopMenu/FooterMenu, StepsPanel, StageCanvas arrows, StageCanvas `Delete`, LiveStream, Selector/Settings/Help). Each row's first cell names the keys; the second names the focus area or modal and the action.
+2. Add a row for the quit confirmation: `y` / `Enter` quits, `n` / `Esc` cancels.
+3. No other row, line or section changes.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && test "$(grep -cE '^## (Requirements|Build|Quickstart|TUI keys|Project layout|Security|Live-backend tests)$' README.md)" -eq 7 && ! grep -q '^| `Up` / `Down` / `Left` / `Right` |' README.md && grep -q 'PageUp' README.md && grep -q 'PageDown' README.md && grep -q '`End`' README.md && grep -q '`Delete`' README.md && grep -q 'FooterMenu' README.md && grep -qE '`y`' README.md && grep -q 'macOS and Windows are not supported yet' README.md && grep -q 'trap exit TERM' README.md && ! grep -qE '/(home|srv|Users|root)/' README.md && test "$(git diff --numstat -- README.md | awk '{print $2}')" -le 2
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
