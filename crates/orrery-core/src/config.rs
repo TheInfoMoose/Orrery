@@ -154,6 +154,7 @@ impl fmt::Display for Warning {
 pub struct RuntimeLimits {
     pub max_tool_calls: usize,
     pub model_idle_timeout_secs: u64,
+    pub mcp_call_timeout_secs: u64,
     pub live_stream_ring_capacity: usize,
     pub live_stream_max_file_bytes: u64,
     pub live_stream_max_files: usize,
@@ -164,6 +165,7 @@ impl Default for RuntimeLimits {
         Self {
             max_tool_calls: 50,
             model_idle_timeout_secs: 300,
+            mcp_call_timeout_secs: 600,
             live_stream_ring_capacity: 2_000,
             live_stream_max_file_bytes: 10 * 1024 * 1024,
             live_stream_max_files: 3,
@@ -183,6 +185,12 @@ impl RuntimeLimits {
             return Err(Error::Validation {
                 field: "limits.model_idle_timeout_secs".to_string(),
                 message: "model_idle_timeout_secs must be in 1..=86_400".to_string(),
+            });
+        }
+        if !(1..=86_400).contains(&self.mcp_call_timeout_secs) {
+            return Err(Error::Validation {
+                field: "limits.mcp_call_timeout_secs".to_string(),
+                message: "mcp_call_timeout_secs must be in 1..=86_400".to_string(),
             });
         }
         if self.live_stream_ring_capacity < 1 {
@@ -4004,6 +4012,32 @@ max_context_tokens = 1024
         match project.validate_staging().unwrap_err() {
             Error::Validation { field, .. } => assert_eq!(field, "limits.live_stream_max_files"),
             other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn limits_mcp_call_timeout_bounds() {
+        assert_eq!(RuntimeLimits::default().mcp_call_timeout_secs, 600);
+
+        for bad in [0, 86_401] {
+            let limits = RuntimeLimits {
+                mcp_call_timeout_secs: bad,
+                ..RuntimeLimits::default()
+            };
+            match limits.validate().unwrap_err() {
+                Error::Validation { field, .. } => {
+                    assert_eq!(field, "limits.mcp_call_timeout_secs");
+                }
+                other => panic!("expected Error::Validation, got {other:?}"),
+            }
+        }
+
+        for good in [1, 86_400] {
+            let limits = RuntimeLimits {
+                mcp_call_timeout_secs: good,
+                ..RuntimeLimits::default()
+            };
+            assert!(limits.validate().is_ok());
         }
     }
 

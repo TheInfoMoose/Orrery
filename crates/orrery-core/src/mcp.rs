@@ -14,6 +14,8 @@ use crate::security::SecretStore;
 use crate::stream_log::{LiveStreamHub, StreamEvent};
 use crate::{Error, Result};
 
+pub const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpToolSchema {
     pub server_id: String,
@@ -161,6 +163,7 @@ pub struct McpGatekeeper {
     write_tools: HashMap<String, Vec<WriteToolSpec>>,
     catalog: Vec<McpToolSchema>,
     project_root: Option<PathBuf>,
+    call_timeout: Option<std::time::Duration>,
 }
 
 impl McpGatekeeper {
@@ -170,6 +173,10 @@ impl McpGatekeeper {
 
     pub fn set_project_root(&mut self, root: PathBuf) {
         self.project_root = Some(root);
+    }
+
+    pub fn set_call_timeout(&mut self, timeout: std::time::Duration) {
+        self.call_timeout = Some(timeout);
     }
 
     pub fn register(
@@ -327,7 +334,18 @@ impl McpGatekeeper {
             }
         }
 
-        transport.call_tool(tool, args).await
+        match self.call_timeout {
+            Some(t) => tokio::time::timeout(t, transport.call_tool(tool, args))
+                .await
+                .map_err(|_| Error::Mcp {
+                    server_id: server_id.to_string(),
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!("tool '{server_id}:{tool}' timed out after {}s", t.as_secs()),
+                    )),
+                })?,
+            None => transport.call_tool(tool, args).await,
+        }
     }
 }
 
@@ -569,8 +587,15 @@ impl RmcpTransport {
                         transport
                     }
                 };
-                rmcp::ServiceExt::serve((), transport)
+                tokio::time::timeout(MCP_CONNECT_TIMEOUT, rmcp::ServiceExt::serve((), transport))
                     .await
+                    .map_err(|_| Error::Mcp {
+                        server_id: server_id.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "MCP handshake timed out after 60s",
+                        )),
+                    })?
                     .map_err(|e| Error::Mcp {
                         server_id: server_id.clone(),
                         source: Box::new(e),
@@ -600,8 +625,15 @@ impl RmcpTransport {
                     }
                 }
                 let transport = rmcp::transport::StreamableHttpClientTransport::from_config(cfg);
-                rmcp::ServiceExt::serve((), transport)
+                tokio::time::timeout(MCP_CONNECT_TIMEOUT, rmcp::ServiceExt::serve((), transport))
                     .await
+                    .map_err(|_| Error::Mcp {
+                        server_id: server_id.clone(),
+                        source: Box::new(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "MCP handshake timed out after 60s",
+                        )),
+                    })?
                     .map_err(|e| Error::Mcp {
                         server_id: server_id.clone(),
                         source: Box::new(e),
@@ -635,28 +667,38 @@ where
 #[async_trait]
 impl McpTransport for RmcpTransport {
     async fn list_tools(&self) -> Result<Vec<McpToolSchema>> {
-        let tools = self
-            .service
-            .peer()
-            .list_all_tools()
-            .await
-            .map_err(|e| Error::Mcp {
-                server_id: self.server_id.clone(),
-                source: Box::new(e),
-            })?;
+        tokio::time::timeout(MCP_CONNECT_TIMEOUT, async {
+            let tools = self
+                .service
+                .peer()
+                .list_all_tools()
+                .await
+                .map_err(|e| Error::Mcp {
+                    server_id: self.server_id.clone(),
+                    source: Box::new(e),
+                })?;
 
-        Ok(tools
-            .into_iter()
-            .map(|tool| McpToolSchema {
-                server_id: self.server_id.clone(),
-                name: tool.name.into_owned(),
-                description: tool
-                    .description
-                    .map(std::borrow::Cow::into_owned)
-                    .unwrap_or_default(),
-                input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-            })
-            .collect())
+            Ok(tools
+                .into_iter()
+                .map(|tool| McpToolSchema {
+                    server_id: self.server_id.clone(),
+                    name: tool.name.into_owned(),
+                    description: tool
+                        .description
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap_or_default(),
+                    input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
+                })
+                .collect())
+        })
+        .await
+        .map_err(|_| Error::Mcp {
+            server_id: self.server_id.clone(),
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "list_tools timed out after 60s",
+            )),
+        })?
     }
 
     async fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
@@ -1549,5 +1591,51 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, Error::Security { .. }));
         assert!(mock.calls().is_empty());
+    }
+
+    struct SlowTransport;
+
+    #[async_trait::async_trait]
+    impl McpTransport for SlowTransport {
+        async fn list_tools(&self) -> crate::Result<Vec<super::McpToolSchema>> {
+            Ok(vec![super::McpToolSchema {
+                server_id: "slow".to_string(),
+                name: "hang".to_string(),
+                description: "slow".to_string(),
+                input_schema: json!({"type": "object"}),
+            }])
+        }
+
+        async fn call_tool(
+            &self,
+            _name: &str,
+            _args: serde_json::Value,
+        ) -> crate::Result<serde_json::Value> {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_times_out_slow_tool() {
+        let role = test_role(vec!["slow:hang"]);
+        let mut gatekeeper = McpGatekeeper::new();
+        gatekeeper.register("slow", Arc::new(SlowTransport), Vec::new());
+        gatekeeper.set_call_timeout(std::time::Duration::from_millis(50));
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            gatekeeper.execute_for_role(&role, &WriteScope::anywhere(), "slow", "hang", json!({})),
+        )
+        .await
+        .expect("execute_for_role should time out within 5s");
+
+        match res.unwrap_err() {
+            Error::Mcp { server_id, source } => {
+                assert_eq!(server_id, "slow");
+                assert!(source.to_string().contains("timed out"));
+            }
+            other => panic!("expected Error::Mcp, got {other:?}"),
+        }
     }
 }
