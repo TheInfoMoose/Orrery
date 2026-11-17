@@ -19,11 +19,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
-| 2 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
-| 3 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
-| 4 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
-| 5 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
+| 1 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
+| 2 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
+| 3 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
+| 4 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -101,6 +100,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 69** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` |
 | **STEP 70** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` |
 | **STEP 71** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` |
+| **STEP 72** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` |
 
 ---
 
@@ -2223,6 +2223,7 @@ Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs th
 - `crates/orrery-core/src/mcp.rs` `spawn_stderr_forwarder` 4096-byte cut — `pending.drain(..4096)` can split a multi-byte UTF-8 character, which then shows as U+FFFD on both sides — cut at the last char boundary (`from_utf8(..).valid_up_to()`), as Step 72's `LineSplitter` does, or reuse `LineSplitter`. Found validating Step 68; the §9.14.4 spec didn't ask for it. Low.
 
 ---
+- crates/orrery-core/src/docker.rs `LineSplitter::push` — a line whose `\n` arrives in the same chunk is drained before the cap, so it can exceed `MAX_OUTPUT_LINE_BYTES` — apply the same char-boundary cap to newline-drained lines (Low; found in STEP 72 validation).
 
 ### STEP 38: MCP Child Stderr into the Live Stream
 
