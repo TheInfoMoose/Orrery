@@ -3854,7 +3854,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 3. Tests in `docker::tests`:
    - `line_splitter_joins_across_chunks`: push `b"hel"` → `[]`; push `b"lo\r\nwor"` → `["hello"]`; `finish()` → `Some("wor")`.
    - `line_splitter_keeps_utf8_across_chunks`: push `b"caf\xc3"` → `[]`; push `b"\xa9\n"` → `["café"]`.
-   - `line_splitter_caps_long_lines`: 4095 × `b'a'` followed by `"é"` (2 bytes) and `b"\n"` → `["a"×4095, "é"]`, the first piece cut at the boundary before `é`.
+   - `line_splitter_caps_long_lines`: push 4095 × `b'a'` followed by `"é"` (2 bytes, 4097 bytes total, no newline) → `["a"×4095]`, cut at the char boundary before `é`; then push `b"\n"` → `["é"]`. (Two pushes: the cap only applies to `pending` with no newline left in it.)
    - `line_splitter_keeps_secret_whole`: push `b"token sk-abc"` then `b"def123\n"` → exactly `["token sk-abcdef123"]`.
 
 [POST_GATE]
