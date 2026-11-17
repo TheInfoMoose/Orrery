@@ -3074,8 +3074,16 @@ Written 2026-11-16 against `7dba031`. LIVE-2 and Step 58 don't depend on each ot
 The operator runs this; it needs their endpoints and API key. It is the first real run of `live_cloud_api_turn`, `live_cli_driver_reads_report` and `live_engine_run_with_real_backends` (Step 50). It also exercises the Step 52 Bearer path, the Step 53 hidden-tool scan and the Step 55 log path.
 ```bash
 cargo run -p orrery-cli --locked -- secret set --service orrery.test.cloud --account testuser
-docker create --name orrery-live-test busybox:1.37 sh -c 'trap exit TERM; while :; do sleep 1; done'   # skip if it exists from LIVE-1
-ORRERY_LIVE_MCP_CMD=<stdio-mcp-cmd> ORRERY_LIVE_IMAGE=busybox:1.37 ORRERY_LIVE_CONTAINER=orrery-live-test ORRERY_LIVE_LLM_URL=<llama-url> ORRERY_LIVE_LLM_MODEL=<model> ORRERY_LIVE_CLOUD_URL=<full chat-completions url> ORRERY_LIVE_CLOUD_MODEL=<model> cargo test --workspace --locked --features orrery-core/live-backends
+docker inspect orrery-live-test >/dev/null 2>&1 || docker create --name orrery-live-test busybox:1.37 sh -c 'trap exit TERM; while :; do sleep 1; done'
+# Fill in the five quoted values first (no angle brackets: bash reads <x> as a redirect).
+export ORRERY_LIVE_MCP_CMD="FILL_ME"        # stdio MCP server command line; split on whitespace
+export ORRERY_LIVE_IMAGE=busybox:1.37
+export ORRERY_LIVE_CONTAINER=orrery-live-test
+export ORRERY_LIVE_LLM_URL="FILL_ME"        # llama-server base URL, e.g. http://127.0.0.1:8080
+export ORRERY_LIVE_LLM_MODEL="FILL_ME"
+export ORRERY_LIVE_CLOUD_URL="FILL_ME"      # full chat-completions URL
+export ORRERY_LIVE_CLOUD_MODEL="FILL_ME"
+cargo test --workspace --locked --features orrery-core/live-backends
 ```
 Report: pass/fail per test, and the panic text of any failure. `live_engine_run_with_real_backends` can take up to 600 s.
 
