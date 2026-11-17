@@ -2221,10 +2221,10 @@ Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs th
 - `crates/orrery-core/src/config.rs:1800-1809` `remove_role`: the role's TOML is deleted before the peer scan that Step 65 made fallible, so an unreadable peer file makes the command fail with the role already gone (the shared rules file is kept, so it fails safe). Fix: read the peers before `remove_file`. Found validating Step 65; the §9.14.1 spec didn't set the order.
 - `crates/orrery-core` `chrono` use (`Utc::now`, `DateTime<Utc>` in `stream_log.rs`, `checkpoint.rs`, `llm.rs`) — RUSTSEC-2026-0543 marks chrono unmaintained; `deny.toml` ignores it (operator, 2026-11-17) because rmcp 3.9 depends on it too. Migrate orrery-core to `jiff` or `time` to cut our direct use, and drop the ignore once rmcp no longer pulls chrono. Low.
 - `crates/orrery-core/src/mcp.rs` `spawn_stderr_forwarder` 4096-byte cut — `pending.drain(..4096)` can split a multi-byte UTF-8 character, which then shows as U+FFFD on both sides — cut at the last char boundary (`from_utf8(..).valid_up_to()`), as Step 72's `LineSplitter` does, or reuse `LineSplitter`. Found validating Step 68; the §9.14.4 spec didn't ask for it. Low.
-
----
 - crates/orrery-core/src/docker.rs `LineSplitter::push` — a line whose `\n` arrives in the same chunk is drained before the cap, so it can exceed `MAX_OUTPUT_LINE_BYTES` — apply the same char-boundary cap to newline-drained lines (Low; found in STEP 72 validation).
 - ORRERY_TECHNICAL_SPECIFICATION.md:598 — §7 synopsis lists `--command <ARG>...` before `[--mount …]` etc.; since STEP 76 (`allow_hyphen_values`) flags after `--command` are silently taken as command args — move `--command <ARG>...` to the end of the synopsis (Low, docs; found in STEP 76 validation).
+
+---
 
 ### STEP 38: MCP Child Stderr into the Live Stream
 
