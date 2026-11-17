@@ -19,10 +19,9 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
-| 2 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
-| 3 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
-| 4 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
+| 1 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
+| 2 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
+| 3 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 58** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README TUI keys per panel | `README.md` |
 | **STEP 59** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` |
 | **STEP 60** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` |
+| **STEP 61** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` |
 
 ---
 
@@ -3213,6 +3213,11 @@ Rules:
 - **F60-4** confirmed, Medium. `config.rs:1802` `.unwrap_or_default()`: one bad role file makes `remove_role` delete a shared rules file.
 - **F60-5** confirmed, Low. The global Compose `file` is canonicalized (`config.rs:1953`) before the project override by `inference_id` applies.
 - **F60-6** confirmed, Low edge case. The `usize` overflow is dropped by `.ok()` (`plan.rs:74`). It only matters when every numbered title overflows; a mixed plan already fails the all-or-none rule.
+- **F61-1** partly wrong; corrected, Medium. Attach and start errors do NOT leak: they come back as `Ok(Err(..))` in `exit_res`, and `llm.rs:1201` `remove(&name)` runs before `exit_res?`. What is real: orchestrator turns (`engine.rs:1620`) open no `StageLease`, so a cancel during an AgentCli orchestrator turn drops the future with no `remove`. `end_stage` (`docker.rs:922`) never runs, and the container (secret env included) and `agent_io/<run_id>` are left behind. A 409 on resume with the same `run_id` is plausible but unverified.
+- **F61-2** confirmed, Medium. `docker.rs:1189` splits each attach chunk with `.lines()` and has no carry-over buffer. Docker frames follow the process's writes, not line boundaries, so lines can split and a secret split across two frames escapes redaction. `HttpChatDriver` avoids this with `LineBuffer`.
+- **F61-3** confirmed, Low. The `llm.rs:1170` `let _ = stream.emit(..)` is forced by the `Fn(String)` callback type.
+- **F61-4** is the same defect as F59-4 and F60-1 (`docker.rs:622` `agent_io_dir`, plus `remove_dir_all` in `run_turn`).
+- **F61-5** confirmed, Low. `llm.rs:880` returns at the first valid `submit_report`, so later tool calls in the same batch are dropped silently. The spec doesn't say what a mixed batch should do.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
