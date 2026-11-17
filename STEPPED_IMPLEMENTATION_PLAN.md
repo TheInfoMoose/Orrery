@@ -19,7 +19,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -101,6 +100,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 73** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 74** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 75** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` |
+| **STEP 76** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` |
 
 ---
 
@@ -2224,6 +2224,7 @@ Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs th
 
 ---
 - crates/orrery-core/src/docker.rs `LineSplitter::push` — a line whose `\n` arrives in the same chunk is drained before the cap, so it can exceed `MAX_OUTPUT_LINE_BYTES` — apply the same char-boundary cap to newline-drained lines (Low; found in STEP 72 validation).
+- ORRERY_TECHNICAL_SPECIFICATION.md:598 — §7 synopsis lists `--command <ARG>...` before `[--mount …]` etc.; since STEP 76 (`allow_hyphen_values`) flags after `--command` are silently taken as command args — move `--command <ARG>...` to the end of the synopsis (Low, docs; found in STEP 76 validation).
 
 ### STEP 38: MCP Child Stderr into the Live Stream
 
