@@ -19,11 +19,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 60** | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` (NEW) | — |
-| 2 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
-| 3 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
-| 4 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
-| 5 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
+| 1 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
+| 2 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
+| 3 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
+| 4 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 57** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README states only what is verified | `README.md` |
 | **STEP 58** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README TUI keys per panel | `README.md` |
 | **STEP 59** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` |
+| **STEP 60** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` |
 
 ---
 
@@ -3207,6 +3207,12 @@ Rules:
 - **F59-3** confirmed, Medium. `engine.rs:1964` and `:1975` skip keychain errors with `if let Ok`.
 - **F59-4** confirmed, raised to Medium and widened. `AgentConfig::validate` (`config.rs:768`) checks `agent_id` only for emptiness. `load_agents` and `read_agents_from_dir` never call `validate_config_file_id` (`config.rs:1512`, which `save_agent` uses), so a hand-edited `agent_id = "../x"` loads and reaches `save_report` (`checkpoint.rs:447`) and the `agent_io/<run_id>/<agent_id>/` mounts. Recheck under Steps 60/61.
 - **F59-5** confirmed, Medium. A fresh step start (`engine.rs:511`) resets `round` but never calls `delete_reports`, so the reports from before `reset --step` survive and are loaded by `load_reports(step, None)` into the new prompts.
+- **F60-1** confirmed, Medium. This is the same defect as F59-4, extended to `RoleConfig::validate` (`config.rs:645`) and `InferenceConfig::validate`. Fix it once for all three IDs.
+- **F60-2** confirmed, Medium. `load_role_rules` (`config.rs:1710`) looks up `{role_id}.toml` by filename, while the loaders key by the `role_id` field inside the file, so a file-stem mismatch passes load and fails at `build_engine`. `sorted_toml_entries` skips dot-files (`config.rs:2103`) that `validate_config_file_id` allows.
+- **F60-3** confirmed, Low. The reserved role IDs from §9.0 (spec line 655) aren't rejected anywhere.
+- **F60-4** confirmed, Medium. `config.rs:1802` `.unwrap_or_default()`: one bad role file makes `remove_role` delete a shared rules file.
+- **F60-5** confirmed, Low. The global Compose `file` is canonicalized (`config.rs:1953`) before the project override by `inference_id` applies.
+- **F60-6** confirmed, Low edge case. The `usize` overflow is dropped by `.ok()` (`plan.rs:74`). It only matters when every numbered title overflows; a mixed plan already fails the all-or-none rule.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
