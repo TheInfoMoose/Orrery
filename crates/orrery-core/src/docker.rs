@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bollard::container::LogOutput;
 use bollard::models::{ContainerCreateBody, ContainerStateStatusEnum, HostConfig};
 use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, InspectContainerOptionsBuilder,
@@ -1048,6 +1049,47 @@ fn map_inspect_state(state: Option<&bollard::models::ContainerState>) -> Contain
     }
 }
 
+const MAX_OUTPUT_LINE_BYTES: usize = 4096;
+
+#[derive(Default)]
+pub(crate) struct LineSplitter {
+    pending: Vec<u8>,
+}
+
+impl LineSplitter {
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(bytes);
+        let mut lines = Vec::new();
+        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+            let mut raw: Vec<u8> = self.pending.drain(..=pos).collect();
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+            lines.push(String::from_utf8_lossy(&raw).into_owned());
+        }
+        while self.pending.len() >= MAX_OUTPUT_LINE_BYTES {
+            let cut = match std::str::from_utf8(&self.pending[..MAX_OUTPUT_LINE_BYTES]) {
+                Ok(_) => MAX_OUTPUT_LINE_BYTES,
+                Err(e) if e.valid_up_to() > 0 => e.valid_up_to(),
+                Err(_) => MAX_OUTPUT_LINE_BYTES,
+            };
+            let raw: Vec<u8> = self.pending.drain(..cut).collect();
+            lines.push(String::from_utf8_lossy(&raw).into_owned());
+        }
+        lines
+    }
+
+    pub(crate) fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            let raw = std::mem::take(&mut self.pending);
+            Some(String::from_utf8_lossy(&raw).into_owned())
+        }
+    }
+}
+
 pub struct BollardContainerBackend {
     docker: bollard::Docker,
 }
@@ -1198,12 +1240,24 @@ impl ContainerBackend for BollardContainerBackend {
             input.shutdown().await
         };
         let reader = async {
+            let mut out_lines = LineSplitter::default();
+            let mut err_lines = LineSplitter::default();
             while let Some(item) = output.next().await {
                 let chunk = item.map_err(Error::Docker)?;
-                let text = String::from_utf8_lossy(chunk.as_ref());
-                for line in text.lines() {
-                    on_output(line.to_string());
+                let splitter = if matches!(chunk, LogOutput::StdErr { .. }) {
+                    &mut err_lines
+                } else {
+                    &mut out_lines
+                };
+                for line in splitter.push(chunk.as_ref()) {
+                    on_output(line);
                 }
+            }
+            if let Some(line) = out_lines.finish() {
+                on_output(line);
+            }
+            if let Some(line) = err_lines.finish() {
+                on_output(line);
             }
             Ok::<(), Error>(())
         };
@@ -2525,5 +2579,39 @@ mod tests {
         let expected_name = cli_container_name(&run_id, "cli-orch");
         assert_eq!(backend.calls(), vec![MockCall::Remove(expected_name)]);
         assert!(!io_dir.exists());
+    }
+
+    #[test]
+    fn line_splitter_joins_across_chunks() {
+        let mut s = LineSplitter::default();
+        assert!(s.push(b"hel").is_empty());
+        assert_eq!(s.push(b"lo\r\nwor"), vec!["hello".to_string()]);
+        assert_eq!(s.finish(), Some("wor".to_string()));
+        assert_eq!(s.finish(), None);
+    }
+
+    #[test]
+    fn line_splitter_keeps_utf8_across_chunks() {
+        let mut s = LineSplitter::default();
+        assert!(s.push(b"caf\xc3").is_empty());
+        assert_eq!(s.push(b"\xa9\n"), vec!["café".to_string()]);
+        assert_eq!(s.finish(), None);
+    }
+
+    #[test]
+    fn line_splitter_caps_long_lines() {
+        let mut s = LineSplitter::default();
+        let mut input = vec![b'a'; 4095];
+        input.extend_from_slice("é".as_bytes());
+        assert_eq!(input.len(), 4097);
+        assert_eq!(s.push(&input), vec!["a".repeat(4095)]);
+        assert_eq!(s.push(b"\n"), vec!["é".to_string()]);
+    }
+
+    #[test]
+    fn line_splitter_keeps_secret_whole() {
+        let mut s = LineSplitter::default();
+        assert!(s.push(b"token sk-abc").is_empty());
+        assert_eq!(s.push(b"def123\n"), vec!["token sk-abcdef123".to_string()]);
     }
 }
