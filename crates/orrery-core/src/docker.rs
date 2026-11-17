@@ -941,6 +941,20 @@ impl ResourceManager {
         Ok(())
     }
 
+    pub async fn remove_cli_agent(&self, run_id: &uuid::Uuid, agent_id: &str) -> Result<()> {
+        self.backend
+            .remove(&cli_container_name(run_id, agent_id))
+            .await?;
+        let io_dir = agent_io_dir(&self.project_root, run_id, agent_id);
+        if io_dir.exists() {
+            fs::remove_dir_all(&io_dir).map_err(|source| Error::Io {
+                path: io_dir,
+                source,
+            })?;
+        }
+        Ok(())
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         let held = {
             let mut guard = self.held.lock().map_err(|_| Error::Security {
@@ -2486,5 +2500,30 @@ mod tests {
         let env = body.env.expect("env should be populated");
         assert!(env.contains(&format!("ANTHROPIC_API_KEY={secret_val}")));
         assert!(env.contains(&"PLAIN_VAR=visible".to_string()));
+    }
+
+    #[tokio::test]
+    async fn remove_cli_agent_removes_container_and_io() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let backend = Arc::new(MockContainerBackend::new());
+        let inf_ctrl = Arc::new(MockInferenceControl::new());
+        let rm = ResourceManager::new(
+            Arc::clone(&backend) as Arc<dyn ContainerBackend>,
+            inf_ctrl,
+            Vec::new(),
+            2,
+            tmp.path().to_path_buf(),
+        );
+
+        let run_id = uuid::Uuid::new_v4();
+        let io_dir = agent_io_dir(tmp.path(), &run_id, "cli-orch");
+        fs::create_dir_all(io_dir.join("in")).unwrap();
+        assert!(io_dir.exists());
+
+        rm.remove_cli_agent(&run_id, "cli-orch").await.unwrap();
+
+        let expected_name = cli_container_name(&run_id, "cli-orch");
+        assert_eq!(backend.calls(), vec![MockCall::Remove(expected_name)]);
+        assert!(!io_dir.exists());
     }
 }

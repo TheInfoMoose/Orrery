@@ -1127,6 +1127,7 @@ impl AgentDriver for CliContainerDriver {
         let prompt_path = in_dir.join("prompt.md");
         let report_path = out_dir.join("report.toml");
         let name = cli_container_name(&inv.run_id, &inv.agent.agent_id);
+        self.backend.remove(&name).await?;
         let mounts = mounts_for(&inv.agent, &self.project_root, &dir);
 
         let mut last_error = Error::Report {
@@ -2924,8 +2925,12 @@ mod tests {
         assert_eq!(written_prompt, expected_prompt);
 
         let calls = backend.calls();
-        assert_eq!(calls.len(), 2);
-        match &calls[0] {
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[0],
+            crate::docker::MockCall::Remove(cli_container_name(&inv.run_id, &inv.agent.agent_id))
+        );
+        match &calls[1] {
             crate::docker::MockCall::RunToCompletion {
                 name, stdin_len, ..
             } => {
@@ -2935,7 +2940,7 @@ mod tests {
             other => panic!("expected RunToCompletion, got {other:?}"),
         }
         assert_eq!(
-            calls[1],
+            calls[2],
             crate::docker::MockCall::Remove(cli_container_name(&inv.run_id, &inv.agent.agent_id))
         );
     }
@@ -3236,7 +3241,7 @@ mod tests {
         assert_eq!(report.status, ReportStatus::Complete);
 
         let calls = backend.calls();
-        match &calls[0] {
+        match &calls[1] {
             crate::docker::MockCall::RunToCompletion {
                 secret_env,
                 plain_env,
@@ -3523,5 +3528,54 @@ mod tests {
             .map(|t| t["function"]["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["fs__read_file", "submit_report"]);
+    }
+
+    #[tokio::test]
+    async fn cli_driver_removes_stale_container_first() {
+        let tmp = TempDir::new().unwrap();
+        let hub = LiveStreamHub::new(
+            tmp.path().join("logs"),
+            LiveStreamConfig::default(),
+            Arc::new(SecretRedactor::new()),
+        )
+        .unwrap();
+        let mcp = McpGatekeeper::new();
+        let secrets = Arc::new(crate::security::InMemorySecretStore::new());
+        let backend = Arc::new(crate::docker::MockContainerBackend::new());
+
+        backend.set_run_script(Box::new(|spec, _stdin| {
+            let out_host = find_mount_host(spec, "/orrery/out");
+            let report = AgentReport {
+                status: ReportStatus::Complete,
+                summary: "Clean run.".to_string(),
+                feedback: None,
+                artifacts: Vec::new(),
+                target_stage: None,
+                allocations: Vec::new(),
+            };
+            std::fs::write(
+                out_host.join("report.toml"),
+                toml::to_string(&report).unwrap(),
+            )
+            .unwrap();
+            (Vec::new(), 0)
+        }));
+
+        let driver = CliContainerDriver::new(backend.clone(), secrets, tmp.path().to_path_buf());
+        let inv = sample_cli_invocation("cli-coder", WorkspaceMount::ReadOnly, 30, None);
+        let expected_name = cli_container_name(&inv.run_id, &inv.agent.agent_id);
+
+        driver.run_turn(&inv, &mcp, &hub).await.unwrap();
+
+        let calls = backend.calls();
+        assert!(calls.len() >= 2);
+        assert_eq!(
+            calls[0],
+            crate::docker::MockCall::Remove(expected_name.clone())
+        );
+        assert!(matches!(
+            &calls[1],
+            crate::docker::MockCall::RunToCompletion { name, .. } if name == &expected_name
+        ));
     }
 }

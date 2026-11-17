@@ -1017,6 +1017,22 @@ impl WorkflowEngine {
                     });
                 }
             }
+        } else {
+            for id in self
+                .ctx
+                .project
+                .stages
+                .first()
+                .map(|s| s.agent_ids.clone())
+                .unwrap_or_default()
+            {
+                if matches!(self.find_agent(&id)?.backend, AgentBackend::AgentCli { .. }) {
+                    self.ctx
+                        .resources
+                        .remove_cli_agent(&state.run_id, &id)
+                        .await?;
+                }
+            }
         }
 
         if state.step_statuses[step_idx] == StepStatus::AwaitingOperator {
@@ -6233,5 +6249,55 @@ mod tests {
                 )
                 && ev.text.contains("it will not be redacted")
         }));
+    }
+
+    #[tokio::test]
+    async fn cancel_without_lease_removes_cli_orchestrator() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+
+        let orch_agent = ctx
+            .agents
+            .iter_mut()
+            .find(|a| a.agent_id == "orch")
+            .expect("stage-0 agent orch must exist");
+        orch_agent.backend = AgentBackend::AgentCli {
+            image: format!("busybox@sha256:{}", "0".repeat(64)),
+            command: vec!["sh".to_string()],
+            workspace_mount: WorkspaceMount::None,
+            memory_limit_mb: 256,
+            timeout_secs: 60,
+            keychain_service: None,
+            keychain_account: None,
+            secret_env: None,
+        };
+
+        let container_backend = Arc::new(MockContainerBackend::new());
+        ctx.resources = Arc::new(ResourceManager::new(
+            Arc::clone(&container_backend) as _,
+            Arc::new(MockInferenceControl::new()),
+            ctx.project.inference.clone(),
+            ctx.project.max_concurrent_agents,
+            dir.path().to_path_buf(),
+        ));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let mut state = crate::checkpoint::WorkflowCheckpoint::new(&engine.ctx.plan);
+        let step = engine.ctx.plan.steps[0].clone();
+
+        let outcome = engine.handle_cancel(&mut state, 0, &step).await.unwrap();
+        assert_eq!(outcome, RunOutcome::Interrupted);
+        assert!(
+            container_backend
+                .calls()
+                .contains(&MockCall::Remove(cli_container_name(&state.run_id, "orch")))
+        );
     }
 }
