@@ -19,8 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
-| 2 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
+| 1 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 60** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` |
 | **STEP 61** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` |
 | **STEP 62** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` |
+| **STEP 63** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: TUI | `audit/63-tui.md` |
 
 ---
 
@@ -3226,6 +3226,16 @@ Rules:
 - **F62-6** confirmed, Medium. `tail_log` (`stream_log.rs:356`) hardcodes `.log.2`/`.log.1`/`.log`, ignoring `live_stream_max_files`, and uses `read_to_string`, so one non-UTF-8 byte fails `orrery logs`.
 - **F62-7** confirmed, Low. This is a limit of the §9.12.5 design I wrote: the Error event appears on the *next* `emit`, so a failure on a run's last events is never shown. The fix is to emit from the writer thread.
 - **F62-8** confirmed, Low. `LogFollower` can miss bytes written to the old inode between its read and its stat, the same window `tail -F` has.
+- **F63-1** confirmed, downgraded to Medium. In `AwaitingOperator` with no task, `is_running()` (`app.rs:195`) shows `[Stop]`, and Interrupt only overwrites the status message with "Stopping…". It doesn't hang: Approve and Reject still start the run through the no-task branch. Footer `[Run]` is unreachable in that state.
+- **F63-2** confirmed, High. An occupied slot's selector (`app.rs:858-866`) lists every agent plus `(remove)`, and choosing an agent calls `assign_agent`, which appends (`app.rs:631`). Replacing the orchestrator's agent always fails the 1-agent limit, and on other stages the agent lands in the next slot.
+- **F63-3** confirmed, Medium. `drain_channels` (`bridge.rs:136`) has test callers only, so `run_tui` handles one input per loop and draws between inputs; under heavy stream traffic it falls behind and drops events. The `eng_sub` lag being ignored is real, but broadcast lag on engine events is rare.
+- **F63-4** plausible, Medium, Confidence Low. Whether stale queued decisions can auto-answer a later pause depends on whether the engine drains `operator_rx` on entering `AwaitingOperator`; check `engine.rs` `enter_awaiting_operator`.
+- **F63-5** accepted on the quoted evidence (`bridge.rs:580`), Medium: `load_initial_app` uses a length check instead of `reconcile` and silently drops load errors.
+- **F63-6** confirmed, Medium (keyboard-first). `handle_footer_menu_key` (`app.rs:908`) walks onto the hidden Approve/Reject indices, so the highlight disappears for two key presses.
+- **F63-7** accepted on the quoted evidence, Low: `slot_scroll` isn't reset when the header is selected.
+- **F63-8** confirmed, Medium. `run_tui`'s `?` and `return Err` (`bridge.rs:640`, `:662`, `:689`) skip `controller.shutdown`, detaching a running engine.
+- **F63-9** accepted, Low. The `err.to_string()` sent on `stream_tx` bypasses the hub redactor.
+- **F63-10** confirmed, Low. The nested `_ => unreachable!()` is at `bridge.rs:382`.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
