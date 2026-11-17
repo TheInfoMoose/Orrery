@@ -1051,6 +1051,24 @@ fn map_inspect_state(state: Option<&bollard::models::ContainerState>) -> Contain
 
 const MAX_OUTPUT_LINE_BYTES: usize = 4096;
 
+fn char_cut(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(&bytes[..MAX_OUTPUT_LINE_BYTES]) {
+        Ok(_) => MAX_OUTPUT_LINE_BYTES,
+        Err(e) if e.valid_up_to() > 0 => e.valid_up_to(),
+        Err(_) => MAX_OUTPUT_LINE_BYTES,
+    }
+}
+
+fn push_capped(lines: &mut Vec<String>, raw: &[u8]) {
+    let mut rest = raw;
+    while rest.len() > MAX_OUTPUT_LINE_BYTES {
+        let cut = char_cut(rest);
+        lines.push(String::from_utf8_lossy(&rest[..cut]).into_owned());
+        rest = &rest[cut..];
+    }
+    lines.push(String::from_utf8_lossy(rest).into_owned());
+}
+
 #[derive(Default)]
 pub(crate) struct LineSplitter {
     pending: Vec<u8>,
@@ -1066,14 +1084,10 @@ impl LineSplitter {
             if raw.last() == Some(&b'\r') {
                 raw.pop();
             }
-            lines.push(String::from_utf8_lossy(&raw).into_owned());
+            push_capped(&mut lines, &raw);
         }
         while self.pending.len() >= MAX_OUTPUT_LINE_BYTES {
-            let cut = match std::str::from_utf8(&self.pending[..MAX_OUTPUT_LINE_BYTES]) {
-                Ok(_) => MAX_OUTPUT_LINE_BYTES,
-                Err(e) if e.valid_up_to() > 0 => e.valid_up_to(),
-                Err(_) => MAX_OUTPUT_LINE_BYTES,
-            };
+            let cut = char_cut(&self.pending);
             let raw: Vec<u8> = self.pending.drain(..cut).collect();
             lines.push(String::from_utf8_lossy(&raw).into_owned());
         }
@@ -2613,5 +2627,22 @@ mod tests {
         let mut s = LineSplitter::default();
         assert!(s.push(b"token sk-abc").is_empty());
         assert_eq!(s.push(b"def123\n"), vec!["token sk-abcdef123".to_string()]);
+    }
+
+    #[test]
+    fn line_splitter_caps_newline_terminated_lines() {
+        let mut s = LineSplitter::default();
+        let mut input = vec![b'a'; 4095];
+        input.extend_from_slice("é".as_bytes());
+        input.extend_from_slice(b"\n");
+        assert_eq!(s.push(&input), vec!["a".repeat(4095), "é".to_string()]);
+    }
+
+    #[test]
+    fn line_splitter_exact_multiple_has_no_empty_piece() {
+        let mut s = LineSplitter::default();
+        let mut input = vec![b'a'; 8192];
+        input.extend_from_slice(b"\n");
+        assert_eq!(s.push(&input), vec!["a".repeat(4096), "a".repeat(4096)]);
     }
 }
