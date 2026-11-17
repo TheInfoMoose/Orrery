@@ -4,11 +4,11 @@ Orrery is a Linux workflow orchestrator that executes stepped Markdown implement
 
 ## Requirements
 
-- **Operating system:** Linux (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`).
-- **Rust toolchain:** Rust stable supporting Edition 2024.
+- **Operating system:** Linux on x86_64 (`x86_64-unknown-linux-gnu`) is the tested platform. `aarch64-unknown-linux-gnu` is dependency-checked by `cargo deny` only and is untested. macOS and Windows are not supported yet (planned).
+- **Rust toolchain:** Rust 1.99.1 or newer (workspace `rust-version`), edition 2024.
 - **Host build packages:** `libdbus-1-dev` and `pkg-config` (required to link D-Bus Secret Service support).
 - **OS keychain:** A D-Bus Secret Service daemon on desktop sessions, or Linux kernel `keyutils` on headless hosts, for storing API keys and tokens.
-- **Docker (optional):** Docker Engine, rootless Docker, or Podman (via `DOCKER_HOST`) when managing inference containers or running `AgentCli` containers.
+- **Docker (optional):** Docker Engine (used by the live-backend tests). Orrery honors `DOCKER_HOST`; rootless Docker and Podman are untested.
 - **Local inference server (optional):** An OpenAI-compatible `llama.cpp` server (`llama-server`) when running `LocalModel` agents.
 
 ## Build
@@ -77,10 +77,10 @@ Launch the TUI with `orrery` (or `orrery <PATH>`).
 | Key / Input | Action |
 | :--- | :--- |
 | `Tab` / `BackTab` | Cycle focus: `TopMenu` → `StepsPanel` → `StageCanvas` → `LiveStream` → `FooterMenu` |
-| `Up` / `Down` / `Left` / `Right` | Move within the focused panel; scroll when the panel or modal (`Settings`, `Help`) is a list |
+| `Up` / `Down` / `Left` / `Right` | Move within the focused panel; scroll when the panel is a list or in the `Settings` modal (`Help` does not scroll) |
 | `Enter` / `Space` | Activate the focused control, open a role/agent selector, open the `Cycles` modal in `Loop` mode, or confirm a modal |
 | `+` / `-` | Adjust the focused numeric control (`Cycles` in `Loop` mode, `Stages`) |
-| `Esc` | Close the active modal or cancel text entry |
+| `Esc` | Close the active modal or cancel text entry (in `Help` and `Settings`, `Esc`, `Enter`, or `q` close the modal) |
 | `Ctrl+C` | Interrupt the running workflow cleanly (does nothing when idle; does not quit) |
 | `m` | Toggle mouse capture (`[Mouse: ON\|OFF]`); turn off to use native terminal text selection in the live stream |
 | `q` | Quit when not editing text (prompts for confirmation while a workflow is running) |
