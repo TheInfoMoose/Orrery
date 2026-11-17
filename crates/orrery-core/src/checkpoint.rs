@@ -538,6 +538,18 @@ impl CheckpointManager {
 
         Ok(())
     }
+
+    pub fn clear_step(&self, step_number: usize) -> Result<()> {
+        let step_dir = self.dir.join(format!("step_{step_number:03}"));
+        match fs::remove_dir_all(&step_dir) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(Error::Io {
+                path: step_dir,
+                source,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1042,6 +1054,21 @@ extra = 123
 
         // Deleting from a non-existent step directory is a no-op
         mgr.delete_reports(99, 1).unwrap();
+    }
+
+    #[test]
+    fn clear_step_removes_reports() {
+        let dir = TempDir::new().unwrap();
+        let mgr = CheckpointManager::new(dir.path().join("checkpoints"));
+
+        let r1 = make_stamped_report(2, 1, 1, "coder-a");
+        let r2 = make_stamped_report(2, 2, 1, "coder-b");
+        mgr.save_report(&r1).unwrap();
+        mgr.save_report(&r2).unwrap();
+
+        mgr.clear_step(2).unwrap();
+        assert!(mgr.load_reports(2, None).unwrap().is_empty());
+        assert!(mgr.clear_step(9).is_ok());
     }
 
     #[test]

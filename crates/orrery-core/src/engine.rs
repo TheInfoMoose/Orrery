@@ -527,6 +527,7 @@ impl WorkflowEngine {
                     step_number: step.number,
                     status: StepStatus::InProgress,
                 });
+                self.ctx.checkpoints.clear_step(step.number)?;
                 let mut fresh = StepRunState {
                     step_idx,
                     step_number: step.number,
@@ -1960,8 +1961,14 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
     let plan_path = store.resolve_safe_path(&project.plan_path)?;
     let plan = ImplementationPlan::from_file(&plan_path, &project.step_marker)?;
 
+    let referenced = referenced_mcp_servers(&project, &roles);
+    let mut keychain_notices: Vec<String> = Vec::new();
     let redactor = Arc::new(SecretRedactor::new());
     for agent in &agents {
+        let on_stage = project
+            .stages
+            .iter()
+            .any(|s| s.agent_ids.contains(&agent.agent_id));
         let pair = match &agent.backend {
             AgentBackend::LocalModel { .. } => None,
             AgentBackend::AgentCli {
@@ -1975,21 +1982,34 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
                 ..
             } => Some((keychain_service.as_str(), keychain_account.as_str())),
         };
-        if let Some((service, account)) = pair
-            && let Ok(secret) = backends.secrets.get(service, account)
-        {
-            redactor.register(&secret)?;
+        if let Some((service, account)) = pair {
+            match backends.secrets.get(service, account) {
+                Ok(secret) => redactor.register(&secret)?,
+                Err(err) if on_stage => keychain_notices.push(format!(
+                    "keychain entry {service}/{account} for agent '{}' could not be read ({err}); it will not be redacted",
+                    agent.agent_id
+                )),
+                Err(_) => {}
+            }
         }
     }
     for server in &servers {
+        if !referenced.contains(&server.server_id) {
+            continue;
+        }
         if let McpTransportConfig::StreamableHttp {
             keychain_service: Some(service),
             keychain_account: Some(account),
             ..
         } = &server.transport
-            && let Ok(secret) = backends.secrets.get(service, account)
         {
-            redactor.register(&secret)?;
+            match backends.secrets.get(service, account) {
+                Ok(secret) => redactor.register(&secret)?,
+                Err(err) => keychain_notices.push(format!(
+                    "keychain entry {service}/{account} for MCP server '{}' could not be read ({err}); it will not be redacted",
+                    server.server_id
+                )),
+            }
         }
     }
 
@@ -2003,9 +2023,11 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
         },
         redactor,
     )?);
+    for notice in keychain_notices {
+        stream.emit(StreamEvent::notice(notice))?;
+    }
     backends.connector.attach_stream(Arc::clone(&stream));
 
-    let referenced = referenced_mcp_servers(&project, &roles);
     let mut gatekeeper = McpGatekeeper::new();
     gatekeeper.set_project_root(store.project_root().to_path_buf());
     gatekeeper.set_call_timeout(std::time::Duration::from_secs(
@@ -2095,8 +2117,8 @@ mod tests {
     };
     use crate::Error;
     use crate::checkpoint::{
-        AgentReport, CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StepStatus,
-        SubtaskAllocation,
+        AgentReport, CheckpointManager, EnginePhase, OperatorDecision, ReportStatus, StampedReport,
+        StepStatus, SubtaskAllocation,
     };
     use crate::config::{
         AgentBackend, AgentConfig, ConfigStore, ExecutionMode, HookConfig, HookEvent, HookFailure,
@@ -6127,5 +6149,89 @@ mod tests {
 
         cancel.cancel();
         let _ = handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_step_start_clears_old_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.checkpoints
+            .save_report(&StampedReport {
+                step_number: 1,
+                plan_step_sha256: ctx.plan.steps[0].sha256_hex.clone(),
+                round: 2,
+                stage_index: 0,
+                role_id: "orchestrator".to_string(),
+                agent_id: "orch".to_string(),
+                recorded_at: Utc::now(),
+                report: AgentReport {
+                    status: ReportStatus::Complete,
+                    summary: "stale-from-before-reset".to_string(),
+                    target_stage: None,
+                    allocations: Vec::new(),
+                    feedback: None,
+                    artifacts: Vec::new(),
+                },
+            })
+            .unwrap();
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let reports = engine.ctx.checkpoints.load_reports(1, None).unwrap();
+        assert!(!reports.is_empty());
+        assert!(
+            !reports
+                .iter()
+                .any(|r| r.report.summary == "stale-from-before-reset")
+        );
+    }
+
+    #[tokio::test]
+    async fn build_engine_warns_on_unreadable_keychain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, _mock_driver, _secrets) = init_project_with_agents(dir.path(), true);
+
+        store
+            .save_agent(&AgentConfig {
+                agent_id: "cloud-missing".to_string(),
+                display_name: "Cloud Missing".to_string(),
+                backend: AgentBackend::CloudApi {
+                    endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                    model: "cloud-model".to_string(),
+                    temperature: 0.0,
+                    max_context_tokens: 8192,
+                    keychain_service: "orrery.test.missing".to_string(),
+                    keychain_account: "testuser".to_string(),
+                },
+            })
+            .unwrap();
+        let mut project = store.load_project().unwrap();
+        project.assign_agent(1, "cloud-missing").unwrap();
+        store.save_project(&project).unwrap();
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        let events = engine.ctx.stream.recent(50).unwrap();
+        assert!(events.iter().any(|ev| {
+            ev.kind == StreamEventKind::SystemNotice
+                && ev.text.contains(
+                    "orrery.test.missing/testuser for agent 'cloud-missing' could not be read",
+                )
+                && ev.text.contains("it will not be redacted")
+        }));
     }
 }
