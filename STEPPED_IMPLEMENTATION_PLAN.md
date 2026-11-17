@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57) and Phase F (58). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58) and the Phase G audit (59–64). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (58). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (64). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,12 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 59** | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` (NEW) | — |
+| 2 | **STEP 60** | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` (NEW) | — |
+| 3 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
+| 4 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
+| 5 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
+| 6 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -3118,6 +3124,311 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 
 [POST_GATE]
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && test "$(grep -cE '^## (Requirements|Build|Quickstart|TUI keys|Project layout|Security|Live-backend tests)$' README.md)" -eq 7 && ! grep -q '^| `Up` / `Down` / `Left` / `Right` |' README.md && grep -q 'PageUp' README.md && grep -q 'PageDown' README.md && grep -q '`End`' README.md && grep -q '`Delete`' README.md && grep -q 'FooterMenu' README.md && grep -qE '`y`' README.md && grep -q 'macOS and Windows are not supported yet' README.md && grep -q 'trap exit TERM' README.md && ! grep -qE '/(home|srv|Users|root)/' README.md && test "$(git diff --numstat -- README.md | awk '{print $2}')" -le 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+## Phase G — full audit (Steps 59–64)
+
+**Phase goal (frozen until the phase ends):** find what the build gates can't see before the project closes out. That means spec requirements with no code or no test, actions or commands that aren't wired through, swallowed errors and logic that's wrong but passes, and docs that disagree with the code. Each step audits one area and writes one report. Nothing is fixed in this phase; the operator picks which findings become fix steps at phase end.
+
+Written 2026-11-16 against `c1a7776`. All line numbers below are from that tree. No step edits code, so they stay valid for the whole phase.
+
+**Decisions the contract leaves open** (settled here, not by the executor):
+- Reports live in `audit/` at the repo root and are committed, so the next phase can cite them.
+- POST_GATE checks the report's shape and that every cited `path:line` exists. It runs `cargo fmt --check` only: the scope lock already proves no code changed. Claude checks the content during validation: each finding is re-read at its location, and fabricated or mis-cited findings fail the step.
+- Findings marked `Confidence: Low`, and spec questions that need cross-area context, go to Claude reviewers at phase end. Gemini doesn't chase them across areas.
+
+### Phase G audit contract (every Step 59–64 follows this)
+
+**Read first:** the step's spec ranges, then every `####` amendment heading in spec §9.11–§9.13 (`grep -n '^#### 9.1[123]' ORRERY_TECHNICAL_SPECIFICATION.md`). An amendment marked "(overrides §X)" replaces §X where they differ; "(adds to §X)" extends it. Audit against the amended spec, not the original text.
+
+**Non-test code** is everything above the file's first `#[cfg(test)]`. Tests are read only for check C11.
+
+**Checks.** Run all twelve; each one gets a row in the report's `## Checklist` table:
+- C1 Spec coverage: every requirement in the step's spec ranges is implemented as written (names, signatures, ordering, messages, defaults).
+- C2 `let _ =` on a `Result`, a `Future` or a `send`/`try_send` in non-test code: each one is either justified by the spec or is a finding.
+- C3 Error swallowing: `.ok()`, `unwrap_or_default()`, `unwrap_or(..)`, `if let Ok(..)` with no `else`, and `Err(_) =>` arms that discard an error the operator should see.
+- C4 Catch-all `_ =>` arms on this crate's enums that would silently absorb a new variant.
+- C5 `unreachable!`, `panic!`, `todo!`, `unimplemented!`, `unwrap`/`expect` (and any `#[allow(..)]`) in non-test code.
+- C6 Numeric `as` casts that can truncate or wrap; arithmetic that can overflow or underflow without `saturating_`/`checked_`.
+- C7 Concurrency: a lock held across `.await`; a `select!` arm whose body awaits something that can block the other arms; a bounded channel whose sender can block or silently drop; a task that's spawned and never joined or aborted.
+- C8 File I/O: writes the spec calls atomic that aren't (write-to-temp plus rename); partial-write and crash windows; missing `fsync` where the spec requires durability.
+- C9 Paths: user- or agent-supplied paths that skip `resolve_safe_path` or the write-scope checks; symlink escapes; `..` handling.
+- C10 Secrets: any path where a secret or API key reaches a log, the live stream, an error message, `Debug` output or a file without redaction.
+- C11 Tests: spec'd behaviors with no test; tests whose assertions don't check the spec'd outcome; `#[ignore]` or assertion-free tests.
+- C12 Leftovers: `TODO`, `FIXME`, `XXX`, `HACK`, stub bodies, dead code kept behind `#[allow(dead_code)]`, commented-out code.
+
+**Report format.** Exactly this; POST_GATE parses it.
+```markdown
+# Audit: <area> (Step <N>)
+
+## Scope
+- Files read: <each path and the line range read>
+- Spec ranges: <each § and line range read, including the amendments that apply>
+
+## Findings
+### F<N>-<k>: <one-line title>
+- Severity: Critical | High | Medium | Low
+- Confidence: High | Medium | Low
+- Category: missing-feature | wiring | bug | error-handling | concurrency | file-io | path-safety | secrets | test-gap | leftover | doc-drift | spec-gap
+- Location: `<repo-relative path>:<line>`
+- Spec: §<x.y> | none
+- Evidence: <the code or spec text that shows it, at most 5 lines, quoted inline or in a fenced block>
+- Impact: <a concrete input or state, and the wrong result or crash it causes>
+- Suggested fix: <one or two lines>
+
+## Coverage
+| Spec § | Requirement (short) | Status | Where |
+| :--- | :--- | :--- | :--- |
+| §x.y | ... | Implemented / Partial / Missing / N/A | `path:line` |
+
+## Checklist
+| Check | Result | Notes |
+| :--- | :--- | :--- |
+| C1 | findings: F<N>-1, … / none | what was examined |
+| … one row per C1–C12 … |
+```
+Rules:
+- `<k>` counts from 1 in report order. Each finding has exactly one `Location:` line (other locations go in Evidence), and it must point to the line that shows the problem.
+- Severity: **Critical** = data loss, a secret leak, or a run that corrupts its checkpoint. **High** = a wrong result or a hang in normal use. **Medium** = a wrong result in an edge case, or a missing spec'd behavior. **Low** = docs, tests, or hygiene.
+- If something only *might* be wrong and depends on code outside the step's files, write it with `Confidence: Low` and say what would settle it. Don't chase it.
+- No finding without evidence. "Looks risky" isn't a finding.
+- Don't edit any file except the step's report. Don't run live tests.
+
+---
+
+### STEP 59: Audit — Engine and Checkpoints
+
+* **Recommended Command:** `/goal`
+
+Scope note: `engine.rs` drives every run and `checkpoint.rs` holds every resume point, so a slip here costs the most.
+
+```text
+[STEP_ID]
+STEP 59: audit/59-engine-checkpoint.md (NEW) — Phase G audit of engine.rs and checkpoint.rs
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/59-engine-checkpoint.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding: checks C1–C12 and the report format)
+  - crates/orrery-core/src/engine.rs:1-2062 (non-test), 2063-5972 (tests, C11 only)
+  - crates/orrery-core/src/checkpoint.rs:1-543 (non-test), 544-1266 (tests, C11 only)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:26-45 (§2), 356-381 (§5.5), 441-492 (§5.10), 718-778 (§9.3), 1006-1044 (§9.8), 1160-1192 (§9.11.2), 1225-1243 (§9.11.6, §9.11.7), 1309-1311 (§9.12.3)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. No live tests.
+
+[PRE_GATE]
+test ! -e audit/59-engine-checkpoint.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/59-engine-checkpoint.md per the Phase G audit contract, with `<N>` = 59 and area "Engine and Checkpoints".
+2. Cover in the Coverage table: the engine state machine phases and transitions, retries and `max_step_retries`, escalation, the three validation modes, operator decisions (including §9.11.7), hooks (`on_run_start`, `on_step_pass`, `on_retry`, `on_halt`) and their `on_failure`, Loop mode cycles, interrupt and cancel, resume, `build_engine` (including §9.12.3), and checkpoint save/load atomicity and the stamped-report paths.
+3. Run C1–C12 on both files.
+
+[POST_GATE]
+R=audit/59-engine-checkpoint.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: Engine and Checkpoints (Step 59)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F59-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 60: Audit — Config, Security, Plan, Errors
+
+* **Recommended Command:** `/goal`
+
+Scope note: config validation is the first line of defense: secret patterns, tool names, paths, limits. `security.rs` owns the keychain and redaction.
+
+```text
+[STEP_ID]
+STEP 60: audit/60-config-security-plan.md (NEW) — Phase G audit of config.rs, security.rs, plan.rs and lib.rs
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/60-config-security-plan.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding)
+  - crates/orrery-core/src/config.rs:1-2293, security.rs:1-233, plan.rs:1-222, lib.rs:1-63 (non-test); the rest of each file for C11 only
+  - ORRERY_TECHNICAL_SPECIFICATION.md:125-295 (§4), 298-355 (§5.1–§5.4), 649-717 (§9.0–§9.2), 922-955 (§9.6a), 1160-1192 (§9.11.2), 1300-1304 (§9.12.1)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. No live tests.
+
+[PRE_GATE]
+test ! -e audit/60-config-security-plan.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/60-config-security-plan.md per the Phase G audit contract, with `<N>` = 60 and area "Config, Security, Plan, Errors".
+2. Cover in the Coverage table: every §4 schema field (exists, has the spec'd default, is validated, and is actually read somewhere; use `grep -rn '<field>' crates/` to confirm it's read outside config.rs, and report a field nothing reads as `wiring`), global-vs-project catalog override by id, `resolve_safe_path`, the embedded-key pattern rejection, `[limits]` validation, the keychain headless fallback, `SecretRedactor`, plan parsing (marker, numbering, sha256) and the `Error` variants in §5.1.
+3. Run C1–C12 on all four files.
+
+[POST_GATE]
+R=audit/60-config-security-plan.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: Config, Security, Plan, Errors (Step 60)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F60-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 61: Audit — Docker and Agent Drivers
+
+* **Recommended Command:** `/goal`
+
+Scope note: these are the three agent backends (LocalModel, AgentCli, CloudApi) plus container and inference lifecycle: the code that talks to the outside world.
+
+```text
+[STEP_ID]
+STEP 61: audit/61-docker-llm.md (NEW) — Phase G audit of docker.rs and llm.rs
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/61-docker-llm.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding)
+  - crates/orrery-core/src/docker.rs:1-1231, llm.rs:1-1240 (non-test); the rest of each file and crates/orrery-core/tests/live_docker.rs, live_llm.rs for C11 only
+  - ORRERY_TECHNICAL_SPECIFICATION.md:391-417 (§5.7), 431-440 (§5.9), 844-921 (§9.6), 956-1005 (§9.7), 1193-1201 (§9.11.3), 1216-1224 (§9.11.5), 1283-1288 (§9.11.12), 1306-1307 (§9.12.2)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. No live tests, no docker commands.
+
+[PRE_GATE]
+test ! -e audit/61-docker-llm.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/61-docker-llm.md per the Phase G audit contract, with `<N>` = 61 and area "Docker and Agent Drivers".
+2. Cover in the Coverage table: the `ContainerBackend` operations and `cli_container_name`, AgentCli mounts (`in/`, `out/`, the `.orrery` mask), memory/time limits and cleanup on every exit path (success, error, timeout, cancel), `secret_env` injection, `ResourceManager` (`max_concurrent_agents`, inference start/stop, `unload_after_stage`, `startup_timeout_secs`, External/Container/Compose lifecycles), `HttpChatDriver` (request shape, tool-call loop and `max_tool_calls`, idle timeout, context preflight, streaming, report parsing), and the Bearer header (§9.12.2).
+3. Run C1–C12 on both files.
+
+[POST_GATE]
+R=audit/61-docker-llm.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: Docker and Agent Drivers (Step 61)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F61-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 62: Audit — MCP Gatekeeper and Live Stream
+
+* **Recommended Command:** `/goal`
+
+Scope note: the gatekeeper is the security boundary for agent tool calls. The live stream is the only thing the operator sees, and it must redact.
+
+```text
+[STEP_ID]
+STEP 62: audit/62-mcp-stream.md (NEW) — Phase G audit of mcp.rs and stream_log.rs
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/62-mcp-stream.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding)
+  - crates/orrery-core/src/mcp.rs:1-680, stream_log.rs:1-555 (non-test); the rest of each file and crates/orrery-core/tests/live_mcp.rs for C11 only
+  - ORRERY_TECHNICAL_SPECIFICATION.md:382-390 (§5.6), 418-430 (§5.8), 779-843 (§9.4, §9.5), 1138-1159 (§9.11.1), 1202-1224 (§9.11.4, §9.11.5), 1309-1319 (§9.12.3–§9.12.5)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. No live tests.
+
+[PRE_GATE]
+test ! -e audit/62-mcp-stream.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/62-mcp-stream.md per the Phase G audit contract, with `<N>` = 62 and area "MCP Gatekeeper and Live Stream".
+2. Cover in the Coverage table: `is_tool_allowed` and role patterns, `write_tools` path-argument checks against the project root and `write_scope` (try `..`, absolute paths, symlinks and missing arguments in your reasoning), Stdio and StreamableHttp transports (connect, handshake, timeouts, auth header), the stderr forwarder, `tools_for_role`, tool-result handling, and for the live stream: redaction of every event, the ring, the writer thread, rotation, `tail_log`, `LogFollower` and the write-error event.
+3. Run C1–C12 on both files.
+
+[POST_GATE]
+R=audit/62-mcp-stream.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: MCP Gatekeeper and Live Stream (Step 62)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F62-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 63: Audit — TUI
+
+* **Recommended Command:** `/goal`
+
+Scope note: the TUI must never block, never hide an operator decision, and be fully usable from the keyboard. Mouse support is an addition on top, not a substitute (operator, 2026-11-16).
+
+```text
+[STEP_ID]
+STEP 63: audit/63-tui.md (NEW) — Phase G audit of orrery-tui (app, bridge, layout, widgets, theme)
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/63-tui.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding)
+  - crates/orrery-tui/src/app.rs:1-1157, bridge.rs:1-710, layout.rs:1-282, widgets.rs:1-886, theme.rs:1-84 (non-test); the rest of each file for C11 only
+  - ORRERY_TECHNICAL_SPECIFICATION.md:493-580 (§6), 1045-1120 (§9.9), 1261-1288 (§9.11.9–§9.11.12), 1321-1323 (§9.12.6), 1332-1341 (§9.13.1)
+  - README.md:73-97 (TUI keys)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. Don't launch the TUI.
+
+[PRE_GATE]
+test ! -e audit/63-tui.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/63-tui.md per the Phase G audit contract, with `<N>` = 63 and area "TUI".
+2. Cover in the Coverage table, plus these extra rows:
+   - every `AppAction` variant (`app.rs` `pub enum AppAction`): where `bridge.rs` handles it, and what it does when no run is active;
+   - every `UiRegion` variant (`layout.rs`): the keyboard path that reaches the same action (focus area, keys); a region with no keyboard path is a `wiring` finding;
+   - every row of the README TUI keys table: the `app.rs` handler that implements it; a mismatch is a `doc-drift` finding;
+   - every modal: how it opens, how it closes, and that `Esc` always gets out;
+   - the render path: nothing in the draw loop awaits engine work (§9.11.9).
+3. Run C1–C12 on all five files.
+
+[POST_GATE]
+R=audit/63-tui.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: TUI (Step 63)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F63-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done && grep -q 'AppAction' $R && grep -q 'UiRegion' $R
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 64: Audit — CLI and README
+
+* **Recommended Command:** `/goal`
+
+Scope note: the CLI is the operator's scripting surface, and §7 is its contract. The README must match both.
+
+```text
+[STEP_ID]
+STEP 64: audit/64-cli-readme.md (NEW) — Phase G audit of orrery-cli and README.md against the code
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - audit/64-cli-readme.md (NEW)
+READ_ONLY_REFS:
+  - STEPPED_IMPLEMENTATION_PLAN.md "### Phase G audit contract" (binding)
+  - crates/orrery-cli/src/args.rs:1-443, commands.rs:1-953, main.rs:1-73 (non-test); the rest of each file and crates/orrery-cli/tests/cli_smoke.rs for C11 only
+  - README.md (whole file)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:581-644 (§7, §8), 1121-1134 (§9.10), 1244-1260 (§9.11.8), 1289-1296 (§9.11.13, §9.11.14), 1300-1328 (§9.12)
+  - For README checks only: crates/orrery-core/src/config.rs (field names, defaults), crates/orrery-core/tests/live_*.rs (env var names)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No code, test, spec or plan edits. Don't run the orrery binary against a real project and don't run live tests. `cargo run -p orrery-cli --locked -- <cmd> --help` is allowed.
+
+[PRE_GATE]
+test ! -e audit/64-cli-readme.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^### Phase G audit contract' STEPPED_IMPLEMENTATION_PLAN.md
+
+[MUTATION_SPEC]
+1. Write audit/64-cli-readme.md per the Phase G audit contract, with `<N>` = 64 and area "CLI and README".
+2. Cover in the Coverage table, plus these extra rows:
+   - every §7 command row: the `args.rs` variant, every flag spelled as §7 spells it, and the `commands.rs` handler; a missing or misspelled flag is a `wiring` finding;
+   - the exit codes (0, 1, 2, 3, 130): where each is produced, and that `run` returns 3 when a step awaits the operator;
+   - every README command, flag, env var, path and default: the code that backs it; a mismatch is a `doc-drift` finding;
+   - every README statement about platform, Docker or the keychain, checked against §9.12.1.
+3. Run C1–C12 on the three CLI files.
+
+[POST_GATE]
+R=audit/64-cli-readme.md && cargo fmt --all -- --check && test -s $R && for h in '# Audit: CLI and README (Step 64)' '## Scope' '## Findings' '## Coverage' '## Checklist'; do grep -qxF "$h" $R || exit 1; done && test "$(grep -cE '^\| C([1-9]|1[0-2]) \|' $R)" -eq 12 && n=$(grep -cE '^### F64-[0-9]+: ' $R) && test "$(grep -cE '^- Severity: (Critical|High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Confidence: (High|Medium|Low)$' $R)" -eq "$n" && test "$(grep -cE '^- Location: `[^`]+:[0-9]+`$' $R)" -eq "$n" && test "$(grep -cE '^- (Category|Spec|Evidence|Impact|Suggested fix): ' $R)" -eq "$((n*5))" && grep -oE '^- Location: `[^`]+:[0-9]+`$' $R | sed -E 's/^- Location: `([^`]+):([0-9]+)`$/\1 \2/' | while read -r p l; do test -f "$p" && test "$l" -ge 1 && test "$l" -le "$(wc -l < "$p")" || { echo "bad location $p:$l"; exit 1; }; done
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
