@@ -19,12 +19,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 59** | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` (NEW) | — |
-| 2 | **STEP 60** | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` (NEW) | — |
-| 3 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
-| 4 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
-| 5 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
-| 6 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
+| 1 | **STEP 60** | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` (NEW) | — |
+| 2 | **STEP 61** | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` (NEW) | — |
+| 3 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
+| 4 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
+| 5 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 56** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 57** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README states only what is verified | `README.md` |
 | **STEP 58** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README TUI keys per panel | `README.md` |
+| **STEP 59** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` |
 
 ---
 
@@ -3200,6 +3200,13 @@ Rules:
 - Don't edit any file except the step's report. Don't run live tests.
 
 ---
+
+### Phase G validation notes (Claude's verdict per finding; reviewed at phase end)
+- **F59-1** confirmed, High. `ResourceManager::shutdown` (`docker.rs:944`) has no non-test caller in any crate, so inference servers Orrery started are never stopped when a run ends. It's also a spec gap: neither §5.7 nor §9.8 says who calls `shutdown`.
+- **F59-2** confirmed as described, reclassified Low / spec-gap. On resume, `consecutive_violations` and `stage_ran_since_gate_failure` both reset after an operator decision, which reads as intentional. The spec doesn't say whether an operator decision resets them.
+- **F59-3** confirmed, Medium. `engine.rs:1964` and `:1975` skip keychain errors with `if let Ok`.
+- **F59-4** confirmed, raised to Medium and widened. `AgentConfig::validate` (`config.rs:768`) checks `agent_id` only for emptiness. `load_agents` and `read_agents_from_dir` never call `validate_config_file_id` (`config.rs:1512`, which `save_agent` uses), so a hand-edited `agent_id = "../x"` loads and reaches `save_report` (`checkpoint.rs:447`) and the `agent_io/<run_id>/<agent_id>/` mounts. Recheck under Steps 60/61.
+- **F59-5** confirmed, Medium. A fresh step start (`engine.rs:511`) resets `round` but never calls `delete_reports`, so the reports from before `reset --step` survive and are loaded by `load_reports(step, None)` into the new prompts.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
