@@ -19,7 +19,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 61** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` |
 | **STEP 62** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` |
 | **STEP 63** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: TUI | `audit/63-tui.md` |
+| **STEP 64** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` |
 
 ---
 
@@ -3236,6 +3236,12 @@ Rules:
 - **F63-8** confirmed, Medium. `run_tui`'s `?` and `return Err` (`bridge.rs:640`, `:662`, `:689`) skip `controller.shutdown`, detaching a running engine.
 - **F63-9** accepted, Low. The `err.to_string()` sent on `stream_tx` bypasses the hub redactor.
 - **F63-10** confirmed, Low. The nested `_ => unreachable!()` is at `bridge.rs:382`.
+- **F64-1** confirmed, Medium. `dispatch_status` (`commands.rs:850`) maps checkpoint statuses by index with no `reconcile`. This is the CLI twin of F63-5.
+- **F64-2** confirmed by running it, raised to High. `orrery agent add-cli ... --command sh -c 'true'` exits 2 with `unexpected argument '-c' found` (`args.rs:203` lacks `allow_hyphen_values`). No AgentCli command with a flag can be registered from the CLI, including the §4.3 example.
+- **F64-3** confirmed, Medium. `subscribe_stream()` (`commands.rs:735`) runs after `build_engine`, so its startup notices (unused server, hidden tools from Step 53) never reach `orrery run` stdout.
+- **F64-4** to **F64-7** accepted on the quoted evidence, Low. In order: the `OsKeyringStore` probe bypasses `ctx.secrets`; stdin secret copies aren't zeroized and errors aren't redacted in `main`; the README layout omits `inference.toml` (confirmed against `README.md:95-99`); and there are CLI test gaps.
+
+**Phase G totals:** 41 findings and 39 distinct defects (F60-1 and F61-4 duplicate F59-4): 5 High, 18 Medium, 16 Low. For Claude re-review: F63-4 (does the engine drain stale operator decisions?), F61-1's 409-on-resume claim, the symlink half of F62-1, F62-5 (what the rmcp `auth_header` API allows), and F59-2 (operator's call on reset semantics).
 
 ### STEP 59: Audit — Engine and Checkpoints
 
