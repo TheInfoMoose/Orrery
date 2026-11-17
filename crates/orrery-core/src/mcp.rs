@@ -654,11 +654,35 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut lines = tokio::io::BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if !line.trim().is_empty() {
-                let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {line}")));
+        use tokio::io::AsyncReadExt;
+        let mut stderr = stderr;
+        let mut chunk = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
+        let emit_bytes = |bytes: &[u8]| {
+            let text = String::from_utf8_lossy(bytes);
+            if !text.trim().is_empty() {
+                let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {text}")));
+            }
+        };
+        while let Ok(n) = stderr.read(&mut chunk).await {
+            if n == 0 {
+                if !pending.is_empty() {
+                    emit_bytes(&pending);
+                }
+                break;
+            }
+            pending.extend_from_slice(&chunk[..n]);
+            while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
+                let mut line: Vec<u8> = pending.drain(..=pos).collect();
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                emit_bytes(&line);
+            }
+            while pending.len() >= 4096 {
+                let bytes: Vec<u8> = pending.drain(..4096).collect();
+                emit_bytes(&bytes);
             }
         }
     })
@@ -1420,6 +1444,59 @@ mod tests {
         assert_eq!(events[0].text, "[mcp:fs] first line");
         assert_eq!(events[1].kind, StreamEventKind::SystemNotice);
         assert_eq!(events[1].text, "[mcp:fs] leaks [REDACTED]");
+    }
+
+    #[tokio::test]
+    async fn stderr_forwarder_survives_invalid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs"),
+                LiveStreamConfig::default(),
+                Arc::new(SecretRedactor::new()),
+            )
+            .unwrap(),
+        );
+        let input = &b"ok\n\xff\xfebad\nafter\n"[..];
+        let handle = spawn_stderr_forwarder("fs".to_string(), input, Arc::clone(&hub));
+        handle.await.unwrap();
+
+        let events = hub.recent(10).unwrap();
+        let texts: Vec<&str> = events.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                "[mcp:fs] ok",
+                "[mcp:fs] \u{FFFD}\u{FFFD}bad",
+                "[mcp:fs] after"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_forwarder_caps_long_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs"),
+                LiveStreamConfig::default(),
+                Arc::new(SecretRedactor::new()),
+            )
+            .unwrap(),
+        );
+        let mut input = vec![b'a'; 5000];
+        input.push(b'\n');
+        let handle = spawn_stderr_forwarder(
+            "fs".to_string(),
+            std::io::Cursor::new(input),
+            Arc::clone(&hub),
+        );
+        handle.await.unwrap();
+
+        let events = hub.recent(10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].text, format!("[mcp:fs] {}", "a".repeat(4096)));
+        assert_eq!(events[1].text, format!("[mcp:fs] {}", "a".repeat(904)));
     }
 
     #[test]

@@ -353,17 +353,16 @@ fn rotate_files(log_dir: &Path, max_files: usize) -> std::result::Result<(), (Pa
 }
 
 pub fn tail_log(log_dir: &Path, limit: usize) -> Result<Vec<String>> {
-    let candidate_paths = [
-        rotated_log_path(log_dir, 2),
-        rotated_log_path(log_dir, 1),
-        log_dir.join(LOG_FILE),
-    ];
+    let candidate_paths = (1..=9)
+        .rev()
+        .map(|i| rotated_log_path(log_dir, i))
+        .chain(std::iter::once(log_dir.join(LOG_FILE)));
 
     let mut lines = Vec::new();
     for path in candidate_paths {
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                lines.extend(content.lines().map(str::to_owned));
+        match fs::read(&path) {
+            Ok(bytes) => {
+                lines.extend(String::from_utf8_lossy(&bytes).lines().map(str::to_owned));
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(source) => return Err(Error::Io { path, source }),
@@ -1070,6 +1069,30 @@ mod tests {
             errors[0].text.starts_with("live stream log write failed: "),
             "unexpected error text: {}",
             errors[0].text
+        );
+    }
+
+    #[test]
+    fn tail_log_reads_high_rotations() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(rotated_log_path(dir.path(), 4), "a\n").expect("write .log.4");
+        fs::write(rotated_log_path(dir.path(), 1), "b\n").expect("write .log.1");
+        fs::write(dir.path().join(LOG_FILE), "c\n").expect("write .log");
+
+        assert_eq!(
+            tail_log(dir.path(), 10).expect("tail_log"),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn tail_log_tolerates_invalid_utf8() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join(LOG_FILE), b"x\xffy\n").expect("write invalid utf8");
+
+        assert_eq!(
+            tail_log(dir.path(), 10).expect("tail_log"),
+            vec!["x\u{FFFD}y".to_string()]
         );
     }
 }
