@@ -657,33 +657,22 @@ where
         use tokio::io::AsyncReadExt;
         let mut stderr = stderr;
         let mut chunk = [0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
-        let emit_bytes = |bytes: &[u8]| {
-            let text = String::from_utf8_lossy(bytes);
+        let mut lines = crate::docker::LineSplitter::default();
+        let emit = |text: &str| {
             if !text.trim().is_empty() {
                 let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {text}")));
             }
         };
         while let Ok(n) = stderr.read(&mut chunk).await {
             if n == 0 {
-                if !pending.is_empty() {
-                    emit_bytes(&pending);
-                }
                 break;
             }
-            pending.extend_from_slice(&chunk[..n]);
-            while let Some(pos) = pending.iter().position(|&b| b == b'\n') {
-                let mut line: Vec<u8> = pending.drain(..=pos).collect();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-                emit_bytes(&line);
+            for line in lines.push(&chunk[..n]) {
+                emit(&line);
             }
-            while pending.len() >= 4096 {
-                let bytes: Vec<u8> = pending.drain(..4096).collect();
-                emit_bytes(&bytes);
-            }
+        }
+        if let Some(rest) = lines.finish() {
+            emit(&rest);
         }
     })
 }
@@ -1497,6 +1486,39 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].text, format!("[mcp:fs] {}", "a".repeat(4096)));
         assert_eq!(events[1].text, format!("[mcp:fs] {}", "a".repeat(904)));
+    }
+
+    #[tokio::test]
+    async fn stderr_forwarder_keeps_utf8_at_cut() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = Arc::new(
+            LiveStreamHub::new(
+                tmp.path().join("logs"),
+                LiveStreamConfig::default(),
+                Arc::new(SecretRedactor::new()),
+            )
+            .unwrap(),
+        );
+        let mut input = vec![b'a'; 4095];
+        input.extend_from_slice("é".as_bytes());
+        input.push(b'\n');
+        let handle = spawn_stderr_forwarder(
+            "fs".to_string(),
+            std::io::Cursor::new(input),
+            Arc::clone(&hub),
+        );
+        handle.await.unwrap();
+
+        let events = hub.recent(10).unwrap();
+        let texts: Vec<String> = events.iter().map(|e| e.text.clone()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                format!("[mcp:fs] {}", "a".repeat(4095)),
+                "[mcp:fs] é".to_string()
+            ]
+        );
+        assert!(events.iter().all(|e| !e.text.contains('\u{FFFD}')));
     }
 
     #[test]
