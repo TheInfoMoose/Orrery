@@ -595,7 +595,7 @@ All commands accept `--project <PATH>` (default `.`). Output is plain text; add 
 | `orrery workflow clear <STAGE>` | Remove all agents from a stage. |
 | `orrery workflow mode <run\|loop> [--cycles <N>]` | Set execution mode / cycle count. |
 | `orrery agent add-local-model --id --name --inference <ID> --model <M> [--temperature] [--context]` | Register `LocalModel`. |
-| `orrery agent add-cli --id --name --image <IMG@DIGEST> --command <ARG>... [--mount none\|ro\|rw] [--memory-mb] [--timeout] [--secret-env <VAR> --keychain-service --keychain-account]` | Register `AgentCli`; prints the §5.7.2 residual-risk note. |
+| `orrery agent add-cli --id --name --image <IMG@DIGEST> [--mount none\|ro\|rw] [--memory-mb] [--timeout] [--secret-env <VAR> --keychain-service --keychain-account] --command <ARG>...` | Register `AgentCli`; prints the §5.7.2 residual-risk note. |
 | `orrery agent add-cloud --id --name --endpoint <URL> --model <M> --keychain-service --keychain-account` | Register `CloudApi`. |
 | `orrery agent list [--json]` / `show <ID>` / `remove <ID>` | Inspect/remove agents. |
 | `orrery inference add --id --endpoint <URL> [--mode single\|router] [--container <NAME> \| --compose <FILE> [--service <S>]] [--no-unload] [--startup-timeout <SECS>]` / `list` / `remove <ID>` | Register an existing model server. No `--container`/`--compose` → `External`. `--container` and `--compose` conflict. `--compose` is relative to `.orrery/` and must resolve (`resolve_compose_file`, Project) before saving; absolute paths go in the machine-scope `inference.toml` by hand. |
@@ -1419,3 +1419,15 @@ Source: the Phase G audit (`audit/59-*.md` … `audit/64-*.md`) and Claude's ver
 - `agent add-cli --command` takes `allow_hyphen_values = true` and must be the last option; its help says so. (F64-2)
 - `status` calls `cp.reconcile(&plan)?` before reporting. (F64-1)
 - `run` / `resume` print the engine's buffered startup events (`WorkflowEngine::recent_stream(&self, limit: usize) -> Result<Vec<StreamEvent>>`, called right after `subscribe_stream`) before streaming. A `Lagged(n)` prints `[SystemNotice] -: <n> stream events dropped`. (F64-3)
+
+### 9.15 Phase I: tidy-ups (Steps 77–79)
+Operator-picked Low items from the Phase H Parked list (2026-11-17). Minimal fixes only.
+
+#### 9.15.1 Line splitter caps every line (Step 77) (adds to §9.14.8)
+- `LineSplitter::push` applies the `MAX_OUTPUT_LINE_BYTES` char-boundary cut to newline-terminated lines too, not only to `pending`. A line of exactly a multiple of the cap yields no empty trailing piece.
+
+#### 9.15.2 MCP stderr uses the line splitter (Step 78) (overrides §9.14.4 stderr forwarder)
+- `spawn_stderr_forwarder` feeds each read into `crate::docker::LineSplitter` and emits each returned line; when the read loop ends (EOF or read error) it emits `finish()`. Blank lines stay suppressed. A multi-byte character is never split at the 4096-byte cut.
+
+#### 9.15.3 `remove_role` checks peers first (Step 79) (adds to §9.14.1)
+- When the role's rules file resolves and exists, `remove_role` scans the peer roles *before* deleting the role's TOML. If the scan fails, nothing is deleted.

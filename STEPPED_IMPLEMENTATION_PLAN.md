@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64) and Phase H fixes (65–76). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76) and Phase I tidy-ups (77–79). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (76). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (79). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,9 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 77** | `/goal` | Line splitter caps every line | `crates/orrery-core/src/docker.rs` | — |
+| 2 | **STEP 78** | `/goal` | MCP stderr uses the line splitter | `crates/orrery-core/src/mcp.rs` | STEP 77 |
+| 3 | **STEP 79** | `/goal` | remove_role checks peers first | `crates/orrery-core/src/config.rs` | — |
 
 ### Completed
 
@@ -2215,14 +2218,11 @@ Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `
 ### Parked
 Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52–56). The rest stay parked.
 Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs the live suite.
+Phase H review (2026-11-17): the operator picked the four cheap Lows for Phase I (Steps 77–79; the §7 `add-cli` synopsis was fixed in the spec directly). The rest stay parked.
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
-- `crates/orrery-core/src/config.rs:1800-1809` `remove_role`: the role's TOML is deleted before the peer scan that Step 65 made fallible, so an unreadable peer file makes the command fail with the role already gone (the shared rules file is kept, so it fails safe). Fix: read the peers before `remove_file`. Found validating Step 65; the §9.14.1 spec didn't set the order.
 - `crates/orrery-core` `chrono` use (`Utc::now`, `DateTime<Utc>` in `stream_log.rs`, `checkpoint.rs`, `llm.rs`) — RUSTSEC-2026-0543 marks chrono unmaintained; `deny.toml` ignores it (operator, 2026-11-17) because rmcp 3.9 depends on it too. Migrate orrery-core to `jiff` or `time` to cut our direct use, and drop the ignore once rmcp no longer pulls chrono. Low.
-- `crates/orrery-core/src/mcp.rs` `spawn_stderr_forwarder` 4096-byte cut — `pending.drain(..4096)` can split a multi-byte UTF-8 character, which then shows as U+FFFD on both sides — cut at the last char boundary (`from_utf8(..).valid_up_to()`), as Step 72's `LineSplitter` does, or reuse `LineSplitter`. Found validating Step 68; the §9.14.4 spec didn't ask for it. Low.
-- crates/orrery-core/src/docker.rs `LineSplitter::push` — a line whose `\n` arrives in the same chunk is drained before the cap, so it can exceed `MAX_OUTPUT_LINE_BYTES` — apply the same char-boundary cap to newline-drained lines (Low; found in STEP 72 validation).
-- ORRERY_TECHNICAL_SPECIFICATION.md:598 — §7 synopsis lists `--command <ARG>...` before `[--mount …]` etc.; since STEP 76 (`allow_hyphen_values`) flags after `--command` are silently taken as command args — move `--command <ARG>...` to the end of the synopsis (Low, docs; found in STEP 76 validation).
 
 ---
 
@@ -4036,3 +4036,131 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 ```
 
 ---
+
+## Phase I — parked Low tidy-ups (Steps 77–79)
+
+**Phase goal (frozen until the phase ends):** fix the four cheap Low items the operator picked from the Phase H Parked list (2026-11-17): the `LineSplitter` cap gap, the MCP stderr UTF-8 cut, the `remove_role` deletion order, and the §7 `add-cli` synopsis. Minimal fixes only. Design: spec §9.15 (`ORRERY_TECHNICAL_SPECIFICATION.md:1423-1433`).
+
+Written 2026-11-17 against `119aa59`. The §7 synopsis fix is a spec-only change, made by Claude in the planning commit (spec line 598 now ends with `--command <ARG>...`), so it has no step. Each remaining step edits one file.
+
+### STEP 77: Line Splitter Caps Every Line
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked (Step 72 validation): a line whose `\n` arrives in the same chunk is drained before the cap, so it can exceed `MAX_OUTPUT_LINE_BYTES`.
+
+```text
+[STEP_ID]
+STEP 77: Line Splitter Caps Every Line
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/docker.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1426-1427 (§9.15.1; binding), 1393-1398 (§9.14.8)
+  - crates/orrery-core/src/docker.rs:1052-1091 (`MAX_OUTPUT_LINE_BYTES`, `LineSplitter`, `push`, `finish`), 2584-2620 (the four `line_splitter_*` tests)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `run_to_completion` and the four existing `line_splitter_*` tests are unchanged. `push` and `finish` keep their signatures.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub(crate) struct LineSplitter' crates/orrery-core/src/docker.rs && ! grep -q 'fn char_cut' crates/orrery-core/src/docker.rs && sed -n 1426p $S | grep -q '^#### 9.15.1 '
+
+[MUTATION_SPEC]
+1. docker.rs, a private free function next to `LineSplitter`: `fn char_cut(bytes: &[u8]) -> usize` (caller guarantees `bytes.len() >= MAX_OUTPUT_LINE_BYTES`) returning `match std::str::from_utf8(&bytes[..MAX_OUTPUT_LINE_BYTES]) { Ok(_) => MAX_OUTPUT_LINE_BYTES, Err(e) if e.valid_up_to() > 0 => e.valid_up_to(), Err(_) => MAX_OUTPUT_LINE_BYTES }`.
+2. A private free function `fn push_capped(lines: &mut Vec<String>, raw: &[u8])`: `let mut rest = raw; while rest.len() > MAX_OUTPUT_LINE_BYTES { let cut = char_cut(rest); lines.push(String::from_utf8_lossy(&rest[..cut]).into_owned()); rest = &rest[cut..]; } lines.push(String::from_utf8_lossy(rest).into_owned());`. Note `>`, not `>=`: a piece of exactly the cap is pushed whole, so there is never an empty trailing piece, and an empty line still yields one `""`.
+3. `push`, newline loop: after stripping `\n` and a trailing `\r`, call `push_capped(&mut lines, &raw)` instead of pushing the lossy line directly.
+4. `push`, pending loop: keep `while self.pending.len() >= MAX_OUTPUT_LINE_BYTES`, but compute the cut with `let cut = char_cut(&self.pending);`.
+5. Tests in `docker::tests`:
+   - `line_splitter_caps_newline_terminated_lines`: one `push` of 4095 × `b'a'` + `"é"` (2 bytes) + `b"\n"` → `["a"×4095, "é"]`.
+   - `line_splitter_exact_multiple_has_no_empty_piece`: one `push` of 8192 × `b'a'` + `b"\n"` → `["a"×4096, "a"×4096]` (exactly two items).
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn char_cut(bytes: &\[u8\]) -> usize' crates/orrery-core/src/docker.rs && grep -q 'fn push_capped(lines: &mut Vec<String>, raw: &\[u8\])' crates/orrery-core/src/docker.rs && grep -q 'while rest.len() > MAX_OUTPUT_LINE_BYTES' crates/orrery-core/src/docker.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^docker::tests::line_splitter_[a-z_]+: test$')" -eq 6 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(docker::tests::line_splitter_caps_newline_terminated_lines|docker::tests::line_splitter_exact_multiple_has_no_empty_piece): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 78: MCP Stderr Uses the Line Splitter
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked (Step 68 validation): `spawn_stderr_forwarder`'s `pending.drain(..4096)` can split a multi-byte UTF-8 character, which then shows as U+FFFD on both sides.
+
+```text
+[STEP_ID]
+STEP 78: MCP Stderr Uses the Line Splitter
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1429-1430 (§9.15.2; binding), 1368-1378 (§9.14.4)
+  - crates/orrery-core/src/mcp.rs:648-690 (`spawn_stderr_forwarder`), 1422-1500 (tests `stderr_forwarder_emits_redacted_notices`, `stderr_forwarder_survives_invalid_utf8`, `stderr_forwarder_caps_long_lines`)
+  - crates/orrery-core/src/docker.rs: `LineSplitter` (`pub(crate)`, `Default`, `push(&mut self, &[u8]) -> Vec<String>`, `finish(&mut self) -> Option<String>`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES (docker.rs is read-only here). The forwarder's signature, the `[mcp:<id>] ` prefix and blank-line suppression are unchanged. The three existing `stderr_forwarder_*` tests are unchanged and must still pass.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pending.drain(..4096)' crates/orrery-core/src/mcp.rs && grep -q 'fn push_capped' crates/orrery-core/src/docker.rs && sed -n 1429p $S | grep -q '^#### 9.15.2 '
+
+[MUTATION_SPEC]
+1. `spawn_stderr_forwarder`'s task body becomes:
+   - `use tokio::io::AsyncReadExt; let mut stderr = stderr; let mut chunk = [0u8; 4096]; let mut lines = crate::docker::LineSplitter::default();`
+   - `let emit = |text: &str| { if !text.trim().is_empty() { let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {text}"))); } };`
+   - `while let Ok(n) = stderr.read(&mut chunk).await { if n == 0 { break; } for line in lines.push(&chunk[..n]) { emit(&line); } }`
+   - after the loop (EOF or read error alike): `if let Some(rest) = lines.finish() { emit(&rest); }`
+   The `pending` vector, the manual newline loop and `pending.drain(..4096)` are removed.
+2. Test in `mcp::tests`: `stderr_forwarder_keeps_utf8_at_cut` (`#[tokio::test]`, hub set up as in `stderr_forwarder_caps_long_lines`): input `std::io::Cursor::new(..)` of 4095 × `b'a'` + `"é"` + `b"\n"` → `hub.recent(10)` texts are exactly `[format!("[mcp:fs] {}", "a".repeat(4095)), "[mcp:fs] é"]`, and no event text contains `'\u{FFFD}'`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'crate::docker::LineSplitter::default()' crates/orrery-core/src/mcp.rs && ! grep -q 'pending.drain(..4096)' crates/orrery-core/src/mcp.rs && grep -q 'lines.finish()' crates/orrery-core/src/mcp.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(mcp::tests::stderr_forwarder_keeps_utf8_at_cut|mcp::tests::stderr_forwarder_emits_redacted_notices|mcp::tests::stderr_forwarder_survives_invalid_utf8|mcp::tests::stderr_forwarder_caps_long_lines): test$')" -eq 4
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 79: remove_role Checks Peers First
+
+* **Recommended Command:** `/goal`
+
+Scope note: Parked (Step 65 validation): `remove_role` deletes the role's TOML before the fallible peer scan, so an unreadable peer file makes the command fail with the role already gone.
+
+```text
+[STEP_ID]
+STEP 79: remove_role Checks Peers First
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1432-1433 (§9.15.3; binding), 1346-1351 (§9.14.1)
+  - crates/orrery-core/src/config.rs:1823-1860 (`ConfigStore::remove_role`), 4190-4220 (test `remove_role_keeps_rules_when_peer_unreadable`: setup pattern)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Only `remove_role`'s body and the two new tests change. The not-found error and the `validate_config_file_id` call are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'fn remove_role_keeps_rules_when_peer_unreadable' crates/orrery-core/src/config.rs && ! grep -q 'let orphaned_rules' crates/orrery-core/src/config.rs && sed -n 1432p $S | grep -q '^#### 9.15.3 '
+
+[MUTATION_SPEC]
+1. `remove_role`, after `let role = Self::read_single_role(&roles_dir, &role_toml_path)?;` and before any deletion:
+   `let orphaned_rules = match resolve_safe_within_dir(&roles_dir, Path::new(&role.rules_file), "rules_file") { Ok(rules_path) if rules_path.exists() => { let still_used = Self::read_roles_from_dir(&roles_dir)?.iter().any(|other| other.role_id != role.role_id && other.rules_file == role.rules_file); (!still_used).then_some(rules_path) } _ => None };`
+   The `other.role_id != role.role_id` filter is required: the role's own TOML still exists during the scan.
+2. Then `fs::remove_file(&role_toml_path)` (same `Error::Io` mapping as now), then `if let Some(rules_path) = orphaned_rules { fs::remove_file(&rules_path).map_err(|source| Error::Io { path: rules_path, source })?; }`. The old post-delete `if let Ok(rules_path) = … && rules_path.exists()` block is removed.
+3. Tests in `config::tests`:
+   - `remove_role_keeps_toml_when_peer_unreadable`: the setup of `remove_role_keeps_rules_when_peer_unreadable` (two roles sharing `shared.md`, plus `broken.toml` containing `role_id = [\n`); `remove_role("role-one")` is `Err`, and both `roles/role-one.toml` and `roles/shared.md` still exist.
+   - `remove_role_deletes_own_rules_after_peer_scan`: `init_project`, then `save_role` of `solo` (rules `solo.md`) and `other` (rules `other.md`); `remove_role("solo")` is `Ok`; `roles/solo.toml` and `roles/solo.md` are gone; `roles/other.toml` and `roles/other.md` still exist.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'let orphaned_rules' crates/orrery-core/src/config.rs && grep -q 'other.role_id != role.role_id' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::remove_role_keeps_toml_when_peer_unreadable|config::tests::remove_role_deletes_own_rules_after_peer_scan|config::tests::remove_role_keeps_rules_when_peer_unreadable): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
