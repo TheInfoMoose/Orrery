@@ -733,6 +733,9 @@ async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) ->
     let backends = (ctx.make_backends)(project)?;
     let engine = build_engine(&store, backends).await?;
     let mut stream_rx = engine.subscribe_stream();
+    for ev in engine.recent_stream(usize::MAX)? {
+        write_stdout_line(ctx, &format_stream_event(&ev))?;
+    }
     let cancel = CancellationToken::new();
 
     let signal_cancel = cancel.clone();
@@ -753,7 +756,12 @@ async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) ->
                     Ok(ev) => {
                         write_stdout_line(ctx, &format_stream_event(&ev))?;
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        write_stdout_line(
+                            ctx,
+                            &format!("[SystemNotice] -: {n} stream events dropped"),
+                        )?;
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         break run_fut.as_mut().await;
                     }
@@ -842,7 +850,8 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
     let state = checkpoints.load_state()?;
 
     let (run_id, phase, current_step, round, retry_count, awaiting_reason, statuses) = match state {
-        Some(cp) => {
+        Some(mut cp) => {
+            cp.reconcile(&plan)?;
             let current = plan
                 .steps
                 .get(cp.current_step_index)
@@ -3327,5 +3336,87 @@ mod tests {
             }
             other => panic!("expected Error::Validation, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn status_reports_edited_step() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, _out, _err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n## Step 2: Second\nb2\n",
+            driver,
+            secrets,
+        )
+        .await;
+
+        dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+
+        std::fs::write(
+            dir.path().join("STEPPED_IMPLEMENTATION_PLAN.md"),
+            "## Step 1: First\nb1 edited\n## Step 2: Second\nb2\n",
+        )
+        .expect("overwrite plan");
+
+        let err = dispatch(Command::Status { json: false }, dir.path(), &mut ctx)
+            .await
+            .expect_err("status on edited passed step must fail");
+        assert!(
+            err.to_string().contains("step edited"),
+            "expected 'step edited' in error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_prints_startup_notices() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        push_one_step_pass(&driver, "step 1 done");
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, out, _err) =
+            setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        store
+            .save_mcp_server(&McpServerConfig {
+                server_id: "unused".to_string(),
+                transport: McpTransportConfig::Stdio {
+                    command: "fake-mcp".to_string(),
+                    args: Vec::new(),
+                },
+                write_tools: Vec::new(),
+            })
+            .expect("save unused mcp server");
+
+        let code = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run");
+        assert_eq!(code, 0);
+
+        let stdout = out.as_string();
+        assert!(
+            stdout.contains("is not used by this workflow"),
+            "expected unused server startup notice in stdout, got: {stdout}"
+        );
     }
 }

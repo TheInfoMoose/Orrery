@@ -343,6 +343,10 @@ impl WorkflowEngine {
         self.ctx.stream.subscribe()
     }
 
+    pub fn recent_stream(&self, limit: usize) -> Result<Vec<StreamEvent>> {
+        self.ctx.stream.recent(limit)
+    }
+
     pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
         let result = self.run_steps(opts, cancel).await;
         if let Err(err) = self.ctx.resources.shutdown().await {

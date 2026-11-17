@@ -200,7 +200,7 @@ pub enum AgentCmd {
         name: String,
         #[arg(long)]
         image: String,
-        #[arg(long, required = true, num_args = 1..)]
+        #[arg(long, required = true, num_args = 1.., allow_hyphen_values = true, help = "Container command and its arguments; must be the last option")]
         command: Vec<String>,
         #[arg(long, value_enum, default_value_t = MountArg::None)]
         mount: MountArg,
@@ -484,9 +484,6 @@ mod tests {
                 "CLI Validator",
                 "--image",
                 "registry.example.com/agents/cli@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                "--command",
-                "agent-cli",
-                "run",
                 "--mount",
                 "ro",
                 "--memory-mb",
@@ -499,6 +496,9 @@ mod tests {
                 "orrery.agent",
                 "--keychain-account",
                 "testuser",
+                "--command",
+                "agent-cli",
+                "run",
             ],
             &[
                 "orrery",
@@ -755,10 +755,10 @@ mod tests {
             "Agent",
             "--image",
             "registry.example.com/a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "--command",
-            "cmd",
             "--mount",
             "rw",
+            "--command",
+            "cmd",
         ]);
         assert!(mount_rw.is_ok(), "mount rw failed: {mount_rw:?}");
         if let Ok(cli) = mount_rw {
@@ -824,10 +824,10 @@ mod tests {
                 "Agent",
                 "--image",
                 "registry.example.com/a@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                "--command",
-                "cmd",
                 "--mount",
                 "bad",
+                "--command",
+                "cmd",
             ])
             .is_err()
         );
@@ -895,5 +895,44 @@ mod tests {
         assert_eq!(HookEvent::from(HookEventArg::Halt), HookEvent::Halt);
         assert_eq!(HookFailure::from(HookFailureArg::Halt), HookFailure::Halt);
         assert_eq!(HookFailure::from(HookFailureArg::Warn), HookFailure::Warn);
+    }
+
+    #[test]
+    fn add_cli_accepts_hyphenated_command() {
+        let cli = Cli::try_parse_from([
+            "orrery",
+            "agent",
+            "add-cli",
+            "--id",
+            "c1",
+            "--name",
+            "C1",
+            "--image",
+            "busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "--mount",
+            "ro",
+            "--command",
+            "sh",
+            "-c",
+            "true",
+        ])
+        .expect("parse add-cli with hyphenated command");
+        assert_eq!(
+            cli.into_command(),
+            Command::Agent {
+                command: AgentCmd::AddCli {
+                    id: "c1".to_string(),
+                    name: "C1".to_string(),
+                    image: "busybox@sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                    command: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+                    mount: MountArg::Ro,
+                    memory_mb: 4096,
+                    timeout: 1800,
+                    secret_env: None,
+                    keychain_service: None,
+                    keychain_account: None,
+                }
+            }
+        );
     }
 }
