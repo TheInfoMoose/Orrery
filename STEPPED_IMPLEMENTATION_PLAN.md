@@ -19,8 +19,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
-| 2 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
+| 1 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -101,6 +100,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 72** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` |
 | **STEP 73** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 74** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` |
+| **STEP 75** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` |
 
 ---
 
