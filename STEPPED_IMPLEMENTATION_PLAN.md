@@ -19,7 +19,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 58** | `/goal` | README TUI keys per panel | `README.md` | — |
 
 ### Completed
 
@@ -83,6 +82,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 55** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Surface live-stream log write errors | `crates/orrery-core/src/stream_log.rs` |
 | **STEP 56** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | TUI operator forwarder and Loop progress reset | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 57** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README states only what is verified | `README.md` |
+| **STEP 58** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | README TUI keys per panel | `README.md` |
 
 ---
 
