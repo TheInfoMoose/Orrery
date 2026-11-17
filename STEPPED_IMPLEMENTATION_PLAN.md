@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58) and the Phase G audit (59–64). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64) and Phase H fixes (65–76). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (64). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (76). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,18 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 65** | `/goal` | Config ID integrity | `crates/orrery-core/src/config.rs` | — |
+| 2 | **STEP 66** | `/goal` | MCP write-scope hardening | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` | — |
+| 3 | **STEP 67** | `/goal` | MCP timeouts | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | STEP 66 |
+| 4 | **STEP 68** | `/goal` | MCP stderr bytes and log tail | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/stream_log.rs` | STEP 67 |
+| 5 | **STEP 69** | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` | — |
+| 6 | **STEP 70** | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | STEP 69 |
+| 7 | **STEP 71** | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` | STEP 70 |
+| 8 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
+| 9 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
+| 10 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
+| 11 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
+| 12 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -3484,3 +3496,538 @@ R=audit/64-cli-readme.md && cargo fmt --all -- --check && test -s $R && for h in
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
 ```
+
+---
+
+## Phase H — audit fixes (Steps 65–76)
+
+**Phase goal (frozen until the phase ends):** fix every High and Medium defect the Phase G audit confirmed. That's 23 defects:
+- the 6 High: F59-1, F62-1, F62-3, F63-2, F63-4, F64-2
+- the 17 Medium
+
+Each fix is exactly as Claude's validation notes and the re-review describe it, with nothing beyond them. The 16 Low findings stay parked for a later pass. Design: spec §9.14 (`ORRERY_TECHNICAL_SPECIFICATION.md:1343-1421`).
+
+Written 2026-11-16 against `b816aa4`. Several files are edited by more than one step (config.rs: 65, 67, 75; mcp.rs: 66–68; engine.rs: 66, 67, 69–71, 76; bridge.rs: 73, 74; docker.rs: 71, 72). Later steps name functions as well as lines, because earlier steps shift line numbers.
+
+**Decisions the contract leaves open** (settled here, not by the executor):
+- Required `path_args` (F62-2): a write tool's listed path argument must be present. Omitting it is a security error, not a pass.
+- MCP timeouts (F62-3): the handshake and `list_tools` use a fixed 60 s. Tool calls use the new `[limits] mcp_call_timeout_secs`, default 600 s, because gate tools may run long test suites.
+- `orrery status` on an edited step (F64-1) fails with the reconcile error instead of showing stale statuses.
+- `agent add-cli --command` (F64-2) must be the last option, since it takes everything after it.
+- F63-1 is fixed in the bridge only: Interrupt with no task explains itself. The footer label logic in `app.rs` is unchanged.
+- F59-2 (operator, 2026-11-16): operator decisions keep resetting the violation counters. Only the spec records it (§9.14.5).
+
+### STEP 65: Config ID Integrity
+
+* **Recommended Command:** `/goal`
+
+Scope note: F59-4 / F60-1 / F61-4 (ids with path characters load from hand-edited files), F60-2 (file name vs id, leading-dot ids), F60-4 (`remove_role` deletes a shared rules file on a parse error).
+
+```text
+[STEP_ID]
+STEP 65: Config ID Integrity
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1346-1351 (§9.14.1; binding)
+  - crates/orrery-core/src/config.rs:645 (RoleConfig::validate), 768 (AgentConfig::validate), InferenceConfig::validate (~1050), 1512-1525 (validate_config_file_id), 1780-1812 (remove_role), 2100-2110 (sorted_toml_entries dot-file skip), 2129 (read_single_role), 2164 (read_roles_from_dir), 2173-2185 (read_agents_from_dir)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Signatures stay as they are. MCP `server_id` handling is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q "id.starts_with('.')" crates/orrery-core/src/config.rs && grep -Pzq 'read_roles_from_dir\(&roles_dir\)\s*\.unwrap_or_default\(\)' crates/orrery-core/src/config.rs && sed -n 1346p $S | grep -q '^#### 9.14.1 '
+
+[MUTATION_SPEC]
+1. `validate_config_file_id`: after the existing checks, `if id.starts_with('.') { return Err(Error::PathTraversal { path: PathBuf::from(id) }); }`.
+2. `AgentConfig::validate`, `RoleConfig::validate` and `InferenceConfig::validate`: the first statement is `validate_config_file_id(&self.agent_id, "agent_id")?;` / `(&self.role_id, "role_id")` / `(&self.inference_id, "inference_id")`. Keep each existing emptiness check after it.
+3. `read_single_role(roles_dir, path)` and the loop in `read_agents_from_dir`: after parsing, compare `path.file_stem().and_then(|s| s.to_str())` with the id. On a mismatch (or a `None` stem), return `Error::Validation { field: "role_id" | "agent_id", message: format!("file '{stem}.toml' declares id '{id}'; the file must be named '{id}.toml'") }`.
+4. `remove_role`: `Self::read_roles_from_dir(&roles_dir).unwrap_or_default()` becomes `Self::read_roles_from_dir(&roles_dir)?`.
+5. Tests (in `config::tests`):
+   - `validate_rejects_path_ids`: `AgentConfig`, `RoleConfig` and `InferenceConfig` with ids `"../x"`, `"a/b"` and `".hidden"` each fail `validate()` with `Error::PathTraversal`.
+   - `load_rejects_mismatched_file_stem`: write `.orrery/roles/custom.toml` with `role_id = "reviewer"` (plus a rules file); `load_roles()` is `Err(Error::Validation { field: "role_id", .. })`. The same check for an agent file `agents/a1.toml` with `agent_id = "a2"`.
+   - `load_rejects_hand_edited_traversal_id`: `agents/x.toml` with `agent_id = "../x"` makes `load_agents()` an `Err`.
+   - `remove_role_keeps_rules_when_peer_unreadable`: two roles share `rules_file`, and a third role file is malformed TOML. `remove_role(first)` is `Err`, and the shared rules file still exists.
+6. If an existing test writes a role or agent file whose name differs from its id, that test hits the bug this step fixes: rename the file in the test to `<id>.toml`. Don't weaken any assertion.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q "id.starts_with('.')" crates/orrery-core/src/config.rs && ! grep -Pzq 'read_roles_from_dir\(&roles_dir\)\s*\.unwrap_or_default\(\)' crates/orrery-core/src/config.rs && grep -q 'the file must be named' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::validate_rejects_path_ids|config::tests::load_rejects_mismatched_file_stem|config::tests::load_rejects_hand_edited_traversal_id|config::tests::remove_role_keeps_rules_when_peer_unreadable): test$')" -eq 4
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 66: MCP Write-Scope Hardening
+
+* **Recommended Command:** `/goal`
+
+Scope note: F62-1 (High: MCP write tools can reach `.orrery/`, and symlinks escape a scope) and F62-2 (an omitted `path_args` key skips the check).
+
+```text
+[STEP_ID]
+STEP 66: MCP Write-Scope Hardening
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1352-1361 (§9.14.2; binding), 802-843 (§9.5)
+  - crates/orrery-core/src/mcp.rs:36-91 (WriteScope, normalize_path_segments), 122-127 (McpGatekeeper fields; it derives Default), 204-260 (execute_for_role)
+  - crates/orrery-core/src/engine.rs:1993 (build_engine `let mut gatekeeper = McpGatekeeper::new();`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `scopes_overlap` and `normalize_path_segments` keep their behavior. No change to `WriteScope::new`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'fn resolve_write_path' crates/orrery-core/src/mcp.rs && grep -q 'if let Some(val) = args.get(arg_name)' crates/orrery-core/src/mcp.rs && sed -n 1352p $S | grep -q '^#### 9.14.2 '
+
+[MUTATION_SPEC]
+1. `WriteScope::contains`: after normalizing, `if path_segs.first() == Some(&".orrery") { return false; }`, before the empty-prefix check.
+2. `execute_for_role`, write-tool loop: replace `if let Some(val) = args.get(arg_name)` with `let Some(val) = args.get(arg_name) else { return Err(Error::Security { message: format!("write tool '{server_id}:{tool}' is missing path argument '{arg_name}'") }); };`, then the existing string and `contains` checks.
+3. `McpGatekeeper` gains `project_root: Option<PathBuf>` and `pub fn set_project_root(&mut self, root: PathBuf) { self.project_root = Some(root); }`.
+4. Add `pub fn resolve_write_path(root: &Path, rel: &str) -> Result<PathBuf>` per §9.14.2: `fs::canonicalize(root)`, then walk `normalize_path_segments(rel)` (None → `Error::Security`). For each segment: `symlink_metadata(&next)` `Ok` → `fs::canonicalize(&next)` (an error → `Error::Security { message: format!("path '{rel}' contains an unresolvable entry") }`); `Err(NotFound)` → push that segment and the rest lexically and stop; another `Err` → `Error::Io`.
+5. In `execute_for_role`, after `scope.contains(path_str)` passes and when `self.project_root` is `Some(root)`: `let canonical_root = fs::canonicalize(root)` (`Error::Io`); `let resolved = resolve_write_path(root, path_str)?;`. Fail with the §9.14.2 message unless `resolved.starts_with(&canonical_root)`, `!resolved.starts_with(canonical_root.join(".orrery"))`, and, when `!scope.prefixes().is_empty()`, some prefix has `resolved.starts_with(resolve_write_path(root, prefix)?)`.
+6. engine.rs `build_engine`: right after `let mut gatekeeper = McpGatekeeper::new();`, add `gatekeeper.set_project_root(store.project_root().to_path_buf());`.
+7. Tests in `mcp::tests` (symlink tests under `#[cfg(unix)]`, using `std::os::unix::fs::symlink` and `tempfile::TempDir`):
+   - `write_scope_rejects_orrery_first_segment`: `anywhere().contains(".orrery/project.toml")` and `contains("./.orrery/x")` are false; `contains("src/.orrery/x")` is true.
+   - `execute_rejects_missing_path_arg`: a write tool `fs:write_file` with `path_args = ["path"]`, called with `{}`, returns `Error::Security`.
+   - `execute_rejects_symlink_escape`: root `r` with `r/src/` and `r/src/escape -> <second TempDir>`; `set_project_root(r)`; scope `["src"]`; `{"path": "src/escape/x"}` → `Error::Security`; `{"path": "src/ok.txt"}` → `Ok`.
+   - `execute_rejects_symlink_into_orrery`: `r/.orrery/` exists and `r/src/o -> r/.orrery`; scope `anywhere()`; `{"path": "src/o/x"}` → `Error::Security`.
+   Use `MockMcpTransport::new("fs").with_tool("write_file", json!({}))` and a role that allows `fs:write_file`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn resolve_write_path' crates/orrery-core/src/mcp.rs && grep -q 'pub fn set_project_root' crates/orrery-core/src/mcp.rs && grep -q 'is missing path argument' crates/orrery-core/src/mcp.rs && grep -q 'gatekeeper.set_project_root(store.project_root().to_path_buf());' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(mcp::tests::write_scope_rejects_orrery_first_segment|mcp::tests::execute_rejects_missing_path_arg|mcp::tests::execute_rejects_symlink_escape|mcp::tests::execute_rejects_symlink_into_orrery): test$')" -eq 4
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 67: MCP Timeouts
+
+* **Recommended Command:** `/goal`
+
+Scope note: F62-3 (High): there's no timeout anywhere in `mcp.rs`, so a stalled MCP server hangs `build_engine`, turns, gates and hooks.
+
+```text
+[STEP_ID]
+STEP 67: MCP Timeouts
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+  - crates/orrery-core/src/config.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1362-1367 (§9.14.3; binding), 1160-1192 (§9.11.2)
+  - crates/orrery-core/src/config.rs:152-205 (RuntimeLimits, Default, validate), the `RuntimeLimits {` literals in config.rs tests (~3915-3970)
+  - crates/orrery-core/src/mcp.rs: `RmcpTransport::connect_with_stream` (the two `rmcp::ServiceExt::serve(..).await` calls), `impl McpTransport for RmcpTransport` (`list_tools`, `call_tool`), `McpGatekeeper` and `execute_for_role` (after Step 66)
+  - crates/orrery-core/src/engine.rs build_engine (the `set_project_root` line Step 66 added)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other limit changes. Timeouts aren't applied in `MockMcpTransport`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub fn resolve_write_path' crates/orrery-core/src/mcp.rs && ! grep -q 'mcp_call_timeout_secs' crates/orrery-core/src/config.rs && sed -n 1362p $S | grep -q '^#### 9.14.3 '
+
+[MUTATION_SPEC]
+1. config.rs `RuntimeLimits`: add `pub mcp_call_timeout_secs: u64` after `model_idle_timeout_secs`, default `600`. In `validate`, right after the `model_idle_timeout_secs` check: `1..=86_400`, otherwise `Error::Validation { field: "limits.mcp_call_timeout_secs", message: "mcp_call_timeout_secs must be in 1..=86_400" }`. Add the field to every `RuntimeLimits { .. }` literal in the tests.
+2. mcp.rs: `pub const MCP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);`. Wrap both `rmcp::ServiceExt::serve(..)` awaits and the body of `RmcpTransport::list_tools` in `tokio::time::timeout(MCP_CONNECT_TIMEOUT, ..)`. On `Elapsed`, return `Error::Mcp { server_id, source: Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "MCP handshake timed out after 60s")) }` (`"list_tools timed out after 60s"` for `list_tools`).
+3. `McpGatekeeper` gains `call_timeout: Option<std::time::Duration>` and `pub fn set_call_timeout(&mut self, timeout: std::time::Duration)`. `execute_for_role`'s final `transport.call_tool(tool, args).await` runs inside `tokio::time::timeout(t, ..)` when `Some(t)`. Elapsed → `Error::Mcp { server_id: server_id.to_string(), source: Box::new(io::Error::new(TimedOut, format!("tool '{server_id}:{tool}' timed out after {}s", t.as_secs()))) }`.
+4. engine.rs `build_engine`: next to `set_project_root`, add `gatekeeper.set_call_timeout(std::time::Duration::from_secs(project.limits.mcp_call_timeout_secs));`.
+5. Tests:
+   - `config::tests::limits_mcp_call_timeout_bounds`: the default is 600; 0 and 86_401 fail with field `limits.mcp_call_timeout_secs`; 1 and 86_400 pass.
+   - `mcp::tests::execute_times_out_slow_tool` (`#[tokio::test]`): a test-only `struct SlowTransport` implementing `McpTransport` whose `call_tool` sleeps 30 s; `set_call_timeout(Duration::from_millis(50))`; `execute_for_role` returns `Error::Mcp` within 5 s (wrap the call in a 5 s `tokio::time::timeout` and assert the inner `Err`).
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub mcp_call_timeout_secs: u64' crates/orrery-core/src/config.rs && grep -q 'pub const MCP_CONNECT_TIMEOUT' crates/orrery-core/src/mcp.rs && grep -q 'pub fn set_call_timeout' crates/orrery-core/src/mcp.rs && grep -q 'set_call_timeout(std::time::Duration::from_secs(project.limits.mcp_call_timeout_secs))' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::limits_mcp_call_timeout_bounds|mcp::tests::execute_times_out_slow_tool): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 68: MCP Stderr Bytes and Log Tail
+
+* **Recommended Command:** `/goal`
+
+Scope note: F62-4 (invalid UTF-8 on an MCP server's stderr ends the forwarder and closes the pipe; lines are unbounded) and F62-6 (`tail_log` ignores `live_stream_max_files` and fails on non-UTF-8).
+
+```text
+[STEP_ID]
+STEP 68: MCP Stderr Bytes and Log Tail
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+  - crates/orrery-core/src/stream_log.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1368-1378 (§9.14.4; binding), 1138-1159 (§9.11.1)
+  - crates/orrery-core/src/mcp.rs `spawn_stderr_forwarder` (~542-558) and the test `stderr_forwarder_emits_redacted_notices`
+  - crates/orrery-core/src/stream_log.rs `tail_log` (~355-376), `rotated_log_path`
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `spawn_stderr_forwarder` and `tail_log` keep their signatures and return types. The existing forwarder test stays unchanged and passing.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'while let Ok(Some(line)) = lines.next_line().await' crates/orrery-core/src/mcp.rs && grep -q 'rotated_log_path(log_dir, 2),' crates/orrery-core/src/stream_log.rs && sed -n 1368p $S | grep -q '^#### 9.14.4 '
+
+[MUTATION_SPEC]
+1. mcp.rs `spawn_stderr_forwarder`: replace the `BufReader::lines` loop with `use tokio::io::AsyncReadExt; let mut chunk = [0u8; 4096]; let mut pending: Vec<u8> = Vec::new();`. Loop on `stderr.read(&mut chunk).await`:
+   - `Ok(0)` → emit the non-empty remainder and stop;
+   - `Ok(n)` → extend `pending`, then while it holds a `b'\n'`, drain through it and emit the line (without `\n` and a trailing `\r`);
+   - if `pending.len() >= 4096`, drain and emit 4096 bytes;
+   - `Err(_)` → stop.
+
+   Emitting means `let text = String::from_utf8_lossy(&bytes); if !text.trim().is_empty() { let _ = stream.emit(StreamEvent::notice(format!("[mcp:{server_id}] {text}"))); }`. The `let _ =` is spec'd: the forwarder has no caller to report to.
+2. stream_log.rs `tail_log`: build the candidate list as `(1..=9).rev().map(|i| rotated_log_path(log_dir, i))` followed by `log_dir.join(LOG_FILE)`. Read each with `fs::read`, skipping `NotFound` as now, and take `String::from_utf8_lossy(&bytes).lines()`.
+3. Tests:
+   - `mcp::tests::stderr_forwarder_survives_invalid_utf8`: input `&b"ok\n\xff\xfebad\nafter\n"[..]` gives 3 notices: `"[mcp:fs] ok"`, `"[mcp:fs] \u{FFFD}\u{FFFD}bad"`, `"[mcp:fs] after"`.
+   - `mcp::tests::stderr_forwarder_caps_long_lines`: 5000 × `b'a'` then `b"\n"` gives 2 notices, with 4096 and 904 `a`s after the `"[mcp:fs] "` prefix.
+   - `stream_log::tests::tail_log_reads_high_rotations`: files `.log.4` = `"a\n"`, `.log.1` = `"b\n"`, `.log` = `"c\n"` → `tail_log(dir, 10)` is `["a", "b", "c"]`.
+   - `stream_log::tests::tail_log_tolerates_invalid_utf8`: `.log` = `b"x\xffy\n"` → `Ok(["x\u{FFFD}y"])`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'lines.next_line().await' crates/orrery-core/src/mcp.rs && ! grep -q 'rotated_log_path(log_dir, 2),' crates/orrery-core/src/stream_log.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(mcp::tests::stderr_forwarder_survives_invalid_utf8|mcp::tests::stderr_forwarder_caps_long_lines|mcp::tests::stderr_forwarder_emits_redacted_notices|stream_log::tests::tail_log_reads_high_rotations|stream_log::tests::tail_log_tolerates_invalid_utf8): test$')" -eq 5
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 69: Engine Exit Shutdown and Stale Decisions
+
+* **Recommended Command:** `/goal`
+
+Scope note: F59-1 (High: inference servers Orrery started are never stopped) and the engine half of F63-4 (High: a stale queued decision answers the next pause).
+
+```text
+[STEP_ID]
+STEP 69: Engine Exit Shutdown and Stale Decisions
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1379-1383 (§9.14.5; binding)
+  - crates/orrery-core/src/engine.rs:346 (`pub async fn run`), 1068-1112 (`enter_awaiting_operator`, the only `operator_rx` reader), 2097-2190 (`test_context`), 4308-4317 (`set_max_concurrency`: rebuilding `ctx.resources`)
+  - crates/orrery-core/src/docker.rs:289-326 (`InferenceCall`, `MockInferenceControl::calls`; it records `Stop(inference_id)`), 944 (`ResourceManager::shutdown`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other engine behavior changes. `run`'s signature is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'async fn run_steps' crates/orrery-core/src/engine.rs && ! grep -q 'rx.try_recv().is_ok()' crates/orrery-core/src/engine.rs && sed -n 1379p $S | grep -q '^#### 9.14.5 '
+
+[MUTATION_SPEC]
+1. Rename the current `pub async fn run` body to `async fn run_steps(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome>`. The new `pub async fn run(&self, opts, cancel)` does `let result = self.run_steps(opts, cancel).await; if let Err(err) = self.ctx.resources.shutdown().await { self.ctx.stream.emit(StreamEvent::notice(format!("inference shutdown failed: {err}")))?; } result`.
+2. `enter_awaiting_operator`: as its first statement, `{ let mut rx = self.operator_rx.lock().await; while rx.try_recv().is_ok() {} }`.
+3. Tests (in `engine::tests`):
+   - `run_stops_started_inference_on_exit` (`#[tokio::test]`): `test_context` with the `"router"` inference changed to `lifecycle: InferenceLifecycle::Container { name: "llama-test".into() }`, `mode: InferenceMode::Single`, `unload_after_stage: false`. Rebuild `ctx.resources` as `set_max_concurrency` does, keeping an `Arc<MockInferenceControl>` handle. Script one passing step and run with `wait_for_operator: false`; then `handle.calls()` contains `InferenceCall::Stop("router".into())`.
+   - `stale_operator_decision_is_drained` (`#[tokio::test]`): send `OperatorDecision::Approve` on `engine.operator_sender()` *before* the run; script the orchestrator to `Escalate` on step 1; spawn `run` with `wait_for_operator: true`. Wait (timeout 5 s) for `EngineEvent::AwaitingOperator` on `engine.subscribe()`, then assert the run is still pending after 200 ms (`tokio::time::timeout(200ms, &mut handle)` is `Err`). Send `Reject { feedback: "x".into() }`, then cancel and await the handle.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'async fn run_steps' crates/orrery-core/src/engine.rs && grep -q 'while rx.try_recv().is_ok() {}' crates/orrery-core/src/engine.rs && grep -q 'inference shutdown failed: {err}' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(engine::tests::run_stops_started_inference_on_exit|engine::tests::stale_operator_decision_is_drained): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 70: Fresh Step Reports and Keychain Notices
+
+* **Recommended Command:** `/goal`
+
+Scope note: F59-5 (after `reset --step`, old reports feed the new prompts) and F59-3 (an unreadable keychain entry silently skips redaction).
+
+```text
+[STEP_ID]
+STEP 70: Fresh Step Reports and Keychain Notices
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+  - crates/orrery-core/src/checkpoint.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1384-1387 (§9.14.6; binding)
+  - crates/orrery-core/src/checkpoint.rs:422-470 (CheckpointManager: save_report, load_reports, delete_reports)
+  - crates/orrery-core/src/engine.rs `run_steps` (after Step 69): the fresh-start `else` branch that sets `StepStatus::InProgress` and `state.round = 0`; `build_engine` (~1947-1990: the agent and server secret loops, the hub creation, `referenced_mcp_servers`); the test helper `init_project_with_agents`
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Report file naming and the `delete_reports` behavior are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'async fn run_steps' crates/orrery-core/src/engine.rs && ! grep -q 'pub fn clear_step' crates/orrery-core/src/checkpoint.rs && sed -n 1384p $S | grep -q '^#### 9.14.6 '
+
+[MUTATION_SPEC]
+1. checkpoint.rs: `pub fn clear_step(&self, step_number: usize) -> Result<()>` removes `self.root.join(format!("step_{step_number:03}"))` with `fs::remove_dir_all` when it exists. Use the same directory expression `save_report` uses; `NotFound` → `Ok`, other errors → `Error::Io`.
+2. engine.rs fresh-start branch: before the `StepRunState` is built, `self.ctx.checkpoints.clear_step(step.number)?;`.
+3. engine.rs `build_engine`: `let mut keychain_notices: Vec<String> = Vec::new();`.
+   - Agent loop: only for agents whose id appears in some `project.stages[*].agent_ids`, `match backends.secrets.get(service, account) { Ok(secret) => redactor.register(&secret)?, Err(err) => keychain_notices.push(format!("keychain entry {service}/{account} for agent '{}' could not be read ({err}); it will not be redacted", agent.agent_id)) }`.
+   - Server loop: only for servers in `referenced_mcp_servers(&project, &roles)` (compute it once before both loops and reuse it for the connect loop), with `"MCP server '<id>'"` in the message.
+   - After the hub is created, emit each as `StreamEvent::notice(..)` with `?`.
+4. Tests:
+   - `checkpoint::tests::clear_step_removes_reports`: save two reports for step 2, then `clear_step(2)`; `load_reports(2, None)` is empty, and `clear_step(9)` is `Ok`.
+   - `engine::tests::fresh_step_start_clears_old_reports`: before the run, `save_report` a stale report for step 1 with summary `"stale-from-before-reset"`. Run one passing step; no report from `load_reports(1, None)` has that summary.
+   - `engine::tests::build_engine_warns_on_unreadable_keychain`: from `init_project_with_agents(dir, true)`, add a `CloudApi` agent `cloud-missing` (keychain `orrery.test.missing` / `testuser`, endpoint `https://api.example.com/v1/chat/completions`) and assign it to stage 1, with no secret stored. `build_engine` is `Ok`, and `recent(50)` has a `SystemNotice` containing `"orrery.test.missing/testuser for agent 'cloud-missing' could not be read"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn clear_step' crates/orrery-core/src/checkpoint.rs && grep -q 'checkpoints.clear_step(step.number)?' crates/orrery-core/src/engine.rs && grep -q 'it will not be redacted' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(checkpoint::tests::clear_step_removes_reports|engine::tests::fresh_step_start_clears_old_reports|engine::tests::build_engine_warns_on_unreadable_keychain): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 71: CLI Container Cleanup
+
+* **Recommended Command:** `/goal`
+
+Scope note: F61-1: cancelling during an AgentCli orchestrator turn leaks the container (secret env included) and its `agent_io` dir, and the first resume fails with a name conflict.
+
+```text
+[STEP_ID]
+STEP 71: CLI Container Cleanup
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/llm.rs
+  - crates/orrery-core/src/docker.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1388-1392 (§9.14.7; binding)
+  - crates/orrery-core/src/llm.rs `CliContainerDriver::run_turn` (~1073-1230: `let name = cli_container_name(..)`, the `for _attempt in 0..2` loop)
+  - crates/orrery-core/src/docker.rs `ResourceManager::end_stage` (~920-942: the remove + agent_io cleanup pattern to copy), `agent_io_dir` (~622), `MockContainerBackend` and `MockCall`
+  - crates/orrery-core/src/engine.rs `handle_cancel` (~993-1012)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `end_stage`, `begin_stage` and `run_to_completion` stay as they are.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'pub async fn remove_cli_agent' crates/orrery-core/src/docker.rs && sed -n 1388p $S | grep -q '^#### 9.14.7 '
+
+[MUTATION_SPEC]
+1. llm.rs `run_turn`: right after `let name = cli_container_name(..);`, `self.backend.remove(&name).await?;` (backends return `Ok` for a missing container).
+2. docker.rs `impl ResourceManager`: `pub async fn remove_cli_agent(&self, run_id: &uuid::Uuid, agent_id: &str) -> Result<()>` calls `self.backend.remove(&cli_container_name(run_id, agent_id)).await?`, then removes `agent_io_dir(&self.project_root, run_id, agent_id)` with `fs::remove_dir_all` when it exists (`Error::Io` on failure).
+3. engine.rs `handle_cancel`: when the `current_lease` `take()` yields `None`, for each id in `self.ctx.project.stages.first().map(|s| s.agent_ids.clone()).unwrap_or_default()` whose agent (`self.find_agent(id)?`) has `AgentBackend::AgentCli { .. }`, call `self.ctx.resources.remove_cli_agent(&state.run_id, id).await?;`.
+4. Tests:
+   - `docker::tests::remove_cli_agent_removes_container_and_io`: create `agent_io_dir(root, &run_id, "cli-orch")/in`; `remove_cli_agent` → the mock backend recorded `MockCall::Remove(..)` of `cli_container_name(&run_id, "cli-orch")`, and the dir is gone.
+   - `llm::tests::cli_driver_removes_stale_container_first`: with `MockContainerBackend`, the first recorded call naming that container is `MockCall::Remove(name)`, before `MockCall::RunToCompletion { name, .. }`.
+   - `engine::tests::cancel_without_lease_removes_cli_orchestrator`: `test_context` whose stage-0 agent is changed to `AgentBackend::AgentCli` (image `busybox@sha256:` plus 64 zeros, command `["sh"]`, `WorkspaceMount::None`, 256 MB, 60 s, no keychain or secret_env), with `ctx.resources` rebuilt around a kept `Arc<MockContainerBackend>`; call `handle_cancel(&mut state, 0, &step)` directly with no lease open; the backend recorded `MockCall::Remove(cli_container_name(&state.run_id, <stage-0 agent id>))`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub async fn remove_cli_agent' crates/orrery-core/src/docker.rs && grep -q 'remove_cli_agent(&state.run_id' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(docker::tests::remove_cli_agent_removes_container_and_io|llm::tests::cli_driver_removes_stale_container_first|engine::tests::cancel_without_lease_removes_cli_orchestrator): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 72: Container Output Line Splitter
+
+* **Recommended Command:** `/goal`
+
+Scope note: F61-2: container output is split into lines per Docker frame, so lines break, and a secret split across two frames escapes redaction.
+
+```text
+[STEP_ID]
+STEP 72: Container Output Line Splitter
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/docker.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1393-1398 (§9.14.8; binding)
+  - crates/orrery-core/src/docker.rs `BollardContainerBackend::run_to_completion` (~1145-1230; the `reader` async block with `text.lines()`)
+  - crates/orrery-core/src/llm.rs `LineBuffer` (~635: the UTF-8 boundary logic to mirror; read only)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The `ContainerBackend` trait and the `on_output` callback type are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'for line in text.lines()' crates/orrery-core/src/docker.rs && ! grep -q 'struct LineSplitter' crates/orrery-core/src/docker.rs && sed -n 1393p $S | grep -q '^#### 9.14.8 '
+
+[MUTATION_SPEC]
+1. docker.rs: `const MAX_OUTPUT_LINE_BYTES: usize = 4096;` and `#[derive(Default)] pub(crate) struct LineSplitter { pending: Vec<u8> }` with:
+   - `pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<String>`: extend `pending`; while it holds `b'\n'`, drain through it and push `String::from_utf8_lossy` of the line without `\n` and a trailing `\r`. Then, while `pending.len() >= MAX_OUTPUT_LINE_BYTES`, cut at `match std::str::from_utf8(&pending[..MAX_OUTPUT_LINE_BYTES]) { Ok(_) => MAX_OUTPUT_LINE_BYTES, Err(e) if e.valid_up_to() > 0 => e.valid_up_to(), Err(_) => MAX_OUTPUT_LINE_BYTES }` and push that piece.
+   - `pub(crate) fn finish(&mut self) -> Option<String>`: the non-empty remainder, lossy-decoded, leaving `pending` empty.
+2. `run_to_completion`'s `reader`: `let mut out_lines = LineSplitter::default(); let mut err_lines = LineSplitter::default();`. For each chunk, pick the splitter by `matches!(chunk, LogOutput::StdErr { .. })` (import `bollard::container::LogOutput` as the existing code needs) and pass `chunk.as_ref()`; call `on_output` for every returned line. After the stream ends, call `finish()` on both.
+3. Tests in `docker::tests`:
+   - `line_splitter_joins_across_chunks`: push `b"hel"` → `[]`; push `b"lo\r\nwor"` → `["hello"]`; `finish()` → `Some("wor")`.
+   - `line_splitter_keeps_utf8_across_chunks`: push `b"caf\xc3"` → `[]`; push `b"\xa9\n"` → `["café"]`.
+   - `line_splitter_caps_long_lines`: 4095 × `b'a'` followed by `"é"` (2 bytes) and `b"\n"` → `["a"×4095, "é"]`, the first piece cut at the boundary before `é`.
+   - `line_splitter_keeps_secret_whole`: push `b"token sk-abc"` then `b"def123\n"` → exactly `["token sk-abcdef123"]`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub(crate) struct LineSplitter' crates/orrery-core/src/docker.rs && ! grep -q 'for line in text.lines()' crates/orrery-core/src/docker.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(docker::tests::line_splitter_joins_across_chunks|docker::tests::line_splitter_keeps_utf8_across_chunks|docker::tests::line_splitter_caps_long_lines|docker::tests::line_splitter_keeps_secret_whole): test$')" -eq 4
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 73: TUI Decisions, Interrupt and Shutdown on Error
+
+* **Recommended Command:** `/goal`
+
+Scope note: The TUI half of F63-4 (Approve/Reject stay live after sending), F63-1 (`[Stop]` with no task overwrites the message) and F63-8 (a terminal error skips `controller.shutdown`).
+
+```text
+[STEP_ID]
+STEP 73: TUI Decisions, Interrupt and Shutdown on Error
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1399-1403 (§9.14.9; binding), 1261-1272 (§9.11.9, §9.11.10)
+  - crates/orrery-tui/src/bridge.rs:372-375 (`AppAction::Interrupt`), 376-392 (Approve/Reject running branch), 601-710 (`run_tui`), 1136 (test `approve_reaches_operator_channel`), 1529-1560 (setup of `approve_without_running_engine_resumes`: an `AwaitingOperator` checkpoint with no task)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `EngineController` method signatures and channel sizes are unchanged. Don't change `app.rs` or `widgets.rs`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'app.status_message = Some("Stopping…".into());' crates/orrery-tui/src/bridge.rs && ! grep -q 'let loop_result' crates/orrery-tui/src/bridge.rs && sed -n 1399p $S | grep -q '^#### 9.14.9 '
+
+[MUTATION_SPEC]
+1. Approve/Reject while `self.has_running_task()`: match `tx.try_send(decision)`: `Ok(())` → `app.awaiting_operator = false; app.status = RunStatus::Running;`; `Err(Full(_))` → the existing message; `Err(Closed(_))` → `app.status_message = Some("engine stopped; decision not sent".into())`.
+2. `AppAction::Interrupt`: when `!self.has_running_task()`, set `app.status_message` to `"no run in progress; Approve or Reject the waiting step"` if `app.awaiting_operator`, else `"no run in progress"`, and return without cancelling. Otherwise keep the current behavior.
+3. `run_tui`: wrap everything from `loop {` to the loop's end in `let loop_result: Result<()> = async { loop { … } Ok(()) }.await;`, so the existing `?`s and `return Err(..)`s inside become the block's. Then `controller.shutdown(&mut app).await;` and `loop_result`. Setup before the loop (terminal enter, sizes) keeps its `?`s.
+4. Tests (in `bridge::tests`):
+   - `approve_while_running_clears_awaiting`: as `approve_reaches_operator_channel`; after `handle(&AppAction::Approve, ..)`, `app.awaiting_operator` is `false` and `app.status == RunStatus::Running`.
+   - `interrupt_without_task_keeps_awaiting_state`: as the setup of `approve_without_running_engine_resumes` (checkpoint `AwaitingOperator`, `load_initial_app`, no task); `handle(&AppAction::Interrupt, ..)` leaves `app.status == RunStatus::AwaitingOperator` and `app.awaiting_operator == true`, with the waiting-step message.
+   `run_tui` needs a real terminal, so item 3 is checked by POST_GATE greps, not by a test.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'let loop_result: Result<()> = async' crates/orrery-tui/src/bridge.rs && grep -q 'no run in progress; Approve or Reject the waiting step' crates/orrery-tui/src/bridge.rs && test "$(grep -c 'controller.shutdown(&mut app).await;' crates/orrery-tui/src/bridge.rs)" -ge 1 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(bridge::tests::approve_while_running_clears_awaiting|bridge::tests::interrupt_without_task_keeps_awaiting_state): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 74: TUI Drain and Checkpoint Reconcile
+
+* **Recommended Command:** `/goal`
+
+Scope note: F63-3 (`drain_channels` is never called, and engine lag is silent) and F63-5 (TUI startup and ingest compare step counts instead of reconciling, and drop load errors).
+
+```text
+[STEP_ID]
+STEP 74: TUI Drain and Checkpoint Reconcile
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1404-1412 (§9.14.10; binding)
+  - crates/orrery-tui/src/bridge.rs: `drain_channels` (~136), the run task's `eng_sub.recv()` arm (`RecvError::Lagged(_) => {}`), `handle(AppAction::IngestPlan(..))` (~339-364), `load_initial_app` (~572-600), `run_tui` (after Step 73)
+  - crates/orrery-core/src/checkpoint.rs:283-375 (`ReconcileOutcome`, `WorkflowCheckpoint::reconcile`; it returns `Err(Error::Engine)` with message "step edited; run `orrery reset --step N`" for an edited passed or active step)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `App` fields and `step()` are unchanged. Don't save the reconciled checkpoint (the TUI only views it).
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'let loop_result: Result<()> = async' crates/orrery-tui/src/bridge.rs && ! grep -q 'fn load_step_statuses' crates/orrery-tui/src/bridge.rs && sed -n 1404p $S | grep -q '^#### 9.14.10 '
+
+[MUTATION_SPEC]
+1. `run_tui`: right after `let effects = step(&mut app, &regions, input);`, call `controller.drain_channels(&mut app, &regions); needs_redraw = true;`.
+2. The run task's `eng_sub` arm: `Err(RecvError::Lagged(n)) => { let _ = stream_tx.try_send(StreamEvent::notice(format!("{n} engine events dropped; statuses may be stale"))); }`. The `let _ =` is spec'd, matching the stream-drop handling beside it.
+3. `fn load_step_statuses(store: &ConfigStore, plan: &ImplementationPlan, app: &mut App) -> Vec<StepStatus>`: `CheckpointManager::new(store.orrery_dir().join("checkpoints")).load_state()`.
+   - `Ok(Some(mut cp))` → `match cp.reconcile(plan) { Ok(_) => { set the AwaitingOperator fields as today when cp.step_statuses.get(cp.current_step_index) == Some(&StepStatus::AwaitingOperator); cp.step_statuses } Err(e) => { app.status_message = Some(e.to_string()); vec![Pending; plan.steps.len()] } }`
+   - `Ok(None)` → all `Pending`.
+   - `Err(e)` → all `Pending`, with `status_message = e.to_string()`.
+4. `load_initial_app`: use it. Replace the `if let Ok(..) && let Ok(..)` with a `match` that sets `app.status_message = Some(format!("plan not loaded: {e}"))` on either error.
+5. `IngestPlan`: after the plan parses and saves, `app.step_statuses = load_step_statuses(&self.store, &plan, app);` in place of the all-`Pending` reset.
+6. Tests (in `bridge::tests`):
+   - `initial_load_reconciles_appended_step`: a checkpoint for the 3-step plan with step 1 `Passed`; append a 4th step to the plan file; `load_initial_app` → statuses `[Passed, Pending, Pending, Pending]`.
+   - `initial_load_reports_edited_step`: the same checkpoint; edit step 1's body → statuses all `Pending`, and `status_message` contains `"step edited"`.
+   - `ingest_reconciles_checkpoint`: the same as the first, through `handle(&AppAction::IngestPlan(path), ..)`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn load_step_statuses' crates/orrery-tui/src/bridge.rs && grep -q 'controller.drain_channels(&mut app, &regions);' crates/orrery-tui/src/bridge.rs && grep -q 'engine events dropped; statuses may be stale' crates/orrery-tui/src/bridge.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(bridge::tests::initial_load_reconciles_appended_step|bridge::tests::initial_load_reports_edited_step|bridge::tests::ingest_reconciles_checkpoint): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 75: TUI Slot Replace and Footer Keys
+
+* **Recommended Command:** `/goal`
+
+Scope note: F63-2 (High: picking an agent for an occupied slot appends it) and F63-6 (footer Left/Right walk onto the hidden Approve/Reject).
+
+```text
+[STEP_ID]
+STEP 75: TUI Slot Replace and Footer Keys
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/app.rs
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1413-1417 (§9.14.11; binding)
+  - crates/orrery-core/src/config.rs `ProjectConfig::assign_agent` / `remove_agent` (~521-560: the clone, validate_staging, commit pattern)
+  - crates/orrery-tui/src/app.rs: `apply_selector_choice` agent branch (~607-645), `open_stage_canvas_selector` (~841-875), `handle_footer_menu_key` (~905-960), `approve_visible` (~224)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No change to `assign_agent`, `remove_agent`, the selector options or `widgets.rs`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && ! grep -q 'pub fn replace_agent' crates/orrery-core/src/config.rs && sed -n 1413p $S | grep -q '^#### 9.14.11 '
+
+[MUTATION_SPEC]
+1. config.rs: `pub fn replace_agent(&mut self, index: usize, slot: usize, agent_id: impl Into<String>) -> Result<()>`. An out-of-range `index` gets the same error as `assign_agent`. An out-of-range `slot` → `Error::Validation { field: format!("stages[{index}].agent_ids"), message: format!("slot {slot} out of bounds (len {})", ..) }`. Otherwise clone, set `next.stages[index].agent_ids[slot] = agent_id.into()`, `next.validate_staging()?`, then `*self = next`.
+2. app.rs `apply_selector_choice`, agent branch, not `REMOVE_OPTION`: if `slot < self.config.stages[stage].agent_ids.len()`, call `replace_agent(stage, slot, option.clone())`; on `Ok` → `refresh_warnings()` and `vec![AppAction::AssignAgent { stage, agent_id: option }]`; on `Err` → `status_message`. Otherwise keep `assign_agent`.
+3. `handle_footer_menu_key`: first, `if !self.approve_visible() && (1..=2).contains(&self.footer_index) { self.footer_index = 0; }`. `Right`: increment, and while hidden and on 1 or 2, increment again (stop at 6). `Left`: decrement, and while hidden and on 1 or 2, decrement again (stop at 0).
+4. Tests:
+   - `config::tests::replace_agent_swaps_slot`: stage 1 `[a, b]` → `replace_agent(1, 0, "c")` gives `[c, b]`; slot 5 → `Err(Validation)`; replacing stage 0's agent keeps the 1-agent limit satisfied.
+   - `app::tests::selector_replaces_occupied_slot`: stage 0 holds one agent and the roles/agents list has a second; open the selector on slot 1 (the agent slot), choose the second agent → `config.stages[0].agent_ids == [second]` and the actions are `[AssignAgent { stage: 0, agent_id: second }]`.
+   - `app::tests::footer_nav_skips_hidden_buttons`: `awaiting_operator = false`, focus `FooterMenu`, index 0, `Right` → 3, `Left` → 0; with `awaiting_operator = true`, `Right` from 0 → 1.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn replace_agent' crates/orrery-core/src/config.rs && grep -q 'replace_agent(stage, slot' crates/orrery-tui/src/app.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::replace_agent_swaps_slot): test$')" -eq 1 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^(app::tests::selector_replaces_occupied_slot|app::tests::footer_nav_skips_hidden_buttons): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+### STEP 76: CLI: add-cli Hyphens, Status Reconcile, Startup Notices
+
+* **Recommended Command:** `/goal`
+
+Scope note: F64-2 (High: `agent add-cli --command sh -c ..` exits 2 on `-c`), F64-1 (`status` doesn't reconcile the checkpoint) and F64-3 (`run` misses the engine's startup notices, and lag is silent).
+
+```text
+[STEP_ID]
+STEP 76: CLI: add-cli Hyphens, Status Reconcile, Startup Notices
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1418-1421 (§9.14.12; binding), 581-620 (§7)
+  - crates/orrery-cli/src/args.rs:180-215 (`AgentCmd::AddCli`, `#[arg(long, required = true, num_args = 1..)] command`), the args tests module
+  - crates/orrery-cli/src/commands.rs:731-780 (`dispatch_run`), 827-870 (`dispatch_status`), the test `logs_tail_shows_redacted_lines` (CLI test harness pattern)
+  - crates/orrery-core/src/engine.rs:342-344 (`subscribe_stream`: add the accessor next to it)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Only the `recent_stream` accessor is added to engine.rs. No other flag changes.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'num_args = 1..)]' crates/orrery-cli/src/args.rs && ! grep -q 'pub fn recent_stream' crates/orrery-core/src/engine.rs && sed -n 1418p $S | grep -q '^#### 9.14.12 '
+
+[MUTATION_SPEC]
+1. args.rs `AddCli.command`: `#[arg(long, required = true, num_args = 1.., allow_hyphen_values = true, help = "Container command and its arguments; must be the last option")]`.
+2. engine.rs: `pub fn recent_stream(&self, limit: usize) -> Result<Vec<StreamEvent>> { self.ctx.stream.recent(limit) }`, next to `subscribe_stream`.
+3. commands.rs `dispatch_run`: right after `let mut stream_rx = engine.subscribe_stream();`, `for ev in engine.recent_stream(usize::MAX)? { write_stdout_line(ctx, &format_stream_event(&ev))?; }`. In the `select!`, `Err(RecvError::Lagged(n)) => { write_stdout_line(ctx, &format!("[SystemNotice] -: {n} stream events dropped"))?; }`.
+4. commands.rs `dispatch_status`: `Some(mut cp) => { cp.reconcile(&plan)?; … }`, so an edited step makes `status` fail with the reconcile error.
+5. Tests:
+   - in args.rs tests, `add_cli_accepts_hyphenated_command`: parse `["orrery","agent","add-cli","--id","c1","--name","C1","--image","busybox@sha256:<64 zeros>","--mount","ro","--command","sh","-c","true"]` → `command == ["sh","-c","true"]` and mount `ro`;
+   - in commands.rs tests, `status_reports_edited_step`: a checkpoint with step 1 `Passed`, then step 1's plan body edited → `dispatch` of `status` is `Err`, and the message contains `"step edited"`;
+   - in commands.rs tests, `run_prints_startup_notices`: a project with an MCP server that no role references (as `build_engine_skips_unused_server` sets up in engine tests), using the CLI test backends → captured stdout contains `"is not used by this workflow"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'allow_hyphen_values = true, help = "Container command and its arguments; must be the last option"' crates/orrery-cli/src/args.rs && grep -q 'pub fn recent_stream' crates/orrery-core/src/engine.rs && grep -q 'stream events dropped' crates/orrery-cli/src/commands.rs && grep -q 'cp.reconcile(&plan)?' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bins --locked -- --list 2>/dev/null | grep -cE '^(args::tests::add_cli_accepts_hyphenated_command|commands::tests::status_reports_edited_step|commands::tests::run_prints_startup_notices): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---

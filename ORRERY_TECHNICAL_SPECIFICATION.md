@@ -1339,3 +1339,83 @@ impl LogFollower {
   - Selector modal: `Up` / `Down` move the choice. `Settings` modal: `Up` / `Down` scroll. `Help` doesn't scroll.
   - Quit confirmation (shown by `q` while a workflow runs): `y` or `Enter` quits; `n` or `Esc` cancels.
 - Rows that are wrong or missing per `app.rs` are fixed or added; every other row and section stays word for word.
+
+### 9.14 Phase H: audit fixes (Steps 65–76)
+Source: the Phase G audit (`audit/59-*.md` … `audit/64-*.md`) and Claude's verdicts in the plan's "Phase G validation notes". Finding IDs are cited per item.
+
+#### 9.14.1 Config ID integrity (Step 65) (adds to §5.2, §9.6a)
+- `validate_config_file_id` also rejects an id whose first character is `.` (`Error::PathTraversal`). (F60-2)
+- `AgentConfig::validate`, `RoleConfig::validate` and `InferenceConfig::validate` each start with `validate_config_file_id(&self.<id>, "<id field>")?`. Every load path therefore rejects `/`, `\`, `..` and leading-dot ids. (F59-4, F60-1, F61-4)
+- `read_single_role` and `read_agents_from_dir` reject a file whose `file_stem()` isn't the id inside it: `Error::Validation { field: "role_id" | "agent_id", message: "file '<name>.toml' declares id '<id>'; the file must be named '<id>.toml'" }`. (F60-2)
+- `remove_role` propagates a `read_roles_from_dir` error instead of `unwrap_or_default()`, so it never deletes a rules file it couldn't prove unused. (F60-4)
+
+#### 9.14.2 MCP write-scope hardening (Step 66) (overrides §9.5 path rules)
+- `WriteScope::contains` returns `false` when the path's first normalized segment is `.orrery`, for every scope including `anywhere()`. (F62-1)
+- A write tool's `path_args` are required: a listed key missing from `args` → `Error::Security { "write tool '<server>:<tool>' is missing path argument '<arg>'" }`. (F62-2)
+- `McpGatekeeper` gains `project_root: Option<PathBuf>` (default `None`) and `pub fn set_project_root(&mut self, root: PathBuf)`. When it's set, each write-tool path is also resolved on disk with `pub fn resolve_write_path(root: &Path, rel: &str) -> Result<PathBuf>`:
+  - canonicalize `root`;
+  - walk the normalized segments: when an entry exists (`symlink_metadata` is `Ok`), canonicalize it, and a canonicalize failure is `Error::Security`; when it doesn't exist, append the rest lexically.
+  - The result must start with the canonical root, must not start with `<canonical root>/.orrery`, and, for a non-empty scope, must start with `resolve_write_path(root, prefix)` for some prefix. Any failure → `Error::Security { "write tool '<server>:<tool>' argument '<arg>' resolves outside its write scope" }`.
+  - `build_engine` calls `set_project_root(store.project_root().to_path_buf())`. (F62-1)
+  - Known limit: this is still time-of-check/time-of-use against a concurrent `ReadWrite` CLI stage.
+
+#### 9.14.3 MCP timeouts (Step 67) (adds to §9.5, §9.11.2)
+- `RuntimeLimits.mcp_call_timeout_secs: u64`, default `600`, validated in `1..=86_400` right after `model_idle_timeout_secs`.
+- `pub const MCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(60)` wraps the `serve` handshake (both transports) and `RmcpTransport::list_tools`.
+- `McpGatekeeper` gains `call_timeout: Option<Duration>` and `pub fn set_call_timeout(&mut self, timeout: Duration)`. When it's set, `execute_for_role` wraps `transport.call_tool` in it, and `build_engine` sets it from the limit.
+- Elapsed → `Error::Mcp { server_id, source: io::Error::new(TimedOut, "<what> timed out after <n>s") }`. (F62-3)
+
+#### 9.14.4 MCP stderr and log tail (Step 68) (overrides §9.11.1 forwarder, §9.4 `tail_log`)
+- `spawn_stderr_forwarder` reads raw bytes (`AsyncReadExt::read` into a 4096-byte chunk buffer) and keeps a pending `Vec<u8>`:
+  - each `\n`-terminated line, with a trailing `\r` trimmed, is decoded with `String::from_utf8_lossy`;
+  - blank lines are skipped, as before;
+  - pending bytes reaching 4096 are emitted as a line;
+  - at EOF the non-empty remainder is emitted;
+  - a read error ends the task.
+
+  So invalid UTF-8 no longer closes the child's pipe. (F62-4)
+- `tail_log` reads `live_stream.log.9` down to `.log.1`, then `live_stream.log`, skipping missing files, each with `fs::read` plus `String::from_utf8_lossy`. (F62-6)
+
+#### 9.14.5 Engine exit and operator channel (Step 69) (adds to §5.10, §9.8)
+- `WorkflowEngine::run` becomes a wrapper around the old body (renamed `run_steps`). It always awaits `self.ctx.resources.shutdown()` after `run_steps` returns, whatever the outcome. A shutdown error emits `StreamEvent::notice("inference shutdown failed: <err>")` and doesn't replace the run's result. (F59-1)
+- `enter_awaiting_operator` first drains stale decisions (`while rx.try_recv().is_ok() {}` on the locked `operator_rx`), before it emits any event, so only a decision sent after the pause is announced can answer it. (F63-4)
+- Operator decisions reset `consecutive_violations` and `stage_ran_since_gate_failure` for the step (operator, 2026-11-16; F59-2). That's already the behavior.
+
+#### 9.14.6 Fresh step state and keychain notices (Step 70) (adds to §9.3, §9.8)
+- `CheckpointManager::clear_step(&self, step_number: usize) -> Result<()>` removes `step_{:03}/` if it exists. The engine calls it when a step starts fresh (the `Pending` → `InProgress` branch), so reports from before `reset --step` never reach the new prompts. (F59-5)
+- `build_engine`: a `backends.secrets.get` error for an agent on any stage, or for a referenced HTTP MCP server, is collected and emitted once the hub exists as `StreamEvent::notice("keychain entry <service>/<account> for <agent|MCP server> '<id>' could not be read (<err>); it will not be redacted")`. (F59-3)
+
+#### 9.14.7 CLI container cleanup (Step 71) (adds to §9.6, §9.7)
+- `CliContainerDriver::run_turn` calls `self.backend.remove(&name).await?` once before its attempt loop, so a leftover container with this name never blocks `create`.
+- `ResourceManager::remove_cli_agent(&self, run_id: &uuid::Uuid, agent_id: &str) -> Result<()>` removes `cli_container_name(run_id, agent_id)` and that agent's `agent_io` dir.
+- `handle_cancel`, when no stage lease was open, calls it for every `AgentCli` agent on stage 0. (F61-1)
+
+#### 9.14.8 Container output lines (Step 72) (overrides §9.6 `run_to_completion` output split)
+- `pub(crate) struct LineSplitter` (`docker.rs`) has `push(&mut self, bytes: &[u8]) -> Vec<String>` and `finish(&mut self) -> Option<String>`:
+  - lines split at `\n`, with a trailing `\r` trimmed, decoded lossily;
+  - a pending run reaching 4096 bytes is cut at the last UTF-8 boundary at or before 4096 (at 4096 if that boundary is 0).
+- `run_to_completion` keeps one splitter for `StdErr` and one for all other output, and calls `finish` on both at EOF. (F61-2)
+
+#### 9.14.9 TUI decisions, interrupt, shutdown (Step 73) (adds to §9.11.9, §9.11.10)
+- After a successful `try_send` of an operator decision to a running task: `app.awaiting_operator = false`, `app.status = RunStatus::Running`. (F63-4)
+- `Interrupt` with no running task changes no state and sets `status_message` to `"no run in progress; Approve or Reject the waiting step"` when a step awaits, else `"no run in progress"`. (F63-1)
+- `run_tui` runs its loop inside `let loop_result: Result<()> = async { … }.await;` and always awaits `controller.shutdown(&mut app)` before returning `loop_result`. (F63-8)
+
+#### 9.14.10 TUI drain and reconcile (Step 74) (adds to §9.11.9, §9.9)
+- `run_tui` calls `controller.drain_channels(&mut app, &regions)` after handling each input, before the next draw.
+- In the run task, `eng_sub` `Lagged(n)` sends `StreamEvent::notice("<n> engine events dropped; statuses may be stale")`. (F63-3)
+- `fn load_step_statuses(store: &ConfigStore, plan: &ImplementationPlan, app: &mut App) -> Vec<StepStatus>` loads the checkpoint and calls `reconcile(&plan)`:
+  - `Ok` → its statuses, setting `AwaitingOperator` state as now;
+  - `Err(e)` → all `Pending`, with `status_message = e.to_string()`;
+  - no checkpoint → all `Pending`.
+- `load_initial_app` and `IngestPlan` both use it. `load_initial_app` also sets `status_message` when the plan can't be resolved or parsed. (F63-5)
+
+#### 9.14.11 TUI slot replace and footer keys (Step 75) (overrides §6.2 Selector, §9.13.1 footer)
+- `ProjectConfig::replace_agent(&mut self, index: usize, slot: usize, agent_id: impl Into<String>) -> Result<()>`: clone, set `agent_ids[slot]`, `validate_staging`, commit. Out-of-range → `Error::Validation`.
+- Choosing an agent for an occupied slot calls it and returns `AssignAgent`. (F63-2)
+- Footer `Left`/`Right` skip indices 1–2 while `!approve_visible()`, and a footer key press first moves `footer_index` off 1–2 when they're hidden. (F63-6)
+
+#### 9.14.12 CLI fixes (Step 76) (adds to §7, §9.10)
+- `agent add-cli --command` takes `allow_hyphen_values = true` and must be the last option; its help says so. (F64-2)
+- `status` calls `cp.reconcile(&plan)?` before reporting. (F64-1)
+- `run` / `resume` print the engine's buffered startup events (`WorkflowEngine::recent_stream(&self, limit: usize) -> Result<Vec<StreamEvent>>`, called right after `subscribe_stream`) before streaming. A `Lagged(n)` prints `[SystemNotice] -: <n> stream events dropped`. (F64-3)
