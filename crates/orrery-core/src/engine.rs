@@ -344,6 +344,16 @@ impl WorkflowEngine {
     }
 
     pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
+        let result = self.run_steps(opts, cancel).await;
+        if let Err(err) = self.ctx.resources.shutdown().await {
+            self.ctx.stream.emit(StreamEvent::notice(format!(
+                "inference shutdown failed: {err}"
+            )))?;
+        }
+        result
+    }
+
+    async fn run_steps(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
         let mode = opts.mode.unwrap_or(self.ctx.project.execution_mode);
         let cycles = opts.cycles.unwrap_or(self.ctx.project.cycle_count);
         let validation_mode = self.ctx.project.effective_validation_mode(&self.ctx.roles);
@@ -1073,6 +1083,11 @@ impl WorkflowEngine {
         context: AwaitingContext,
         wait_for_operator: bool,
     ) -> Result<AwaitResolution> {
+        {
+            let mut rx = self.operator_rx.lock().await;
+            while rx.try_recv().is_ok() {}
+        }
+
         let step = &self.ctx.plan.steps[step_state.step_idx];
         if state.step_statuses[step_state.step_idx] != StepStatus::AwaitingOperator {
             self.run_halt_hook(state, step).await?;
@@ -3508,23 +3523,32 @@ mod tests {
         mock.push("imp", Ok(complete_report()));
         mock.push("orch", Ok(step_passed_report()));
 
-        let engine = WorkflowEngine::new(ctx).unwrap();
-        engine
-            .operator_sender()
-            .send(OperatorDecision::Approve)
-            .await
-            .unwrap();
+        let engine = Arc::new(WorkflowEngine::new(ctx).unwrap());
+        let mut events_rx = engine.subscribe();
+        let op_tx = engine.operator_sender();
+        let run_handle = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .run(
+                        RunOptions {
+                            wait_for_operator: true,
+                            ..Default::default()
+                        },
+                        CancellationToken::new(),
+                    )
+                    .await
+            })
+        };
 
-        let outcome = engine
-            .run(
-                RunOptions {
-                    wait_for_operator: true,
-                    ..Default::default()
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
+        loop {
+            if let EngineEvent::AwaitingOperator { .. } = events_rx.recv().await.unwrap() {
+                break;
+            }
+        }
+        op_tx.send(OperatorDecision::Approve).await.unwrap();
+
+        let outcome = run_handle.await.unwrap().unwrap();
         assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
 
         let state = checkpoints.load_state().unwrap().unwrap();
@@ -3552,25 +3576,43 @@ mod tests {
         mock.push("imp", Ok(complete_report()));
         mock.push("orch", Ok(step_passed_report()));
 
-        let engine = WorkflowEngine::new(ctx).unwrap();
+        let engine = Arc::new(WorkflowEngine::new(ctx).unwrap());
+        let mut events_rx = engine.subscribe();
         let tx = engine.operator_sender();
+        let run_handle = {
+            let engine = Arc::clone(&engine);
+            tokio::spawn(async move {
+                engine
+                    .run(
+                        RunOptions {
+                            wait_for_operator: true,
+                            ..Default::default()
+                        },
+                        CancellationToken::new(),
+                    )
+                    .await
+            })
+        };
+
+        loop {
+            if let EngineEvent::AwaitingOperator { .. } = events_rx.recv().await.unwrap() {
+                break;
+            }
+        }
         tx.send(OperatorDecision::Reject {
             feedback: "fix the README".to_string(),
         })
         .await
         .unwrap();
+
+        loop {
+            if let EngineEvent::AwaitingOperator { .. } = events_rx.recv().await.unwrap() {
+                break;
+            }
+        }
         tx.send(OperatorDecision::Approve).await.unwrap();
 
-        let outcome = engine
-            .run(
-                RunOptions {
-                    wait_for_operator: true,
-                    ..Default::default()
-                },
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
+        let outcome = run_handle.await.unwrap().unwrap();
         assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
 
         let orch_prompts: Vec<String> = mock
@@ -5972,5 +6014,118 @@ mod tests {
                 .iter()
                 .any(|ev| ev.text.contains("'fs:read_file' is hidden"))
         );
+    }
+
+    #[tokio::test]
+    async fn run_stops_started_inference_on_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.inference[0].lifecycle = InferenceLifecycle::Container {
+            name: "llama-test".into(),
+        };
+        ctx.project.inference[0].mode = InferenceMode::Single;
+        ctx.project.inference[0].unload_after_stage = false;
+
+        let handle = Arc::new(MockInferenceControl::new());
+        ctx.resources = Arc::new(ResourceManager::new(
+            Arc::new(MockContainerBackend::new()),
+            Arc::clone(&handle) as _,
+            ctx.project.inference.clone(),
+            ctx.project.max_concurrent_agents,
+            ctx.project_root.clone(),
+        ));
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    wait_for_operator: false,
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+        assert!(
+            handle
+                .calls()
+                .contains(&crate::docker::InferenceCall::Stop("router".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_operator_decision_is_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        mock.push("orch", Ok(escalate_report("need guidance")));
+        mock.push("orch", Ok(escalate_report("still need guidance")));
+
+        let engine = Arc::new(WorkflowEngine::new(ctx).unwrap());
+        let mut events_rx = engine.subscribe();
+        let op_tx = engine.operator_sender();
+
+        op_tx.send(OperatorDecision::Approve).await.unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut handle = {
+            let engine = Arc::clone(&engine);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                engine
+                    .run(
+                        RunOptions {
+                            wait_for_operator: true,
+                            ..Default::default()
+                        },
+                        cancel,
+                    )
+                    .await
+            })
+        };
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let EngineEvent::AwaitingOperator { .. } = events_rx.recv().await.unwrap() {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for AwaitingOperator");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), &mut handle)
+                .await
+                .is_err()
+        );
+
+        op_tx
+            .send(OperatorDecision::Reject {
+                feedback: "x".into(),
+            })
+            .await
+            .unwrap();
+
+        cancel.cancel();
+        let _ = handle.await.unwrap();
     }
 }
