@@ -19,9 +19,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 62** | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` (NEW) | — |
-| 2 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
-| 3 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
+| 1 | **STEP 63** | `/goal` | Audit: TUI | `audit/63-tui.md` (NEW) | — |
+| 2 | **STEP 64** | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` (NEW) | — |
 
 ### Completed
 
@@ -89,6 +88,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 59** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: engine and checkpoints | `audit/59-engine-checkpoint.md` |
 | **STEP 60** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: config, security, plan, errors | `audit/60-config-security-plan.md` |
 | **STEP 61** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: docker and agent drivers | `audit/61-docker-llm.md` |
+| **STEP 62** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: MCP gatekeeper and live stream | `audit/62-mcp-stream.md` |
 
 ---
 
@@ -3218,6 +3218,14 @@ Rules:
 - **F61-3** confirmed, Low. The `llm.rs:1170` `let _ = stream.emit(..)` is forced by the `Fn(String)` callback type.
 - **F61-4** is the same defect as F59-4 and F60-1 (`docker.rs:622` `agent_io_dir`, plus `remove_dir_all` in `run_turn`).
 - **F61-5** confirmed, Low. `llm.rs:880` returns at the first valid `submit_report`, so later tool calls in the same batch are dropped silently. The spec doesn't say what a mixed batch should do.
+- **F62-1** confirmed, High, spec-gap (the code matches §9.5's lexical rule). The `.orrery/` part is the serious one. A stage allocation with an empty `write_scope` (the default) gets `WriteScope::anywhere()` (`engine.rs:1725-1727`), so MCP write tools can write `.orrery/roles/*.md` (the next run's system prompt), `project.toml` and checkpoints. AgentCli masks `.orrery`; MCP doesn't. The symlink part is Medium confidence, since it depends on whether a tool can create symlinks.
+- **F62-2** confirmed, Medium, spec-gap. §9.5 checks only `path_args` keys that are *present*, so omitting the key skips the scope check.
+- **F62-3** confirmed, High. `mcp.rs` has no timeout anywhere: not on the handshake, `list_tools` or `call_tool`. A stalled server hangs `build_engine`, turns, gates and hooks. This contradicts the Phase D goal that "MCP servers ... can't hang ... a run".
+- **F62-4** confirmed, Medium. `mcp.rs:553` `while let Ok(..)` ends the forwarder on the first non-UTF-8 stderr line and drops the pipe, so the child's later stderr writes hit EPIPE/SIGPIPE. The line buffer is also unbounded. (The dropped `JoinHandle` only detaches the task and isn't a bug by itself.)
+- **F62-5** confirmed, Low. `rmcp`'s `auth_header(String)` holds an unzeroized copy; this needs an `rmcp` API check before choosing a fix.
+- **F62-6** confirmed, Medium. `tail_log` (`stream_log.rs:356`) hardcodes `.log.2`/`.log.1`/`.log`, ignoring `live_stream_max_files`, and uses `read_to_string`, so one non-UTF-8 byte fails `orrery logs`.
+- **F62-7** confirmed, Low. This is a limit of the §9.12.5 design I wrote: the Error event appears on the *next* `emit`, so a failure on a run's last events is never shown. The fix is to emit from the writer thread.
+- **F62-8** confirmed, Low. `LogFollower` can miss bytes written to the old inode between its read and its stat, the same window `tail -F` has.
 
 ### STEP 59: Audit — Engine and Checkpoints
 
