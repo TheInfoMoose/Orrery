@@ -19,17 +19,16 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 66** | `/goal` | MCP write-scope hardening | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` | — |
-| 2 | **STEP 67** | `/goal` | MCP timeouts | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | STEP 66 |
-| 3 | **STEP 68** | `/goal` | MCP stderr bytes and log tail | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/stream_log.rs` | STEP 67 |
-| 4 | **STEP 69** | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` | — |
-| 5 | **STEP 70** | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | STEP 69 |
-| 6 | **STEP 71** | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` | STEP 70 |
-| 7 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
-| 8 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
-| 9 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
-| 10 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
-| 11 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
+| 1 | **STEP 67** | `/goal` | MCP timeouts | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | — |
+| 2 | **STEP 68** | `/goal` | MCP stderr bytes and log tail | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/stream_log.rs` | STEP 67 |
+| 3 | **STEP 69** | `/goal` | Engine exit shutdown and stale decisions | `crates/orrery-core/src/engine.rs` | — |
+| 4 | **STEP 70** | `/goal` | Fresh step reports and keychain notices | `crates/orrery-core/src/engine.rs`, `crates/orrery-core/src/checkpoint.rs` | STEP 69 |
+| 5 | **STEP 71** | `/goal` | CLI container cleanup | `crates/orrery-core/src/llm.rs`, `crates/orrery-core/src/docker.rs`, `crates/orrery-core/src/engine.rs` | STEP 70 |
+| 6 | **STEP 72** | `/goal` | Container output line splitter | `crates/orrery-core/src/docker.rs` | STEP 71 |
+| 7 | **STEP 73** | `/goal` | TUI decisions, interrupt, shutdown on error | `crates/orrery-tui/src/bridge.rs` | — |
+| 8 | **STEP 74** | `/goal` | TUI drain and checkpoint reconcile | `crates/orrery-tui/src/bridge.rs` | STEP 73 |
+| 9 | **STEP 75** | `/goal` | TUI slot replace and footer keys | `crates/orrery-tui/src/app.rs`, `crates/orrery-core/src/config.rs` | STEP 65 |
+| 10 | **STEP 76** | `/goal` | CLI: add-cli hyphens, status reconcile, startup notices | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-core/src/engine.rs` | STEP 71 |
 
 ### Completed
 
@@ -101,6 +100,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 63** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: TUI | `audit/63-tui.md` |
 | **STEP 64** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Audit: CLI and README | `audit/64-cli-readme.md` |
 | **STEP 65** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | Config ID integrity | `crates/orrery-core/src/config.rs` |
+| **STEP 66** | **COMPLETED** (2026-11-16, validate-step PASS) | `/goal` | MCP write-scope hardening | `crates/orrery-core/src/mcp.rs`, `crates/orrery-core/src/engine.rs` |
 
 ---
 
