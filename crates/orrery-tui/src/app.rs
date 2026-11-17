@@ -628,7 +628,17 @@ impl App {
                         }
                     }
                 } else {
-                    match self.config.assign_agent(stage, option.clone()) {
+                    let result = if self
+                        .config
+                        .stages
+                        .get(stage)
+                        .is_some_and(|s| slot < s.agent_ids.len())
+                    {
+                        self.config.replace_agent(stage, slot, option.clone())
+                    } else {
+                        self.config.assign_agent(stage, option.clone())
+                    };
+                    match result {
                         Ok(()) => {
                             self.refresh_warnings();
                             vec![AppAction::AssignAgent {
@@ -904,13 +914,28 @@ impl App {
 
     // Row 11: Focus FooterMenu
     fn handle_footer_menu_key(&mut self, code: KeyCode) -> Vec<AppAction> {
+        if !self.approve_visible() && (1..=2).contains(&self.footer_index) {
+            self.footer_index = 0;
+            if matches!(code, KeyCode::Enter | KeyCode::Char(' ')) {
+                return Vec::new();
+            }
+        }
         match code {
             KeyCode::Left => {
                 self.footer_index = self.footer_index.saturating_sub(1);
+                while !self.approve_visible() && (1..=2).contains(&self.footer_index) {
+                    self.footer_index = self.footer_index.saturating_sub(1);
+                }
                 Vec::new()
             }
             KeyCode::Right => {
                 if self.footer_index < 6 {
+                    self.footer_index += 1;
+                }
+                while !self.approve_visible()
+                    && (1..=2).contains(&self.footer_index)
+                    && self.footer_index < 6
+                {
                     self.footer_index += 1;
                 }
                 Vec::new()
@@ -2308,5 +2333,51 @@ mod tests {
         app.handle_key_event(key(KeyCode::Esc));
         assert_eq!(app.modal, Modal::None);
         assert_eq!(app.settings_scroll, 0);
+    }
+
+    #[test]
+    fn selector_replaces_occupied_slot() {
+        let mut app = make_app();
+        app.config.assign_agent(0, "orch_a").unwrap();
+        assert_eq!(app.config.stages[0].agent_ids, vec!["orch_a".to_string()]);
+
+        app.focus = Focus::StageCanvas;
+        app.stage_selected = 0;
+        app.slot_selected = 1;
+        app.handle_key_event(key(KeyCode::Enter));
+        app.handle_key_event(key(KeyCode::Down));
+        let actions = app.handle_key_event(key(KeyCode::Enter));
+
+        assert_eq!(app.config.stages[0].agent_ids, vec!["coder_a".to_string()]);
+        assert_eq!(
+            actions,
+            vec![AppAction::AssignAgent {
+                stage: 0,
+                agent_id: "coder_a".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn footer_nav_skips_hidden_buttons() {
+        let mut app = make_app();
+        app.awaiting_operator = false;
+        app.focus = Focus::FooterMenu;
+        app.footer_index = 0;
+
+        app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.footer_index, 3);
+
+        app.handle_key_event(key(KeyCode::Left));
+        assert_eq!(app.footer_index, 0);
+
+        app.footer_index = 2;
+        app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.footer_index, 3);
+
+        app.awaiting_operator = true;
+        app.footer_index = 0;
+        app.handle_key_event(key(KeyCode::Right));
+        assert_eq!(app.footer_index, 1);
     }
 }

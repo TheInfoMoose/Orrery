@@ -544,6 +544,36 @@ impl ProjectConfig {
         Ok(())
     }
 
+    pub fn replace_agent(
+        &mut self,
+        index: usize,
+        slot: usize,
+        agent_id: impl Into<String>,
+    ) -> Result<()> {
+        if index >= self.stages.len() {
+            return Err(Error::Validation {
+                field: "stages".to_string(),
+                message: format!(
+                    "stage index {index} out of bounds (len {})",
+                    self.stages.len()
+                ),
+            });
+        }
+        let len = self.stages[index].agent_ids.len();
+        if slot >= len {
+            return Err(Error::Validation {
+                field: format!("stages[{index}].agent_ids"),
+                message: format!("slot {slot} out of bounds (len {len})"),
+            });
+        }
+
+        let mut next = self.clone();
+        next.stages[index].agent_ids[slot] = agent_id.into();
+        next.validate_staging()?;
+        *self = next;
+        Ok(())
+    }
+
     pub fn remove_agent(&mut self, index: usize, agent_id: &str) -> Result<()> {
         if index >= self.stages.len() {
             return Err(Error::Validation {
@@ -4187,5 +4217,29 @@ max_context_tokens = 1024
 
         assert!(store.remove_role("role-one").is_err());
         assert!(roles_dir.join("shared.md").exists());
+    }
+
+    #[test]
+    fn replace_agent_swaps_slot() {
+        let mut cfg = ProjectConfig::default_template("replace-test");
+        cfg.assign_agent(1, "a").unwrap();
+        cfg.assign_agent(1, "b").unwrap();
+        assert_eq!(cfg.stages[1].agent_ids, vec!["a", "b"]);
+
+        cfg.replace_agent(1, 0, "c").unwrap();
+        assert_eq!(cfg.stages[1].agent_ids, vec!["c", "b"]);
+
+        assert!(matches!(
+            cfg.replace_agent(1, 5, "d"),
+            Err(Error::Validation { ref field, .. }) if field == "stages[1].agent_ids"
+        ));
+        assert!(matches!(
+            cfg.replace_agent(99, 0, "d"),
+            Err(Error::Validation { ref field, .. }) if field == "stages"
+        ));
+
+        cfg.assign_agent(0, "a").unwrap();
+        cfg.replace_agent(0, 0, "b").unwrap();
+        assert_eq!(cfg.stages[0].agent_ids, vec!["b"]);
     }
 }
