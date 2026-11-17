@@ -643,6 +643,7 @@ impl RoleConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_config_file_id(&self.role_id, "role_id")?;
         if self.role_id.trim().is_empty() {
             return Err(Error::Validation {
                 field: "role_id".to_string(),
@@ -766,6 +767,7 @@ impl AgentConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_config_file_id(&self.agent_id, "agent_id")?;
         self.validate_no_embedded_secrets()?;
 
         if self.agent_id.trim().is_empty() {
@@ -1048,6 +1050,7 @@ impl InferenceConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_config_file_id(&self.inference_id, "inference_id")?;
         check_no_embedded_secret("inference_id", &self.inference_id)?;
         check_no_embedded_secret("endpoint_url", &self.endpoint_url)?;
 
@@ -1521,6 +1524,11 @@ fn validate_config_file_id(id: &str, field: &str) -> Result<()> {
             path: PathBuf::from(id),
         });
     }
+    if id.starts_with('.') {
+        return Err(Error::PathTraversal {
+            path: PathBuf::from(id),
+        });
+    }
     Ok(())
 }
 
@@ -1798,8 +1806,7 @@ impl ConfigStore {
             resolve_safe_within_dir(&roles_dir, Path::new(&role.rules_file), "rules_file")
             && rules_path.exists()
         {
-            let still_used = Self::read_roles_from_dir(&roles_dir)
-                .unwrap_or_default()
+            let still_used = Self::read_roles_from_dir(&roles_dir)?
                 .iter()
                 .any(|other| other.rules_file == role.rules_file);
             if !still_used {
@@ -2142,6 +2149,17 @@ impl ConfigStore {
             source,
         })?;
         role.validate()?;
+        let stem = path.file_stem().and_then(|s| s.to_str());
+        if stem != Some(role.role_id.as_str()) {
+            let stem = stem.unwrap_or_default();
+            let id = &role.role_id;
+            return Err(Error::Validation {
+                field: "role_id".to_string(),
+                message: format!(
+                    "file '{stem}.toml' declares id '{id}'; the file must be named '{id}.toml'"
+                ),
+            });
+        }
 
         let rules_path =
             resolve_safe_within_dir(roles_dir, Path::new(&role.rules_file), "rules_file")?;
@@ -2177,9 +2195,22 @@ impl ConfigStore {
                 path: path.clone(),
                 source,
             })?;
-            let agent: AgentConfig =
-                toml::from_str(&content).map_err(|source| Error::TomlDe { path, source })?;
+            let agent: AgentConfig = toml::from_str(&content).map_err(|source| Error::TomlDe {
+                path: path.clone(),
+                source,
+            })?;
             agent.validate()?;
+            let stem = path.file_stem().and_then(|s| s.to_str());
+            if stem != Some(agent.agent_id.as_str()) {
+                let stem = stem.unwrap_or_default();
+                let id = &agent.agent_id;
+                return Err(Error::Validation {
+                    field: "agent_id".to_string(),
+                    message: format!(
+                        "file '{stem}.toml' declares id '{id}'; the file must be named '{id}.toml'"
+                    ),
+                });
+            }
             upsert_by_key(&mut agents, agent, |a| &a.agent_id);
         }
         Ok(agents)
@@ -3981,5 +4012,146 @@ max_context_tokens = 1024
         let base = toml::to_string(&ProjectConfig::default_template("p")).unwrap();
         let with_unknown = format!("{base}\n[limits]\nmax_tools = 3\n");
         assert!(toml::from_str::<ProjectConfig>(&with_unknown).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_path_ids() {
+        for bad_id in ["../x", "a/b", ".hidden"] {
+            let mut agent = sample_agents().into_iter().next().unwrap();
+            agent.agent_id = bad_id.to_string();
+            assert!(
+                matches!(agent.validate(), Err(Error::PathTraversal { .. })),
+                "expected AgentConfig::validate to reject '{bad_id}'"
+            );
+
+            let mut role = sample_roles().into_iter().next().unwrap();
+            role.role_id = bad_id.to_string();
+            assert!(
+                matches!(role.validate(), Err(Error::PathTraversal { .. })),
+                "expected RoleConfig::validate to reject '{bad_id}'"
+            );
+
+            let inf = InferenceConfig {
+                inference_id: bad_id.to_string(),
+                endpoint_url: "http://127.0.0.1:8080".to_string(),
+                mode: InferenceMode::Single,
+                lifecycle: InferenceLifecycle::External,
+                unload_after_stage: true,
+                startup_timeout_secs: 300,
+            };
+            assert!(
+                matches!(inf.validate(), Err(Error::PathTraversal { .. })),
+                "expected InferenceConfig::validate to reject '{bad_id}'"
+            );
+        }
+    }
+
+    #[test]
+    fn load_rejects_mismatched_file_stem() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("stem-mismatch").unwrap();
+
+        let roles_dir = store.orrery_dir().join("roles");
+        atomic_write(&roles_dir.join("reviewer.md"), b"# Reviewer rules\n").unwrap();
+        let mismatched_role = RoleConfig {
+            role_id: "reviewer".to_string(),
+            display_name: "Reviewer".to_string(),
+            kind: RoleKind::Validator,
+            rules_file: "reviewer.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        atomic_write(
+            &roles_dir.join("custom.toml"),
+            toml::to_string_pretty(&mismatched_role).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        match store.load_roles().unwrap_err() {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "role_id");
+                assert_eq!(
+                    message,
+                    "file 'custom.toml' declares id 'reviewer'; the file must be named 'reviewer.toml'"
+                );
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let agents_dir = store.orrery_dir().join("agents");
+        let mut mismatched_agent = sample_agents().into_iter().next().unwrap();
+        mismatched_agent.agent_id = "a2".to_string();
+        atomic_write(
+            &agents_dir.join("a1.toml"),
+            toml::to_string_pretty(&mismatched_agent)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+
+        match store.load_agents().unwrap_err() {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "agent_id");
+                assert_eq!(
+                    message,
+                    "file 'a1.toml' declares id 'a2'; the file must be named 'a2.toml'"
+                );
+            }
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_hand_edited_traversal_id() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("traversal-id").unwrap();
+
+        let agents_dir = store.orrery_dir().join("agents");
+        let mut bad_agent = sample_agents().into_iter().next().unwrap();
+        bad_agent.agent_id = "../x".to_string();
+        atomic_write(
+            &agents_dir.join("x.toml"),
+            toml::to_string_pretty(&bad_agent).unwrap().as_bytes(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.load_agents(),
+            Err(Error::PathTraversal { .. })
+        ));
+    }
+
+    #[test]
+    fn remove_role_keeps_rules_when_peer_unreadable() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("shared-rules").unwrap();
+
+        let role_one = RoleConfig {
+            role_id: "role-one".to_string(),
+            display_name: "Role One".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "shared.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        let role_two = RoleConfig {
+            role_id: "role-two".to_string(),
+            display_name: "Role Two".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "shared.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        store.save_role(&role_one, "# Shared rules\n").unwrap();
+        store.save_role(&role_two, "# Shared rules\n").unwrap();
+
+        let roles_dir = store.orrery_dir().join("roles");
+        atomic_write(&roles_dir.join("broken.toml"), b"role_id = [\n").unwrap();
+
+        assert!(store.remove_role("role-one").is_err());
+        assert!(roles_dir.join("shared.md").exists());
     }
 }
