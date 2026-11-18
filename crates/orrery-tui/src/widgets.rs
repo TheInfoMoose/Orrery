@@ -1256,6 +1256,7 @@ mod tests {
             HookConfig {
                 tool: "git:commit".into(),
                 on_failure: HookFailure::Warn,
+                args: Default::default(),
             },
         );
         app.config.gate_tools = vec!["ci:test".into()];

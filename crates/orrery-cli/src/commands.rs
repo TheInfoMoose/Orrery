@@ -282,6 +282,7 @@ fn dispatch_hook(command: HookCmd, project: &Path, ctx: &mut CliContext) -> Resu
             let hook_cfg = HookConfig {
                 tool,
                 on_failure: HookFailure::from(on_failure),
+                args: Default::default(),
             };
             edit_project(&store, |cfg| {
                 cfg.hooks.set(hook_event, hook_cfg);
@@ -1606,6 +1607,7 @@ mod tests {
             Some(HookConfig {
                 tool: "fs:notify".to_string(),
                 on_failure: HookFailure::Warn,
+                args: Default::default(),
             })
         );
 

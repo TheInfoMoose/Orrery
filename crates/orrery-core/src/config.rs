@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -63,11 +64,15 @@ pub struct HookConfig {
     pub tool: String,
     #[serde(default)]
     pub on_failure: HookFailure,
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub args: serde_json::Map<String, serde_json::Value>,
 }
 
 impl HookConfig {
     pub fn validate(&self, field: &str) -> Result<()> {
         validate_concrete_tool_ref(&self.tool, field)?;
+        let args_field = format!("{}.args", field.strip_suffix(".tool").unwrap_or(field));
+        validate_tool_args(&self.args, &args_field)?;
         Ok(())
     }
 }
@@ -232,6 +237,8 @@ pub struct ProjectConfig {
     pub validation_mode: ValidationMode,
     #[serde(default)]
     pub gate_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gate_args: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     pub stages: Vec<StageConfig>,
     #[serde(default, skip_serializing_if = "HooksConfig::is_empty")]
     pub hooks: HooksConfig,
@@ -253,6 +260,7 @@ impl ProjectConfig {
             max_step_retries: 3,
             validation_mode: ValidationMode::Auto,
             gate_tools: Vec::new(),
+            gate_args: BTreeMap::new(),
             stages: vec![
                 StageConfig {
                     role_id: "orchestrator".to_string(),
@@ -373,6 +381,17 @@ impl ProjectConfig {
 
         for (idx, tool_ref) in self.gate_tools.iter().enumerate() {
             validate_concrete_tool_ref(tool_ref, &format!("gate_tools[{idx}]"))?;
+        }
+
+        for (key, args) in &self.gate_args {
+            let field = format!("gate_args.\"{key}\"");
+            if !self.gate_tools.iter().any(|t| t == key) {
+                return Err(Error::Validation {
+                    field,
+                    message: format!("no gate_tools entry '{key}'"),
+                });
+            }
+            validate_tool_args(args, &field)?;
         }
 
         self.hooks.validate()?;
@@ -1343,6 +1362,32 @@ pub fn validate_concrete_tool_ref<'a>(
     })?;
 
     Ok((server_id, tool))
+}
+
+fn json_contains_null(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Array(arr) => arr.iter().any(json_contains_null),
+        serde_json::Value::Object(map) => map.values().any(json_contains_null),
+        _ => false,
+    }
+}
+
+#[rustfmt::skip]
+pub fn validate_tool_args(args: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<()> {
+    if args.contains_key("orrery") {
+        return Err(Error::Validation {
+            field: field.to_string(),
+            message: "'orrery' is reserved for Orrery's call context".to_string(),
+        });
+    }
+    if args.values().any(json_contains_null) {
+        return Err(Error::Validation {
+            field: field.to_string(),
+            message: "null is not allowed (project.toml can't store it)".to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub fn validate_role_tool_pattern(pattern: &str, field: &str) -> Result<()> {
@@ -3001,6 +3046,7 @@ unknown = 123
         let hook = HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         };
         for event in [
             HookEvent::StepStart,
@@ -4308,5 +4354,112 @@ max_context_tokens = 1024
         assert!(!roles_dir.join("solo.md").exists());
         assert!(roles_dir.join("other.toml").exists());
         assert!(roles_dir.join("other.md").exists());
+    }
+
+    #[test]
+    fn hook_and_gate_args_round_trip_toml() {
+        let mut cfg = ProjectConfig::default_template("args-proj");
+        cfg.hooks.on_step_pass = Some(HookConfig {
+            tool: "neb:git_commit_documented".to_string(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::json!({"summary": "orrery step pass", "dry_run": false})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+        cfg.gate_tools = vec!["neb:gate_run".to_string()];
+        cfg.gate_args.insert(
+            "neb:gate_run".to_string(),
+            serde_json::json!({"profile": "ci", "paths": ["src"]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert!(cfg.validate_staging().is_ok());
+
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        let back: ProjectConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    #[test]
+    fn hook_without_args_loads_empty_and_omits_key() {
+        let hook: HookConfig = toml::from_str("tool = \"git:commit\"\n").unwrap();
+        assert!(hook.args.is_empty());
+        assert!(!toml::to_string(&hook).unwrap().contains("args"));
+
+        let cfg = ProjectConfig::default_template("p");
+        assert!(cfg.gate_args.is_empty());
+        assert!(!toml::to_string_pretty(&cfg).unwrap().contains("gate_args"));
+    }
+
+    #[test]
+    fn tool_args_reject_reserved_orrery_key() {
+        let mut cfg = ProjectConfig::default_template("p");
+        cfg.hooks.on_step_pass = Some(HookConfig {
+            tool: "neb:git_commit_documented".to_string(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::json!({"orrery": {}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+        match cfg.validate_staging() {
+            Err(Error::Validation { field, .. }) => {
+                assert_eq!(field, "hooks.on_step_pass.args");
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        let mut cfg2 = ProjectConfig::default_template("p");
+        cfg2.gate_tools = vec!["neb:gate_run".to_string()];
+        cfg2.gate_args.insert(
+            "neb:gate_run".to_string(),
+            serde_json::json!({"orrery": 1})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        match cfg2.validate_staging() {
+            Err(Error::Validation { field, .. }) => {
+                assert_eq!(field, "gate_args.\"neb:gate_run\"");
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_args_reject_null() {
+        let mut cfg = ProjectConfig::default_template("p");
+        cfg.hooks.on_step_start = Some(HookConfig {
+            tool: "git:status".to_string(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::json!({"a": {"b": [1, null]}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+        match cfg.validate_staging() {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "hooks.on_step_start.args");
+                assert!(message.contains("null"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_args_key_must_be_gate_tool() {
+        let mut cfg = ProjectConfig::default_template("p");
+        cfg.gate_args.insert(
+            "neb:gate_run".to_string(),
+            serde_json::json!({}).as_object().unwrap().clone(),
+        );
+        match cfg.validate_staging() {
+            Err(Error::Validation { field, .. }) => {
+                assert_eq!(field, "gate_args.\"neb:gate_run\"");
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
     }
 }

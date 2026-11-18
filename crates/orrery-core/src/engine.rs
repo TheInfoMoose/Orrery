@@ -3880,6 +3880,7 @@ mod tests {
         ctx.project.hooks.on_step_start = Some(HookConfig {
             tool: "git:status".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("git").with_tool(
@@ -3962,6 +3963,7 @@ mod tests {
         ctx.project.hooks.on_step_retry = Some(HookConfig {
             tool: "git:reset".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("git").with_tool(
@@ -4059,6 +4061,7 @@ mod tests {
         ctx.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:tag".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("git").with_tool(
@@ -4134,10 +4137,12 @@ mod tests {
         ctx.project.hooks.on_step_start = Some(HookConfig {
             tool: "git:check".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         ctx.project.hooks.on_halt = Some(HookConfig {
             tool: "git:notify_halt".to_string(),
             on_failure: HookFailure::Warn,
+            args: Default::default(),
         });
 
         let transport = Arc::new(
@@ -4203,6 +4208,7 @@ mod tests {
         ctx2.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         let mut gk2 = McpGatekeeper::new();
         gk2.register(
@@ -4248,6 +4254,7 @@ mod tests {
         ctx.project.hooks.on_step_start = Some(HookConfig {
             tool: "git:notify".to_string(),
             on_failure: HookFailure::Warn,
+            args: Default::default(),
         });
 
         let mut gk = McpGatekeeper::new();
@@ -4296,6 +4303,7 @@ mod tests {
             HookConfig {
                 tool: "git:commit".to_string(),
                 on_failure: HookFailure::Halt,
+                args: Default::default(),
             },
         );
         let role = build_hook_role(&hooks);
@@ -4366,6 +4374,7 @@ mod tests {
         ctx.project.hooks.on_step_start = Some(HookConfig {
             tool: "git:log".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
 
         let mut gk = McpGatekeeper::new();
@@ -4903,6 +4912,7 @@ mod tests {
         ctx.project.hooks.on_halt = Some(HookConfig {
             tool: "notify:halt".to_string(),
             on_failure: HookFailure::Warn,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("notify").with_tool(
@@ -5301,6 +5311,7 @@ mod tests {
         ctx.project.hooks.on_halt = Some(HookConfig {
             tool: "notify:halt".to_string(),
             on_failure: HookFailure::Warn,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("notify").with_tool(
@@ -5608,6 +5619,7 @@ mod tests {
         project.hooks.on_step_pass = Some(HookConfig {
             tool: "notify:send".to_string(),
             on_failure: HookFailure::Warn,
+            args: Default::default(),
         });
 
         let roles = vec![
@@ -5713,6 +5725,7 @@ mod tests {
         ctx1.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         let mut gk1 = McpGatekeeper::new();
         gk1.register(
@@ -5759,6 +5772,7 @@ mod tests {
         ctx2.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         let transport2 = Arc::new(MockMcpTransport::new("git").with_tool(
             "commit",
@@ -5807,6 +5821,7 @@ mod tests {
         ctx1.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         let mut gk1 = McpGatekeeper::new();
         gk1.register(
@@ -5855,6 +5870,7 @@ mod tests {
         ctx2.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
         let mut gk2 = McpGatekeeper::new();
         gk2.register(
@@ -5908,6 +5924,7 @@ mod tests {
         ctx.project.hooks.on_step_pass = Some(HookConfig {
             tool: "git:commit".to_string(),
             on_failure: HookFailure::Halt,
+            args: Default::default(),
         });
 
         let transport = Arc::new(MockMcpTransport::new("git").with_tool(
