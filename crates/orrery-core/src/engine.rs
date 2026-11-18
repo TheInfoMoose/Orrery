@@ -1313,16 +1313,15 @@ impl WorkflowEngine {
         let hook_role = build_hook_role(&self.ctx.project.hooks);
         let event_str = hook_event_name(event);
 
-        let args = serde_json::json!({
-            "orrery": {
-                "project_name": self.ctx.project.project_name,
-                "run_id": state.run_id.to_string(),
-                "step_number": step.number,
-                "step_title": step.title,
-                "plan_step_sha256": step.sha256_hex,
-                "event": event_str,
-            }
+        let orrery = serde_json::json!({
+            "project_name": self.ctx.project.project_name,
+            "run_id": state.run_id.to_string(),
+            "step_number": step.number,
+            "step_title": step.title,
+            "plan_step_sha256": step.sha256_hex,
+            "event": event_str,
         });
+        let args = merge_tool_args(&hook_cfg.args, orrery);
 
         let exec_res = self
             .ctx
@@ -1408,30 +1407,27 @@ impl WorkflowEngine {
             rules_file: String::new(),
             allowed_mcp_tools: self.ctx.project.gate_tools.clone(),
         };
-        let args = serde_json::json!({
-            "orrery": {
-                "project_name": self.ctx.project.project_name,
-                "run_id": state.run_id.to_string(),
-                "step_number": step.number,
-                "step_title": step.title,
-                "plan_step_sha256": step.sha256_hex,
-                "event": "gate",
-            }
+        let orrery = serde_json::json!({
+            "project_name": self.ctx.project.project_name,
+            "run_id": state.run_id.to_string(),
+            "step_number": step.number,
+            "step_title": step.title,
+            "plan_step_sha256": step.sha256_hex,
+            "event": "gate",
         });
+        let no_args = serde_json::Map::new();
 
         for (idx, tool_ref) in self.ctx.project.gate_tools.iter().enumerate() {
             let (server_id, tool) =
                 validate_concrete_tool_ref(tool_ref, &format!("gate_tools[{idx}]"))?;
+            let args = merge_tool_args(
+                self.ctx.project.gate_args.get(tool_ref).unwrap_or(&no_args),
+                orrery.clone(),
+            );
             let exec_res = self
                 .ctx
                 .gatekeeper
-                .execute_for_role(
-                    &gate_role,
-                    &WriteScope::anywhere(),
-                    server_id,
-                    tool,
-                    args.clone(),
-                )
+                .execute_for_role(&gate_role, &WriteScope::anywhere(), server_id, tool, args)
                 .await;
 
             match exec_res {
@@ -1942,6 +1938,15 @@ impl Backends {
     }
 }
 
+pub fn merge_tool_args(
+    configured: &serde_json::Map<String, serde_json::Value>,
+    orrery: serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = configured.clone();
+    merged.insert("orrery".to_string(), orrery);
+    serde_json::Value::Object(merged)
+}
+
 pub fn referenced_mcp_servers(project: &ProjectConfig, roles: &[RoleConfig]) -> BTreeSet<String> {
     let mut servers = BTreeSet::new();
     for role in roles {
@@ -2141,7 +2146,7 @@ mod tests {
     use super::{
         Backends, DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
         StageTurnRecord, WorkflowEngine, agents_pass_rule, build_engine, build_hook_role,
-        check_dispatch,
+        check_dispatch, merge_tool_args,
     };
     use crate::Error;
     use crate::checkpoint::{
@@ -6349,5 +6354,142 @@ mod tests {
         let redacted = engine.redact("echo sk-test-leak-123 done");
         assert!(redacted.contains("[REDACTED]"), "got: {redacted}");
         assert!(!redacted.contains("sk-test-leak-123"), "got: {redacted}");
+    }
+
+    #[test]
+    fn merge_tool_args_adds_orrery_and_keeps_configured() {
+        let configured = serde_json::json!({"summary": "s", "dry_run": false})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            merge_tool_args(&configured, serde_json::json!({"event": "step_pass"})),
+            serde_json::json!({"summary": "s", "dry_run": false, "orrery": {"event": "step_pass"}})
+        );
+    }
+
+    #[test]
+    fn merge_tool_args_empty_config_is_orrery_only() {
+        assert_eq!(
+            merge_tool_args(
+                &serde_json::Map::new(),
+                serde_json::json!({"event": "gate"})
+            ),
+            serde_json::json!({"orrery": {"event": "gate"}})
+        );
+    }
+
+    #[test]
+    fn merge_tool_args_orrery_wins_over_configured() {
+        let configured = serde_json::json!({"orrery": "x", "a": 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(
+            merge_tool_args(&configured, serde_json::json!({"event": "halt"})),
+            serde_json::json!({"a": 1, "orrery": {"event": "halt"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn step_pass_hook_sends_configured_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.hooks.on_step_pass = Some(HookConfig {
+            tool: "git:tag".to_string(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::json!({"summary": "orrery step pass", "dry_run": false})
+                .as_object()
+                .unwrap()
+                .clone(),
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "tag",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "tagged step-1" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1["summary"], "orrery step pass");
+        assert_eq!(calls[0].1["dry_run"], false);
+        assert_eq!(calls[0].1["orrery"]["event"], "step_pass");
+    }
+
+    #[tokio::test]
+    async fn gate_sends_per_tool_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.project.gate_tools = vec!["cargo:test".to_string(), "cargo:clippy".to_string()];
+        ctx.project.gate_args.insert(
+            "cargo:test".to_string(),
+            serde_json::json!({"profile": "ci"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+
+        let transport = Arc::new(
+            MockMcpTransport::new("cargo")
+                .with_tool(
+                    "test",
+                    serde_json::json!({"content": [{"type": "text", "text": "ok"}]}),
+                )
+                .with_tool(
+                    "clippy",
+                    serde_json::json!({"content": [{"type": "text", "text": "clean"}]}),
+                ),
+        );
+        let mut gk = McpGatekeeper::new();
+        gk.register("cargo", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "test");
+        assert_eq!(calls[0].1["profile"], "ci");
+        assert_eq!(calls[0].1["orrery"]["event"], "gate");
+        assert_eq!(calls[1].0, "clippy");
+        assert!(calls[1].1.get("profile").is_none());
+        assert_eq!(calls[1].1["orrery"]["event"], "gate");
     }
 }
