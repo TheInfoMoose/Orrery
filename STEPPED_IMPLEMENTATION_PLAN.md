@@ -19,11 +19,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 84** | `/goal` | Swap chrono for jiff in orrery-core | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `checkpoint.rs`, `stream_log.rs`, `llm.rs`, `engine.rs` | — |
-| 2 | **STEP 85** | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` | Step 84 |
-| 3 | **STEP 86** | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) | Step 85 |
-| 4 | **STEP 87** | `/goal` | README CI section | `README.md` | Step 86 |
-| 5 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
+| 1 | **STEP 85** | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` | — |
+| 2 | **STEP 86** | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) | Step 85 |
+| 3 | **STEP 87** | `/goal` | README CI section | `README.md` | Step 86 |
+| 4 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 
 ### Completed
 
@@ -113,6 +112,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 81** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Redacted run errors in the TUI | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 82** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | MCP bearer header | `crates/orrery-core/src/mcp.rs` |
 | **STEP 83** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Secret input without copies | `crates/orrery-cli/src/main.rs` |
+| **STEP 84** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Swap chrono for jiff in orrery-core | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `checkpoint.rs`, `stream_log.rs`, `llm.rs`, `engine.rs` |
 
 ---
 
