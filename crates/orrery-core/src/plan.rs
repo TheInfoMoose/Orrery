@@ -376,9 +376,9 @@ mod tests {
             "### STEP ",
         )
         .unwrap();
-        assert_eq!(plan.steps.len(), 79);
+        assert_eq!(plan.steps.len(), 83);
         let numbers: Vec<usize> = plan.steps.iter().map(|s| s.number).collect();
-        assert_eq!(numbers, (1..=79).collect::<Vec<_>>());
+        assert_eq!(numbers, (1..=83).collect::<Vec<_>>());
         assert!(plan.steps[5].title.starts_with("6: "));
     }
 }

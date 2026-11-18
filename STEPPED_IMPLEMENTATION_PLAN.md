@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76) and Phase I tidy-ups (77–79). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79) and Phase J secret-handling fixes (80–83). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (79). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (83). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 80** | `/goal` | Redacted run errors in the CLI | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/commands.rs` | — |
+| 2 | **STEP 81** | `/goal` | Redacted run errors in the TUI | `crates/orrery-tui/src/bridge.rs` | STEP 80 |
+| 3 | **STEP 82** | `/goal` | MCP bearer header | `crates/orrery-core/src/mcp.rs` | — |
+| 4 | **STEP 83** | `/goal` | Secret input without copies | `crates/orrery-cli/src/main.rs` | — |
 
 ### Completed
 
@@ -2219,6 +2223,7 @@ Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `
 Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52–56). The rest stay parked.
 Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs the live suite.
 Phase H review (2026-11-17): the operator picked the four cheap Lows for Phase I (Steps 77–79; the §7 `add-cli` synopsis was fixed in the spec directly). The rest stay parked.
+Phase I review (2026-11-17): the operator picked the secret-handling Phase G Lows F63-9, F64-5 and F62-5 for Phase J (Steps 80–83). The other 13 Phase G Lows (validation notes) and the items below stay parked.
 - `mcp.rs` `resolve_stdio_command` — Windows `PATHEXT` for bare names — needs Windows as a target first (spec §9.12.1: Linux only for now; Windows planned).
 - TUI catalog editing (agents, roles, MCP servers, inference) — §6.2 leaves editing to the CLI in v1.
 - `orrery-tui` `status_message = Some(err.to_string())` (`app.rs`, `bridge.rs`) drops the error's source chain, like the CLI did before Step 45 — reuse a core helper once one exists.
@@ -4157,6 +4162,174 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 
 [POST_GATE]
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'let orphaned_rules' crates/orrery-core/src/config.rs && grep -q 'other.role_id != role.role_id' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::remove_role_keeps_toml_when_peer_unreadable|config::tests::remove_role_deletes_own_rules_after_peer_scan|config::tests::remove_role_keeps_rules_when_peer_unreadable): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+## Phase J — secret-handling Lows (Steps 80–83)
+
+**Phase goal (frozen until the phase ends):** fix the three Phase G Lows that touch secret handling, picked by the operator on 2026-11-17:
+- F63-9: the TUI shows run errors without redacting them.
+- F64-5: the CLI prints run errors without redacting them, and its secret input makes a second plaintext copy.
+- F62-5: the MCP HTTP bearer token goes into rmcp as a plain `String`.
+
+Minimal fixes only. Design: spec §9.16 (`ORRERY_TECHNICAL_SPECIFICATION.md:1435-1450`).
+
+Written 2026-11-17 against `2639c13`. The other 13 Phase G Lows stay parked in the validation notes. F63-9's non-secret parts (the build-failure stream notice and clearing `status_message`) aren't in scope.
+
+### STEP 80: Redacted Run Errors in the CLI
+
+* **Recommended Command:** `/goal`
+
+Scope note: F64-5, error half: `main` prints `render_error(&err)` without redaction, so a run error carrying a registered secret reaches stderr in plaintext.
+
+```text
+[STEP_ID]
+STEP 80: Redacted Run Errors in the CLI
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1438-1440 (§9.16.1; binding)
+  - crates/orrery-core/src/engine.rs:342-350 (`subscribe_stream`, `recent_stream`: add `redact` next to them)
+  - crates/orrery-core/src/security.rs:158-190 (`SecretRedactor::redact(&self, &str) -> Result<String>`), crates/orrery-core/src/stream_log.rs:316 (`LiveStreamHub::redactor`)
+  - crates/orrery-cli/src/commands.rs:37-59 (`render_error`, `exit_code_for`, `write_stdout_line`), 731-786 (`dispatch_run`), 2655-2720 (`push_one_step_pass`, `setup_runnable_project`), 3115-3125 (`InMemorySecretStore::set` usage)
+  - crates/orrery-cli/src/main.rs (read-only: its `Err` arm stays as is)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Only `redact` is added to engine.rs. Only `dispatch_run`'s handling of `outcome_res` and one new test change in commands.rs. Errors returned before `build_engine` succeeds keep propagating with `?`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub fn recent_stream' crates/orrery-core/src/engine.rs && ! grep -q 'pub fn redact(&self, text: &str) -> String' crates/orrery-core/src/engine.rs && grep -q 'match outcome_res? {' crates/orrery-cli/src/commands.rs && sed -n 1438p $S | grep -q '^#### 9.16.1 '
+
+[MUTATION_SPEC]
+1. engine.rs, next to `recent_stream`: `pub fn redact(&self, text: &str) -> String { self.ctx.stream.redactor().redact(text).unwrap_or_else(|_| "[error text withheld: redactor unavailable]".to_string()) }`.
+2. commands.rs `dispatch_run`: replace `match outcome_res? {` with `let outcome = match outcome_res { Ok(outcome) => outcome, Err(err) => { let text = engine.redact(&render_error(&err)); writeln!(ctx.err, "{text}").map_err(|source| Error::Io { path: PathBuf::from("<stderr>"), source })?; return Ok(exit_code_for(&err)); } }; match outcome {` (the three outcome arms are unchanged).
+3. Tests:
+   - `engine::tests::redact_masks_registered_secret`: `test_context`, register `SecretValue::new("sk-test-leak-123")` on `ctx.stream.redactor()`, build the engine; `engine.redact("echo sk-test-leak-123 done")` contains `"[REDACTED]"` and not `"sk-test-leak-123"`.
+   - `commands::tests::run_error_is_redacted`: `setup_runnable_project` with a one-step plan and `secrets` holding `orrery.test` / `testuser` = `sk-test-leak-123`. Then, through `ConfigStore::new(dir, None)`: `save_agent` a `CloudApi` agent `cloud-orch` (endpoint `https://api.example.com/v1/chat/completions`, model `cloud-model`, temperature 0.0, 8192 context, keychain `orrery.test` / `testuser`), and `load_project` → `replace_agent(0, 0, "cloud-orch")` → `save_project`. Push `driver.push("cloud-orch", Err(Error::Agent { agent_id: "cloud-orch".into(), message: "upstream echoed sk-test-leak-123".into() }))`. `dispatch(Command::Run { r#loop: false, cycles: None, step: None }, ..)` is `Ok(1)`; the captured stderr contains `"[REDACTED]"` and does not contain `"sk-test-leak-123"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn redact(&self, text: &str) -> String' crates/orrery-core/src/engine.rs && grep -q 'error text withheld: redactor unavailable' crates/orrery-core/src/engine.rs && grep -q 'engine.redact(&render_error(&err))' crates/orrery-cli/src/commands.rs && ! grep -q 'match outcome_res? {' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::redact_masks_registered_secret: test$')" -eq 1 && test "$(cargo test -p orrery-cli --bins --locked -- --list 2>/dev/null | grep -cE '^commands::tests::run_error_is_redacted: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 81: Redacted Run Errors in the TUI
+
+* **Recommended Command:** `/goal`
+
+Scope note: F63-9, secret half: the run task sends `err.to_string()` straight to `stream_tx`, bypassing the hub's redactor, and `apply_task_result` puts the same text in `status_message`.
+
+```text
+[STEP_ID]
+STEP 81: Redacted Run Errors in the TUI
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1442-1443 (§9.16.2; binding)
+  - crates/orrery-tui/src/bridge.rs:102 (`task: Option<JoinHandle<Result<RunOutcome>>>`), 145-164 (`apply_task_result`), 166-218 (`poll_finished`, `shutdown`), 228-336 (`start_run` and the run task), 865-919 (`setup_project_dir`, `make_mock_backends`)
+  - crates/orrery-core/src/engine.rs: `WorkflowEngine::redact(&self, text: &str) -> String` (added by Step 80)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The select loop, `drain_remaining`, and the build-failure behavior (no stream notice) are unchanged. `status_message` is not cleared anywhere new.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'pub fn redact(&self, text: &str) -> String' crates/orrery-core/src/engine.rs && grep -q 'task: Option<JoinHandle<Result<RunOutcome>>>' crates/orrery-tui/src/bridge.rs && sed -n 1442p $S | grep -q '^#### 9.16.2 '
+
+[MUTATION_SPEC]
+1. `EngineController.task`: `Option<JoinHandle<std::result::Result<RunOutcome, String>>>`.
+2. The run task: `let backends = (make_backends)().map_err(|e| e.to_string())?; let engine = build_engine(&store, backends).await.map_err(|e| e.to_string())?;`. After `drain_remaining(..)`: `let res = res.map_err(|err| engine.redact(&err.to_string()));` then `if let Err(ref text) = res { let _ = stream_tx.try_send(StreamEvent { kind: StreamEventKind::Error, text: text.clone(), ..StreamEvent::notice("") }); }` and return `res`.
+3. `apply_task_result(app, res: std::result::Result<std::result::Result<RunOutcome, String>, String>) -> bool`: the `Ok(Err(text))` arm sets `app.status_message = Some(text)`; the other arms are unchanged. `poll_finished` and `shutdown` keep calling it as now.
+4. Test in `bridge::tests`: `run_error_is_redacted_in_tui` (`#[tokio::test]`): `setup_project_dir(ValidationMode::Auto)`; `store.save_agent` a `CloudApi` agent `cloud-orch` (endpoint `https://api.example.com/v1/chat/completions`, model `cloud-model`, temperature 0.0, 8192 context, keychain `orrery.test` / `testuser`); `app.config.replace_agent(0, 0, "cloud-orch")` then `store.save_project(&app.config)`. The backends factory returns `make_mock_backends(driver)` with `secrets` replaced by an `InMemorySecretStore` holding `orrery.test` / `testuser` = `sk-test-leak-123`. `driver.push("cloud-orch", Err(Error::Agent { agent_id: "cloud-orch".into(), message: "upstream echoed sk-test-leak-123".into() }))`. `handle(&AppAction::Run, ..)`, then loop `poll_finished` (5 s timeout, 20 ms sleeps) until it returns `true`. Then `app.status == RunStatus::Error`, `app.status_message` contains `"[REDACTED]"` and not `"sk-test-leak-123"`, and no `app.stream` event text contains `"sk-test-leak-123"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'engine.redact(&err.to_string())' crates/orrery-tui/src/bridge.rs && grep -q 'JoinHandle<std::result::Result<RunOutcome, String>>' crates/orrery-tui/src/bridge.rs && ! grep -q 'text: err.to_string(),' crates/orrery-tui/src/bridge.rs && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::run_error_is_redacted_in_tui: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 82: MCP Bearer Header
+
+* **Recommended Command:** `/goal`
+
+Scope note: F62-5 (re-reviewed): `cfg.auth_header(secret.expose())` keeps the token in rmcp's `Debug`-deriving config as a plain `Option<String>`, cloned per request, and never checks it is a valid header value.
+
+```text
+[STEP_ID]
+STEP 82: MCP Bearer Header
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/mcp.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1445-1446 (§9.16.3; binding)
+  - crates/orrery-core/src/mcp.rs:604-628 (`McpTransportConfig::StreamableHttp` arm of `connect_with_stream`)
+  - crates/orrery-core/src/llm.rs:611-633 (`auth_header_value`: the `Zeroizing` + `set_sensitive` pattern to copy)
+  - rmcp 3.9.0 `StreamableHttpClientTransportConfig::custom_headers(HashMap<HeaderName, HeaderValue>)`; `http` 1.5.0 is the only `http` in Cargo.lock, so `reqwest::header` types are the same types
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No Cargo.toml change. The both-or-neither keychain check and the connect timeouts are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q 'cfg = cfg.auth_header(secret.expose());' crates/orrery-core/src/mcp.rs && ! grep -q 'fn mcp_bearer_headers' crates/orrery-core/src/mcp.rs && sed -n 1445p $S | grep -q '^#### 9.16.3 '
+
+[MUTATION_SPEC]
+1. mcp.rs, a free function: `pub(crate) fn mcp_bearer_headers(secret: &SecretValue) -> Result<std::collections::HashMap<reqwest::header::HeaderName, reqwest::header::HeaderValue>>`: `let bearer = zeroize::Zeroizing::new(format!("Bearer {}", secret.expose())); let mut value = reqwest::header::HeaderValue::from_str(&bearer).map_err(|_| Error::Validation { field: "keychain".to_string(), message: "MCP bearer token is not a valid HTTP header value".to_string() })?; value.set_sensitive(true); Ok(std::collections::HashMap::from([(reqwest::header::AUTHORIZATION, value)]))`.
+2. The `(Some(svc), Some(acc))` arm: `let secret = secrets.get(svc, acc)?; cfg = cfg.custom_headers(mcp_bearer_headers(&secret)?);`. No `auth_header` call remains.
+3. Tests in `mcp::tests`:
+   - `mcp_bearer_headers_are_sensitive`: `mcp_bearer_headers(&SecretValue::new("tok-123"))` has exactly one entry, under `AUTHORIZATION`; its value `to_str()` is `"Bearer tok-123"`, `is_sensitive()` is true, and `format!("{value:?}")` does not contain `"tok-123"`.
+   - `mcp_bearer_headers_reject_invalid`: `mcp_bearer_headers(&SecretValue::new("bad\ntoken"))` is `Err(Error::Validation { .. })`, and its `to_string()` does not contain `"bad"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub(crate) fn mcp_bearer_headers' crates/orrery-core/src/mcp.rs && grep -q 'cfg.custom_headers(mcp_bearer_headers(&secret)?)' crates/orrery-core/src/mcp.rs && ! grep -q 'auth_header(' crates/orrery-core/src/mcp.rs && grep -q 'set_sensitive(true)' crates/orrery-core/src/mcp.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(mcp::tests::mcp_bearer_headers_are_sensitive|mcp::tests::mcp_bearer_headers_reject_invalid): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 83: Secret Input Without Copies
+
+* **Recommended Command:** `/goal`
+
+Scope note: F64-5, copy half: `trim_end_matches(..).to_string()` allocates a second plaintext copy of the secret and drops the original without zeroizing it.
+
+```text
+[STEP_ID]
+STEP 83: Secret Input Without Copies
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/main.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1448-1449 (§9.16.4; binding)
+  - crates/orrery-cli/src/main.rs:15-37 (`read_secret_from_stdin`, `read_secret_input`)
+  - crates/orrery-cli/src/commands.rs:690-700 (the caller moves the `String` into `SecretValue::new`, which zeroizes on drop)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `main`'s body and both functions' signatures are unchanged. No new dependency.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && test "$(grep -c "trim_end_matches(\['\\\\r', '\\\\n'\]).to_string()" crates/orrery-cli/src/main.rs)" -eq 2 && ! grep -q 'fn trim_line_end_in_place' crates/orrery-cli/src/main.rs && sed -n 1448p $S | grep -q '^#### 9.16.4 '
+
+[MUTATION_SPEC]
+1. main.rs: `fn trim_line_end_in_place(mut s: String) -> String { let len = s.trim_end_matches(['\r', '\n']).len(); s.truncate(len); s }`.
+2. `read_secret_from_stdin` returns `Ok(trim_line_end_in_place(line))`; `read_secret_input`'s TTY branch returns `Ok(trim_line_end_in_place(value))`. No `.to_string()` copy of the secret remains.
+3. A `#[cfg(test)] mod tests` at the end of main.rs with `trim_line_end_keeps_allocation`: `let mut s = String::with_capacity(32); s.push_str("tok\r\n"); let ptr = s.as_ptr(); let out = trim_line_end_in_place(s);` → `out == "tok"` and `out.as_ptr() == ptr`; and `trim_line_end_in_place("plain".to_string()) == "plain"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn trim_line_end_in_place(mut s: String) -> String' crates/orrery-cli/src/main.rs && ! grep -q "trim_end_matches(\['\\\\r', '\\\\n'\]).to_string()" crates/orrery-cli/src/main.rs && test "$(cargo test -p orrery-cli --bins --locked -- --list 2>/dev/null | grep -cE '^tests::trim_line_end_keeps_allocation: test$')" -eq 1
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.

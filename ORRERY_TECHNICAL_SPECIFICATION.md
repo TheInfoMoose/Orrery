@@ -1431,3 +1431,20 @@ Operator-picked Low items from the Phase H Parked list (2026-11-17). Minimal fix
 
 #### 9.15.3 `remove_role` checks peers first (Step 79) (adds to §9.14.1)
 - When the role's rules file resolves and exists, `remove_role` scans the peer roles *before* deleting the role's TOML. If the scan fails, nothing is deleted.
+
+### 9.16 Phase J: secret-handling Lows (Steps 80–83)
+Operator-picked Phase G Lows F63-9, F64-5 and F62-5 (2026-11-17). Minimal fixes only.
+
+#### 9.16.1 Redacted run errors in the CLI (Step 80) (adds to §7, §9.10)
+- `WorkflowEngine::redact(&self, text: &str) -> String` passes `text` through the stream hub's `SecretRedactor`. It fails closed: if redaction fails, it returns `[error text withheld: redactor unavailable]`.
+- `run` / `resume`: an `Err` from `engine.run` is rendered with `render_error`, redacted with `engine.redact`, and written to stderr by `dispatch_run` itself, which then returns `Ok(exit_code_for(&err))`. Errors before the engine exists (config, build) keep the existing unredacted path: no secret is registered with a redactor until `build_engine` finishes. (F64-5, error half)
+
+#### 9.16.2 Redacted run errors in the TUI (Step 81) (overrides §9.11.9 error notice)
+- The run task's output type is `std::result::Result<RunOutcome, String>`. Errors before the engine exists map with `e.to_string()`. An `Err` from `engine.run` maps to `engine.redact(&err.to_string())`, and that redacted text is both the stream `Error` event and `app.status_message`. (F63-9)
+
+#### 9.16.3 MCP bearer header (Step 82) (overrides §9.5 HTTP auth)
+- `RmcpTransport::connect_with_stream` no longer calls `auth_header`. It builds `Authorization: Bearer <secret>` from a `zeroize::Zeroizing<String>`, rejects a secret that isn't a valid header value with `Error::Validation` (message without the secret), marks the `HeaderValue` sensitive, and passes it through `custom_headers`. rmcp 3.9 allows `Authorization` as a custom header and keeps its same-origin redirect policy. (F62-5)
+
+#### 9.16.4 Secret input without copies (Step 83) (adds to §5.3)
+- `read_secret_from_stdin` and `read_secret_input` strip the trailing `\r` / `\n` by truncating the same `String` in place, so no second plaintext copy is allocated. (F64-5, copy half)
+
