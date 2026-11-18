@@ -347,6 +347,14 @@ impl WorkflowEngine {
         self.ctx.stream.recent(limit)
     }
 
+    pub fn redact(&self, text: &str) -> String {
+        self.ctx
+            .stream
+            .redactor()
+            .redact(text)
+            .unwrap_or_else(|_| "[error text withheld: redactor unavailable]".to_string())
+    }
+
     pub async fn run(&self, opts: RunOptions, cancel: CancellationToken) -> Result<RunOutcome> {
         let result = self.run_steps(opts, cancel).await;
         if let Err(err) = self.ctx.resources.shutdown().await {
@@ -6303,5 +6311,26 @@ mod tests {
                 .calls()
                 .contains(&MockCall::Remove(cli_container_name(&state.run_id, "orch")))
         );
+    }
+
+    #[test]
+    fn redact_masks_registered_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.stream
+            .redactor()
+            .register(&SecretValue::new("sk-test-leak-123"))
+            .unwrap();
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let redacted = engine.redact("echo sk-test-leak-123 done");
+        assert!(redacted.contains("[REDACTED]"), "got: {redacted}");
+        assert!(!redacted.contains("sk-test-leak-123"), "got: {redacted}");
     }
 }

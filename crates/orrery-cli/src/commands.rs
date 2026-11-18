@@ -778,7 +778,19 @@ async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) ->
         write_stdout_line(ctx, &format_stream_event(&ev))?;
     }
 
-    match outcome_res? {
+    let outcome = match outcome_res {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            let text = engine.redact(&render_error(&err));
+            writeln!(ctx.err, "{text}").map_err(|source| Error::Io {
+                path: PathBuf::from("<stderr>"),
+                source,
+            })?;
+            return Ok(exit_code_for(&err));
+        }
+    };
+
+    match outcome {
         RunOutcome::Completed { .. } | RunOutcome::NoPendingSteps => Ok(0),
         RunOutcome::AwaitingOperator { .. } => Ok(3),
         RunOutcome::Interrupted => Ok(130),
@@ -3418,5 +3430,72 @@ mod tests {
             stdout.contains("is not used by this workflow"),
             "expected unused server startup notice in stdout, got: {stdout}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_error_is_redacted() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        let secrets = Arc::new(InMemorySecretStore::new());
+        secrets
+            .set(
+                "orrery.test",
+                "testuser",
+                &SecretValue::new("sk-test-leak-123"),
+            )
+            .expect("store secret");
+
+        let (mut ctx, _out, err) = setup_runnable_project(
+            dir.path(),
+            "## Step 1: First\nb1\n",
+            driver.clone(),
+            secrets,
+        )
+        .await;
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        store
+            .save_agent(&AgentConfig {
+                agent_id: "cloud-orch".to_string(),
+                display_name: "Cloud Orchestrator".to_string(),
+                backend: AgentBackend::CloudApi {
+                    endpoint_url: "https://api.example.com/v1/chat/completions".to_string(),
+                    model: "cloud-model".to_string(),
+                    temperature: 0.0,
+                    max_context_tokens: 8192,
+                    keychain_service: "orrery.test".to_string(),
+                    keychain_account: "testuser".to_string(),
+                },
+            })
+            .expect("save cloud-orch");
+        let mut project = store.load_project().expect("load project");
+        project
+            .replace_agent(0, 0, "cloud-orch")
+            .expect("replace stage 0 agent");
+        store.save_project(&project).expect("save project");
+
+        driver.push(
+            "cloud-orch",
+            Err(Error::Agent {
+                agent_id: "cloud-orch".into(),
+                message: "upstream echoed sk-test-leak-123".into(),
+            }),
+        );
+
+        let res = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await;
+        assert_eq!(res.expect("run"), 1);
+
+        let stderr = err.as_string();
+        assert!(stderr.contains("[REDACTED]"), "stderr: {stderr}");
+        assert!(!stderr.contains("sk-test-leak-123"), "stderr: {stderr}");
     }
 }
