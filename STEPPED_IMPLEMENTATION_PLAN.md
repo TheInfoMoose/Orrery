@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87) and Phase L configured tool arguments (88–92). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92) and Phase M role protocol and skills (93–99). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (92). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (99). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -20,6 +20,14 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
+| 2 | **STEP 93** | `/goal` | `allowed_statuses`, `requires_feedback`, `protocol_contract`, `build_agent_system_prompt` | `crates/orrery-core/src/checkpoint.rs`, `crates/orrery-core/src/llm.rs` | — |
+| 3 | **STEP 94** | `/goal` | Engine sends the contract in every system prompt | `crates/orrery-core/src/engine.rs` | STEP 93 |
+| 4 | **STEP 95** | `/goal` | `RoleConfig.skills` + validation | `crates/orrery-core/src/config.rs` (+ one-line literal fixes in 10 files) | STEP 94 |
+| 5 | **STEP 96** | `/goal` | `load_skill`, `compose_role_rules`, skills in `build_engine` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | STEP 95 |
+| 6 | **STEP 97** | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 96 |
+| 7 | **STEP 98** | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` | STEP 97 |
+| 8 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
+| 9 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
 
 ### Completed
 
@@ -4907,6 +4915,419 @@ Report back: pass/fail for 2–4, plus `git log --oneline -3` from the scratch r
 
 ### Parked (Phase L)
 
+All three picked for Phase M (2026-11-18): items 1 → Step 98, 2 → Step 97, 3 → Step 97.
+
 - `crates/orrery-core/src/config.rs:1376` — `#[rustfmt::skip]` on `validate_tool_args` exists only so Step 88's POST_GATE grep could match the signature on one line (planning error: the signature is 129 chars). — Remove the attribute and run `cargo fmt --all`; Steps 89–90 markers no longer grep full signatures.
 - `crates/orrery-cli/src/args.rs:390` — comment `// Args { tool: String, json: String }` exists only so Step 90's POST_GATE grep matched (rustfmt splits the variant over lines; planning error). — Delete the comment.
 - `crates/orrery-cli/src/commands.rs` (`dispatch_run`) — `orrery run` exits 0 with no output when the current step is already `AwaitingOperator` (seen in NEB-1). — Print `awaiting operator: <reason>; run orrery approve or orrery reject` before returning.
+
+---
+
+## Phase M — role protocol, skills and parked fixes (Steps 93–99, User Step LIVE-3)
+
+**Phase goal (frozen until the phase ends):** every agent's system prompt carries Orrery's report protocol, generated from the code that enforces it; `init` writes role rules that describe scope and behavior; roles can pull in named markdown skills from `.orrery/skills/` (or the global catalog); and the three Phase L parked items are fixed. Done when User Step LIVE-3 passes a one-step plan on the local Qwen3.8-27B from a fresh `orrery init` with no hand-edited rules. Design: spec §9.18 (`ORRERY_TECHNICAL_SPECIFICATION.md:1474-1517`).
+
+Written 2026-11-18 against `71e9b6a`. Facts checked while planning:
+- An agent's system prompt today is `# Role: <name>`, the rules file and one reporting line (`llm.rs:52-72`). Nothing tells it its allowed statuses, the `Dispatch` fields or the pass rule; those live only in `checkpoint.rs:50-152`. In NEB-1 the 27B failed until hand-written rules spelled them out, then passed first try twice.
+- Skills are `.md` fragments (operator choice, 2026-11-18), not MCP prompts.
+- Adding `RoleConfig.skills` breaks 48 `RoleConfig { .. }` literals in 11 files. Step 95 is that mechanical change alone.
+- `orrery run` returns exit 3 on `RunOutcome::AwaitingOperator` but prints nothing (`commands.rs:841-845`); hit three times in NEB-1.
+
+### STEP 93: Protocol Contract Text from the Enforcing Code
+
+* **Recommended Command:** `/goal`
+
+Scope note: two files, pure functions only. Nothing calls the new prompt builder until Step 94.
+
+```text
+[STEP_ID]
+STEP 93: checkpoint.rs exposes allowed_statuses / requires_feedback (validate_for_role uses them), and llm.rs gains protocol_contract and build_agent_system_prompt
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/checkpoint.rs
+  - crates/orrery-core/src/llm.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1477-1491 (§9.18.1; binding, including the exact contract text)
+  - crates/orrery-core/src/checkpoint.rs:12 (`MAX_SUMMARY_BYTES`), 14-23 (`ReportStatus`), 50-152 (`validate_for_role`)
+  - crates/orrery-core/src/llm.rs:12-16 (imports), 52-72 (`build_system_prompt`), 1277 (`sample_local_agent`), 1485-1525 (system prompt tests)
+  - crates/orrery-core/src/config.rs (`RoleKind`, `ValidationMode`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `validate_for_role`'s accepted reports and every error message stay exactly as they are. `build_system_prompt` keeps its signature and output.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1477p $S | grep -q '^#### 9.18.1 ' && ! grep -q 'fn allowed_statuses' crates/orrery-core/src/checkpoint.rs && ! grep -q 'fn protocol_contract' crates/orrery-core/src/llm.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. checkpoint.rs, above `impl AgentReport`: `pub fn allowed_statuses(kind: RoleKind) -> &'static [ReportStatus]` and `pub fn requires_feedback(status: ReportStatus) -> bool`, per §9.18.1.
+2. checkpoint.rs `validate_for_role`: the status check becomes `let allowed = allowed_statuses(role.kind).contains(&self.status);`; the feedback check becomes `if requires_feedback(self.status) && self.feedback...`. Same messages.
+3. llm.rs: `pub fn protocol_contract(kind: RoleKind, stage_index: usize, stage_count: usize, mode: ValidationMode) -> String`, producing §9.18.1's text line for line (lines joined with `\n`, one blank line after the heading). Build the status list from `allowed_statuses(kind)` and the feedback lines from `requires_feedback`, never from literals, so the text can't drift from the checks. `GateAndOperator` gets rule list 9; every other mode gets list 10.
+4. llm.rs: `pub fn build_agent_system_prompt(role: &RoleConfig, rules_markdown: &str, backend: &AgentBackend, stage_index: usize, stage_count: usize, mode: ValidationMode) -> String` per §9.18.1.
+5. llm.rs imports: add `allowed_statuses`, `requires_feedback`, `MAX_SUMMARY_BYTES`, `ReportStatus` from `crate::checkpoint` and `ValidationMode` from `crate::config`, as needed.
+6. Tests, checkpoint.rs `mod tests`:
+   - `allowed_statuses_match_role_kinds`: the three slices equal §9.18.1's lists; `requires_feedback` is true for exactly `Denied`, `Blocked`, `Escalate` (loop over all 7 variants).
+7. Tests, llm.rs `mod tests`:
+   - `contract_lists_orchestrator_statuses_and_dispatch_rules`: `protocol_contract(RoleKind::Orchestrator, 0, 3, ValidationMode::Agents)` starts with `"# Orrery protocol\n\n"`, contains ``"Allowed statuses: `Dispatch`, `StepPassed`, `Escalate`."``, ``"`Escalate` requires `feedback` saying why."``, `"Stages run from 0 to 2."`, `"It never means the work has happened."`, and ``"no Implementer stage ran after it → `StepPassed`."``.
+   - `contract_gate_mode_passes_without_validator`: same call with `ValidationMode::GateAndOperator` contains `"Orrery then runs the gate tools and asks the operator."` and does not contain `` "`Denied`" ``.
+   - `contract_for_implementer_and_validator`: Implementer at stage 1 of 3 contains ``"Allowed statuses: `Complete`, `Blocked`."``, ``"`Blocked` requires `feedback`"``, ``"Never include `target_stage` or `allocations`."``, and does not contain `"Decide with the first rule"`. Validator at stage 2 contains ``"Allowed statuses: `Confirmed`, `Denied`."``.
+   - `agent_system_prompt_puts_contract_before_rules`: `build_agent_system_prompt(&role, "Write clean Rust.", &sample_local_agent("coder-1").backend, 1, 3, ValidationMode::Agents)` for an Implementer role: the index of `"# Orrery protocol"` is less than the index of `"Write clean Rust."`, and it still contains `"submit_report"`. With rules `"   "`, the output contains no `"\n\n\n"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn allowed_statuses(' crates/orrery-core/src/checkpoint.rs && grep -q 'pub fn requires_feedback(' crates/orrery-core/src/checkpoint.rs && grep -q 'pub fn protocol_contract(' crates/orrery-core/src/llm.rs && grep -q 'pub fn build_agent_system_prompt(' crates/orrery-core/src/llm.rs && grep -q 'allowed_statuses(role.kind)' crates/orrery-core/src/checkpoint.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(checkpoint::tests::allowed_statuses_match_role_kinds|llm::tests::(contract_lists_orchestrator_statuses_and_dispatch_rules|contract_gate_mode_passes_without_validator|contract_for_implementer_and_validator|agent_system_prompt_puts_contract_before_rules)): test$')" -eq 5
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 94: Engine Sends the Protocol Contract
+
+* **Recommended Command:** `/goal`
+
+Scope note: one file, two call sites.
+
+```text
+[STEP_ID]
+STEP 94: run_orchestrator_turn and run_stage_turn build system prompts with build_agent_system_prompt, so every agent gets the protocol contract
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1493-1494 (§9.18.2; binding)
+  - crates/orrery-core/src/engine.rs:1659-1690 (`run_orchestrator_turn`, `build_system_prompt` call), 1712-1785 (`run_stage_turn`, `build_system_prompt` call in the allocation loop)
+  - crates/orrery-core/src/config.rs (`ProjectConfig::effective_validation_mode(&self, roles: &[RoleConfig]) -> ValidationMode`)
+  - crates/orrery-core/src/llm.rs (`build_agent_system_prompt`, from Step 93; `MockAgentDriver::invocations()` at ~229)
+  - crates/orrery-core/src/engine.rs:2166 (`test_context`), 2283 (`attach_mock_driver`), 2358 (`script_passing_step`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. User prompts, tools, write scope and report handling don't change.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1493p $S | grep -q '^#### 9.18.2 ' && grep -q 'pub fn build_agent_system_prompt(' crates/orrery-core/src/llm.rs && ! grep -q 'build_agent_system_prompt' crates/orrery-core/src/engine.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. `run_orchestrator_turn`: replace `build_system_prompt(&role, rules, &agent.backend)` with `build_agent_system_prompt(&role, rules, &agent.backend, 0, self.ctx.project.stages.len(), self.ctx.project.effective_validation_mode(&self.ctx.roles))`.
+2. `run_stage_turn`: the same replacement in the allocation loop, with `stage_index` in place of `0`. Compute the mode once before the loop.
+3. Imports: add `build_agent_system_prompt` to the `crate::llm` import. Remove `build_system_prompt` from it only if nothing else in the non-test code uses it.
+4. Tests in engine.rs `mod tests`:
+   - `agents_receive_protocol_contract`: `test_context` with orch/imp/val, `attach_mock_driver`, `script_passing_step(&mock, "orch", "imp", "val")`, run → `RunOutcome::Completed { steps_passed: 1 }`. From `mock.invocations()`: the first one with `stage_index == 0` has a `system_prompt` containing ``"Allowed statuses: `Dispatch`, `StepPassed`, `Escalate`."``; the first with `stage_index == 1` contains ``"Allowed statuses: `Complete`, `Blocked`."``; the first with `stage_index == 2` contains ``"Allowed statuses: `Confirmed`, `Denied`."``. Every invocation's `system_prompt` contains `"# Orrery protocol"`.
+   - `orchestrator_contract_follows_validation_mode`: same setup but `ctx.project.validation_mode = ValidationMode::GateAndOperator`, with stages orch/imp only (no validator) and a script that passes in that mode (Dispatch to imp, imp Complete, orch StepPassed; the run then awaits the operator). The first orchestrator invocation's `system_prompt` contains `"Orrery then runs the gate tools and asks the operator."`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && test "$(grep -c 'build_agent_system_prompt(' crates/orrery-core/src/engine.rs)" -ge 2 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(agents_receive_protocol_contract|orchestrator_contract_follows_validation_mode): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 95: RoleConfig Skills Field
+
+* **Recommended Command:** `/goal`
+
+Scope note: eleven files, but only `config.rs` gets logic. Everywhere else is one added `skills: Vec::new(),` line per existing `RoleConfig { .. }` literal so the workspace compiles. Splitting it would leave a tree that doesn't build.
+
+```text
+[STEP_ID]
+STEP 95: RoleConfig gains skills (Vec<String>, default empty, omitted when empty); validate checks names and rejects duplicates
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+  - crates/orrery-core/src/checkpoint.rs (literals only)
+  - crates/orrery-core/src/engine.rs (literals only)
+  - crates/orrery-core/src/llm.rs (literals only)
+  - crates/orrery-core/src/mcp.rs (literals only)
+  - crates/orrery-core/tests/live_docker.rs (literals only)
+  - crates/orrery-core/tests/live_llm.rs (literals only)
+  - crates/orrery-cli/src/commands.rs (literals only)
+  - crates/orrery-tui/src/app.rs (literals only)
+  - crates/orrery-tui/src/bridge.rs (literals only)
+  - crates/orrery-tui/src/widgets.rs (literals only)
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1496-1498 (§9.18.3; binding)
+  - crates/orrery-core/src/config.rs:648-657 (`RoleConfig`), 702-721 (`RoleConfig::validate`), 1598-1616 (`validate_config_file_id`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other field or serde attribute changes. In the "(literals only)" files the only change is `skills: Vec::new(),` as the last field of each `RoleConfig { .. }` literal (`grep -rn 'RoleConfig {' crates`). No skill loading (Step 96), no CLI flag (Step 97).
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1496p $S | grep -q '^#### 9.18.3 ' && grep -q 'build_agent_system_prompt(' crates/orrery-core/src/engine.rs && ! grep -q 'pub skills: Vec<String>' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs `RoleConfig`: after `allowed_mcp_tools`, add `#[serde(default, skip_serializing_if = "Vec::is_empty")]` / `pub skills: Vec<String>,`.
+2. config.rs `RoleConfig::validate`: after the `allowed_mcp_tools` loop, for `(idx, name)` in `self.skills`: `validate_config_file_id(name, &format!("skills[{idx}]"))?;` and if `self.skills[..idx].contains(name)` → `Err(Error::Validation { field: format!("skills[{idx}]"), message: format!("duplicate skill '{name}'") })`.
+3. Every `RoleConfig { .. }` literal in the 11 files: add `skills: Vec::new(),` as the last field. This includes the 3 in `default_roles_with_rules`.
+4. Tests in config.rs `mod tests`:
+   - `role_skills_default_empty_and_omitted`: `toml::from_str::<RoleConfig>("role_id = \"coder\"\ndisplay_name = \"Coder\"\nkind = \"Implementer\"\nrules_file = \"coder.md\"\n")` → `skills.is_empty()`; `toml::to_string(&role)` does not contain `"skills"`.
+   - `role_skills_round_trip_and_validate`: a role with `skills: vec!["rust-style".to_string(), "neb-tracker".to_string()]` validates `Ok`, and survives `toml::to_string` → `toml::from_str` unchanged.
+   - `role_skills_reject_bad_names`: `skills: vec!["../x".to_string()]` → `Err(Error::PathTraversal { .. })`; `vec!["a".to_string(), "a".to_string()]` → `Err(Error::Validation { field, message })` with `field == "skills[1]"` and `message == "duplicate skill 'a'"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --locked --features live-backends -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub skills: Vec<String>' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(role_skills_default_empty_and_omitted|role_skills_round_trip_and_validate|role_skills_reject_bad_names): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 96: Skill Files Load into Role Rules
+
+* **Recommended Command:** `/goal`
+
+Scope note: two files. `config.rs` finds and reads a skill; `engine.rs` appends skills to each role's rules when the engine is built.
+
+```text
+[STEP_ID]
+STEP 96: ConfigStore::load_skill reads .orrery/skills/<name>.md (project over global), and build_engine appends each role's skills to its rules via compose_role_rules
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1500-1504 (§9.18.4; binding)
+  - crates/orrery-core/src/config.rs:1598-1616 (`validate_config_file_id`), 1676 (`ConfigStore::new(project_root, xdg_override)`), 1713-1725 (`global_dir`), 1801-1842 (`load_role_rules`: project-then-global pattern to copy), 1845-1860 (`save_role`)
+  - crates/orrery-core/src/engine.rs:1982-1990 (`build_engine` role_rules loop), 5391 (`init_project_with_agents`), 5463-5481 (`build_engine_from_initialized_project`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `load_role_rules` doesn't change. A role with no skills gets exactly its rules text, as today.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1500p $S | grep -q '^#### 9.18.4 ' && grep -q 'pub skills: Vec<String>' crates/orrery-core/src/config.rs && ! grep -q 'fn load_skill' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs `impl ConfigStore`, after `load_role_rules`: `pub fn load_skill(&self, name: &str) -> Result<String>` per §9.18.4. Project path `self.orrery_dir().join("skills").join(format!("{name}.md"))`; global path `global_dir.join("skills").join(format!("{name}.md"))`. Read with `fs::read_to_string`, mapping errors other than not-found to `Error::Io { path, source }`.
+2. engine.rs, next to `merge_tool_args`: `pub fn compose_role_rules(rules_markdown: &str, skills: &[(String, String)]) -> String` per §9.18.4.
+3. engine.rs `build_engine`: in the role loop, `let skills = role.skills.iter().map(|name| Ok((name.clone(), store.load_skill(name)?))).collect::<Result<Vec<_>>>()?;` then `role_rules.insert(role.role_id.clone(), compose_role_rules(&rules, &skills));`.
+4. Tests in config.rs `mod tests`:
+   - `load_skill_project_overrides_global`: `TempDir` project and `TempDir` global, with `ConfigStore::new(project, Some(global_dir_path))` set up so `global_dir()` returns `<global>/orrery` (create that dir). Write `<global>/orrery/skills/style.md` = `"global style"` and `<global>/orrery/skills/only-global.md` = `"g"`; write `<project>/.orrery/skills/style.md` = `"project style"`. `load_skill("style") == "project style"`; `load_skill("only-global") == "g"`.
+   - `load_skill_missing_or_bad_name`: `load_skill("nope")` → `Err(Error::Validation { field, message })` with `field == "skills"` and `message.contains("skill 'nope' not found")`; `load_skill("../x")` → `Err(Error::PathTraversal { .. })`.
+5. Tests in engine.rs `mod tests`:
+   - `compose_role_rules_appends_skills`: `compose_role_rules("Rules.", &[("a".into(), "  Body A\n".into()), ("b".into(), "Body B".into())]) == "Rules.\n\n# Skill: a\n\nBody A\n\n# Skill: b\n\nBody B"`; with no skills it returns `"Rules."` unchanged.
+   - `build_engine_includes_role_skills`: `init_project_with_agents(dir.path(), true)`; write `.orrery/skills/house-style.md` = `"Keep functions short."`; load the `coder` role with `store.load_roles()`, set `skills = vec!["house-style".into()]`, and save it with `store.save_role(&role, &store.load_role_rules("coder").unwrap())`. `build_engine` → `engine.ctx.role_rules["coder"]` contains `"# Skill: house-style\n\nKeep functions short."`. Then set the skill to `"missing"`, save, and `build_engine` → `Err(Error::Validation { .. })`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn load_skill(' crates/orrery-core/src/config.rs && grep -q 'pub fn compose_role_rules(' crates/orrery-core/src/engine.rs && grep -q 'store.load_skill(' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(config::tests::(load_skill_project_overrides_global|load_skill_missing_or_bad_name)|engine::tests::(compose_role_rules_appends_skills|build_engine_includes_role_skills)): test$')" -eq 4
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 97: CLI role add --skill and the Awaiting-Operator Message
+
+* **Recommended Command:** `/goal`
+
+Scope note: two files. Also removes the Phase L parked comment at `args.rs:390`.
+
+```text
+[STEP_ID]
+STEP 97: orrery role add takes --skill <NAME> (repeatable); run/resume print the awaiting-operator reason and next commands; the stray Args comment is removed
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1506-1509 (§9.18.5; binding)
+  - crates/orrery-cli/src/args.rs:323-335 (`RoleCmd::Add`), 390 (`// Args { tool: String, json: String }`), 455-650 (`every_spec_row_parses`; `role add` row at ~568-584)
+  - crates/orrery-cli/src/commands.rs:553-575 (`dispatch_role` `RoleCmd::Add`), 779-845 (`dispatch_run`: `engine.redact`, the final `match outcome`), 1069-1080 (`test_ctx`), 1049 (`SharedVec::as_string`), 2509 (`role_add_reads_rules_file`), 2959 (`escalate_report`), 2978 (`setup_runnable_project`, returns `(ctx, out, err)`), 3161-3200 (`escalation_exits_3_then_approve_resume_completes`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Exit codes don't change. Only the `AwaitingOperator` arm prints; other outcomes stay silent.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1506p $S | grep -q '^#### 9.18.5 ' && grep -q 'pub fn load_skill(' crates/orrery-core/src/config.rs && grep -q '// Args { tool: String, json: String }' crates/orrery-cli/src/args.rs && ! grep -q 'Awaiting operator for step' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs `RoleCmd::Add`: after `allow_tools`, add `#[arg(long = "skill")] skills: Vec<String>,`.
+2. args.rs: delete the line `// Args { tool: String, json: String }`.
+3. args.rs `every_spec_row_parses`: append `"--skill", "house-style"` to the existing `role add` row.
+4. commands.rs `dispatch_role` `RoleCmd::Add`: destructure `skills` and set `skills` in the `RoleConfig` literal (replacing Step 95's `skills: Vec::new()` there). `save_role` validates it.
+5. commands.rs `dispatch_run`: the `RunOutcome::AwaitingOperator { step_number, reason }` arm writes, with `write_stdout_line`, `format!("Awaiting operator for step {step_number}: {}", engine.redact(&reason))` and then `"Run 'orrery approve' or 'orrery reject --feedback <TEXT>', then 'orrery resume'."`, then returns `Ok(3)`. If `resume` uses a separate function with its own outcome match, apply the same there.
+6. Existing test literals of `RoleCmd::Add { .. }` get `skills: Vec::new()`.
+7. Tests in commands.rs `mod tests`:
+   - `role_add_with_skills_saves_them`: copy `role_add_reads_rules_file`'s setup, add `skills: vec!["house-style".to_string()]` → the loaded role's `skills == vec!["house-style"]`. Then a second add with `skills: vec!["../x".to_string()]` → `Err(Error::PathTraversal { .. })`.
+   - `awaiting_operator_run_prints_reason_and_next_steps`: as `escalation_exits_3_then_approve_resume_completes`, keep the `out` handle from `setup_runnable_project`. First `Command::Run` → code 3, and `out.as_string()` contains `"Awaiting operator for step 1: "` and `"Run 'orrery approve' or 'orrery reject --feedback <TEXT>', then 'orrery resume'."`. `out.clear()`, run again (still awaiting) → code 3, and `out.as_string()` again contains `"Awaiting operator for step 1: "`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q '// Args { tool: String, json: String }' crates/orrery-cli/src/args.rs && grep -q 'Awaiting operator for step' crates/orrery-cli/src/commands.rs && grep -q 'long = "skill"' crates/orrery-cli/src/args.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(role_add_with_skills_saves_them|awaiting_operator_run_prints_reason_and_next_steps): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 98: Default Role Rules Describe Behavior
+
+* **Recommended Command:** `/goal`
+
+Scope note: one file. The text comes from the NEB-1 scratch rules that worked, minus everything the generated contract now covers. Also removes the Phase L parked `#[rustfmt::skip]`.
+
+```text
+[STEP_ID]
+STEP 98: orrery init writes orchestrator, coder and validator rules that describe scope and behavior (no protocol), and validate_tool_args loses its #[rustfmt::skip]
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1511-1513 (§9.18.6; binding)
+  - crates/orrery-core/src/config.rs:1376 (`#[rustfmt::skip]` above `validate_tool_args`), 1736 (`init_project`), 2375-2410 (`default_roles_with_rules`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Role ids, names, kinds, rules file names and empty tool lists stay as they are. `validate_tool_args` changes only by losing the attribute and being reformatted.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1511p $S | grep -q '^#### 9.18.6 ' && grep -q 'Awaiting operator for step' crates/orrery-cli/src/commands.rs && grep -q 'Coordinate stage execution' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs: delete `#[rustfmt::skip]` above `validate_tool_args`; `cargo fmt --all` wraps the signature.
+2. config.rs `default_roles_with_rules`: replace the three rules strings with exactly this text (each ends with one `\n`; a raw string or `concat!` is a free choice):
+   Orchestrator:
+     # Orchestrator Role Rules
+     (blank)
+     You coordinate the stages. You never do the work yourself.
+     (blank)
+     - Give each allocation clear, self-contained instructions: what to do, which files or areas, and what "done" looks like.
+     - Keep each allocation to one concern. Split bigger work across allocations or rounds.
+     - When a Validator reports `Denied`, pass its feedback on word for word.
+     - If you can't tell what the plan step wants, `Escalate` and say what is unclear. Don't guess.
+   Coder:
+     # Implementation Role Rules
+     (blank)
+     You do only what "# Your assignment" says, inside its write scope.
+     (blank)
+     - Don't fix, improve or reformat anything you weren't asked to change.
+     - If the assignment says no files change, change nothing.
+     - If you need a tool you don't have, or the assignment is unclear, report `Blocked` and say what you need. Don't guess.
+     - Your summary says what you changed, or that you changed nothing.
+   Validator:
+     # Validator Role Rules
+     (blank)
+     You check the Implementer's work against the plan step. You never change anything.
+     (blank)
+     - Compare the plan step and "# Your assignment" with the Implementer's latest report in "# Prior reports", and with whatever your tools let you inspect.
+     - Confirm only what you can check. When the plan step changes no files, the Implementer's report that it changed nothing is enough.
+     - If the Implementer's report is missing, `Blocked`, or contradicts the plan step, report `Denied`.
+     - Your feedback names exactly what is wrong, so the Implementer can fix it.
+3. Test in config.rs `mod tests`, `default_role_rules_describe_behavior_only`: for each `(role, text)` in `default_roles_with_rules()`: `text` does not contain `"Allowed statuses"` or `"target_stage"`, and ends with `"\n"`. The orchestrator text contains `"You never do the work yourself."`, the coder text `"Don't guess."`, the validator text `"You never change anything."`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -q 'rustfmt::skip' crates/orrery-core/src/config.rs && ! grep -q 'Coordinate stage execution' crates/orrery-core/src/config.rs && grep -q 'You never do the work yourself.' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::default_role_rules_describe_behavior_only: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 99: README Roles, Protocol and Skills
+
+* **Recommended Command:** `/goal`
+
+Scope note: docs only. States only what Steps 93–98 built.
+
+```text
+[STEP_ID]
+STEP 99: the README explains the generated protocol section, what role rules are for, skills, role add --skill and the awaiting-operator message
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1474-1517 (§9.18; binding)
+  - README.md:98-124 (`## Project layout`: tree and bullets), 125-145 (`### Hook and gate arguments`: the new section goes directly after it)
+  - crates/orrery-core/src/config.rs (`default_roles_with_rules`, from Step 98)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other section changes.
+
+[PRE_GATE]
+grep -q 'You never do the work yourself.' crates/orrery-core/src/config.rs && grep -q '^### Hook and gate arguments' README.md && ! grep -q '^### Roles, protocol and skills' README.md
+
+[MUTATION_SPEC]
+1. Project layout tree: add `├── skills/<name>.md` under `<project_root>/.orrery/` (after `roles/`) and under `~/.config/orrery/` (after `roles/`).
+2. The `roles/<role_id>.toml` bullet: add "and optional `skills` (skill names)".
+3. New `### Roles, protocol and skills` directly after the "Hook and gate arguments" section:
+   - One sentence: every agent's system prompt starts with an "Orrery protocol" section that Orrery generates from its report checks (allowed statuses for the role, required fields, and for the orchestrator the dispatch and pass rules), so rules files never repeat it.
+   - One sentence: the rules file (`roles/<role_id>.md`) holds the role's scope and behavior; `orrery init` writes starting rules for the orchestrator, coder and validator.
+   - One sentence: a skill is a markdown file `skills/<name>.md` (project, or the global catalog; project wins); a role lists skills by name, and each is appended to its rules under `# Skill: <name>`. A missing skill fails the run before any agent starts.
+   - A `toml` block: a role TOML with `skills = ["house-style"]`; a `bash` block: `orrery role add --id reviewer --name Reviewer --kind validator --rules-file reviewer.md --skill house-style`.
+4. Quickstart step 8's comment, or one line below its block: when a step waits for an operator, `orrery run` and `orrery resume` print the reason and the next commands, and exit with code 3.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && grep -q '^### Roles, protocol and skills' README.md && grep -q 'skills/<name>.md' README.md && grep -q -- '--skill house-style' README.md && grep -q 'Orrery protocol' README.md
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### User Step: LIVE-3
+
+After Step 99 is committed. Proves the generated protocol plus the new default rules are enough for a local model, with no hand-written rules. Needs `llama-qwen38-27b` running on 8085 and `neb` from Nebulous `bc00dd3` or later.
+
+1. Reinstall Orrery from this repo:
+
+   ```bash
+   cargo install --path /srv/devshare/Orrery/crates/orrery-cli --locked
+   ```
+
+2. Fresh scratch repo, set up with defaults only:
+
+   ```bash
+   mkdir -p ~/scratch/orrery-live3 && cd ~/scratch/orrery-live3 && git init && neb init && neb project switch ~/scratch/orrery-live3
+   ```
+
+   ```bash
+   orrery init --name orrery-live3 && orrery inference add --id local --endpoint http://127.0.0.1:8085
+   ```
+
+   ```bash
+   orrery agent add-local-model --id local-agent --name "Local Agent" --inference local --model qwen3.8-27b
+   ```
+
+   ```bash
+   orrery workflow assign 0 local-agent && orrery workflow assign 1 local-agent && orrery workflow assign 2 local-agent
+   ```
+
+   ```bash
+   printf '## Step 1: Acknowledge\n\nThis step changes no files.\n' > PLAN.md && orrery ingest PLAN.md --marker "## Step "
+   ```
+
+   ```bash
+   orrery mcp add-stdio --id neb --command neb --arg mcp && orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass","dry_run":false}'
+   ```
+
+3. Don't edit anything under `.orrery/roles/`. Run:
+
+   ```bash
+   neb task "live3 check" && orrery run
+   ```
+
+   ```bash
+   orrery status && git log -1 --stat
+   ```
+
+   Expect: step 1 `Passed`; the last commit is `orrery step pass` and touches only `.tracker/`.
+
+4. Skill check: add a skill to the validator, reset, run, and check the skill reached the prompt (the reasoning stream quotes it, or `orrery logs` shows it):
+
+   ```bash
+   mkdir -p .orrery/skills && printf 'Start every summary with the word LIVE3.\n' > .orrery/skills/live3-mark.md
+   ```
+
+   Add `skills = ["live3-mark"]` to `.orrery/roles/validator.toml`, then:
+
+   ```bash
+   orrery reset --step 1 && orrery run
+   ```
+
+   Expect: the validator's `Confirmed` summary starts with `LIVE3`.
+
+Report back: pass/fail for 3 and 4, plus `orrery status`.
+
+### Parked (Phase M)

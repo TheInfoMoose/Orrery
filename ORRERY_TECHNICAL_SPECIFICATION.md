@@ -1470,3 +1470,48 @@ Hooks and gates can send fixed arguments next to the `orrery` object, so a tool 
 - `tests/live_mcp.rs::live_stdio_call_with_merged_args`: connects to `ORRERY_LIVE_MCP_CMD`, calls `ORRERY_LIVE_MCP_TOOL` with `merge_tool_args(<ORRERY_LIVE_MCP_ARGS, default {}>, <placeholder orrery object>)`, asserts the result is not `isError`.
 - README documents hook/gate `args`, the reserved `orrery` key, and the two new env vars.
 - Acceptance (User Step NEB-1): `on_step_pass` = `neb:git_commit_documented` with args `{"summary": "orrery step pass", "dry_run": false}` commits `.tracker/`; with `dry_run` omitted it does not.
+
+### 9.18 Phase M: role protocol, skills and parked fixes (Steps 93–99, User Step LIVE-3)
+NEB-1 showed a local model (Qwen3.8-27B) follows Orrery's report protocol only when the protocol is written into its prompt, and it fails it when it's left to learn from rejections. The protocol is Orrery's, enforced in `checkpoint.rs`, so Orrery writes it into every agent's system prompt from the same code. Role rules files keep the project's scope and behavior; skills are reusable markdown fragments a role pulls in by name.
+
+#### 9.18.1 Protocol source of truth (Step 93) (adds to §5.6, §9.3)
+- checkpoint.rs: `pub fn allowed_statuses(kind: RoleKind) -> &'static [ReportStatus]` → Orchestrator `[Dispatch, StepPassed, Escalate]`, Implementer `[Complete, Blocked]`, Validator `[Confirmed, Denied]`. `pub fn requires_feedback(status: ReportStatus) -> bool` → true for `Denied`, `Blocked`, `Escalate`. `AgentReport::validate_for_role` uses both; its behavior and error messages are unchanged.
+- llm.rs: `pub fn protocol_contract(kind: RoleKind, stage_index: usize, stage_count: usize, mode: ValidationMode) -> String`. Pure. Text, in order (`{..}` filled in; statuses in `allowed_statuses` order, each in backticks, joined with `, `):
+  1. `# Orrery protocol`
+  2. `Orrery enforces these rules. A report that breaks them is rejected.`
+  3. `You are stage {stage_index} ({kind:?}). Stages run from 0 to {stage_count - 1}.`
+  4. `Allowed statuses: {statuses}. Any other status is rejected.`
+  5. `` `summary` is required: one or two sentences, at most {MAX_SUMMARY_BYTES} bytes. ``
+  6. For each allowed status where `requires_feedback`: `` `{status:?}` requires `feedback` saying why. ``
+  7. Not Orchestrator: `` Never include `target_stage` or `allocations`. `` Contract ends.
+  8. Orchestrator: `` `Dispatch` requires `target_stage` and at least one entry in `allocations`. Each entry needs `target_agent_id` (from "# Stages") and `instructions`. `` / `` Any other status must leave out `target_stage` and `allocations`. `` / `` `target_stage` is the stage right after the last stage that ran in this step (stage 1 if none has run), or an earlier non-Validator stage to retry it. `` / `The plan step says what work to do. It never means the work has happened. Only "# Prior reports" says what has happened.` / `Decide with the first rule that matches "# Prior reports":`
+  9. Orchestrator, `mode == GateAndOperator`: `` 1. The latest Implementer report is `Blocked` → `Escalate`, with its feedback. `` / `` 2. Every Implementer stage has reported `Complete` since its last dispatch → `StepPassed`. Orrery then runs the gate tools and asks the operator. `` / `` 3. Otherwise → `Dispatch` to the next stage in order. ``
+  10. Orchestrator, any other mode: `` 1. The latest Implementer report is `Blocked` → `Escalate`, with its feedback. `` / `` 2. The latest Validator report is `Denied` → `Dispatch` back to the Implementer stage, with the validator's feedback in `instructions`. `` / `` 3. The latest Validator stage reported `Confirmed` from every validator agent, and no Implementer stage ran after it → `StepPassed`. `` / `` 4. Otherwise → `Dispatch` to the next stage in order. ``
+  Lines are joined with `\n`; a blank line follows line 1.
+- llm.rs: `pub fn build_agent_system_prompt(role: &RoleConfig, rules_markdown: &str, backend: &AgentBackend, stage_index: usize, stage_count: usize, mode: ValidationMode) -> String` = `build_system_prompt(role, <body>, backend)` where `<body>` is the contract, then `\n\n` and `rules_markdown` when `rules_markdown.trim()` is not empty. `build_system_prompt` is unchanged.
+
+#### 9.18.2 Engine sends the contract (Step 94) (overrides §9.8 system prompt)
+- `run_orchestrator_turn` and `run_stage_turn` call `build_agent_system_prompt` with the stage index, `self.ctx.project.stages.len()` and `self.ctx.project.effective_validation_mode(&self.ctx.roles)`.
+
+#### 9.18.3 Role skills field (Step 95) (adds to §5.2 `RoleConfig`)
+- `RoleConfig` gains, after `allowed_mcp_tools`: `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub skills: Vec<String>`. Existing role TOML loads unchanged.
+- `RoleConfig::validate`: each entry passes `validate_config_file_id(name, "skills[<idx>]")`; a repeated name → `Error::Validation { field: "skills[<idx>]", message: "duplicate skill '<name>'" }`.
+
+#### 9.18.4 Skill files (Step 96) (adds to §5.2 layout, §9.8 `build_engine`)
+- A skill is `<name>.md` in `.orrery/skills/` (project) or `<global_dir>/skills/` (global catalog). Project wins by name, like roles.
+- `ConfigStore::load_skill(&self, name: &str) -> Result<String>`: `validate_config_file_id(name, "skill")?`, then project file, then global file; neither → `Error::Validation { field: "skills", message: "skill '<name>' not found in .orrery/skills/ or the global skills directory" }`.
+- `pub fn compose_role_rules(rules_markdown: &str, skills: &[(String, String)]) -> String` (engine.rs): `rules_markdown`, then for each `(name, body)`: `\n\n# Skill: {name}\n\n{body.trim()}`. Pure.
+- `build_engine`: `role_rules[role_id] = compose_role_rules(&rules, &<(name, load_skill(name)?) for each role.skills>)`.
+
+#### 9.18.5 CLI (Step 97) (adds to §7, §9.10)
+- `orrery role add ... [--skill <NAME>]...` sets `RoleConfig.skills`.
+- `orrery run` / `resume` ending in `RunOutcome::AwaitingOperator { step_number, reason }` print to stdout `Awaiting operator for step {step_number}: {redacted reason}` and `Run 'orrery approve' or 'orrery reject --feedback <TEXT>', then 'orrery resume'.` before returning exit code 3. The reason goes through `engine.redact`.
+- Removes the `// Args { tool: String, json: String }` comment in `args.rs` (Phase L parked).
+
+#### 9.18.6 Default role rules (Step 98) (overrides the `default_roles_with_rules` text)
+- The three `init` rules files describe scope and behavior only; the protocol comes from §9.18.1. Exact text is in Step 98's MUTATION_SPEC.
+- Removes `#[rustfmt::skip]` from `validate_tool_args` (Phase L parked).
+
+#### 9.18.7 README and acceptance (Step 99, User Step LIVE-3)
+- README documents the generated protocol section, role rules, skills (`.orrery/skills/<name>.md`, `--skill`) and the awaiting-operator message.
+- Acceptance (User Step LIVE-3): a fresh `orrery init` project with no hand-edited rules passes a one-step plan on the local Qwen3.8-27B, and a role with a skill shows `# Skill: <name>` in its prompt.
