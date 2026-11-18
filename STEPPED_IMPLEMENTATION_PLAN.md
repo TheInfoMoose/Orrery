@@ -4835,7 +4835,47 @@ After Step 92 is committed. This is the phase's acceptance check. Use a scratch 
 
    Expect: passes; `git -C ~/scratch/orrery-neb log --oneline` shows no new commit.
 
-3. Hook, commit form. In the scratch project, with its Orrery stages already set up:
+3. Hook, commit form. Needs your llama.cpp server running; the hook fires only when a step passes, so this is a real (one-step) agent run.
+
+   a. Install Orrery from this repo. It lands in `~/.cargo/bin`, which is on your PATH:
+
+   ```bash
+   cargo install --path /srv/devshare/Orrery/crates/orrery-cli --locked
+   ```
+
+   ```bash
+   command -v orrery
+   ```
+
+   b. Set up Orrery in the scratch repo. `init` writes the default orchestrator, coder and validator roles. Put your server's URL and model ID in the two `<...>` spots:
+
+   ```bash
+   cd ~/scratch/orrery-neb && orrery init --name orrery-neb
+   ```
+
+   ```bash
+   orrery inference add --id local --endpoint <your llama.cpp URL>
+   ```
+
+   ```bash
+   orrery agent add-local-model --id local-agent --name "Local Agent" --inference local --model <model id>
+   ```
+
+   ```bash
+   orrery workflow assign 0 local-agent && orrery workflow assign 1 local-agent && orrery workflow assign 2 local-agent
+   ```
+
+   c. A one-step plan that changes no files, so a local model can pass it without write tools:
+
+   ```bash
+   printf '## Step 1: Acknowledge\n\nNo files change. The implementer reports Complete; the validator confirms.\n' > PLAN.md
+   ```
+
+   ```bash
+   orrery ingest PLAN.md --marker "## Step "
+   ```
+
+   d. Register neb and the hook:
 
    ```bash
    orrery mcp add-stdio --id neb --command neb --arg mcp
@@ -4845,9 +4885,23 @@ After Step 92 is committed. This is the phase's acceptance check. Use a scratch 
    orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass","dry_run":false}'
    ```
 
-   Make a `.tracker/` change with `neb task "orrery hook check 1"`, then `orrery run` one step to `Passed`. Expect: `git log -1 --stat` shows a commit titled from `orrery step pass` touching only `.tracker/`.
+   e. Make a `.tracker/` change, run one step, and look:
 
-4. Hook, no-commit form: `orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass"}'`, make another `.tracker/` change with `neb task "orrery hook check 2"`, pass another step. Expect: no new commit; the hook result in `orrery status` / the live log shows `"dry_run": true`.
+   ```bash
+   neb task "orrery hook check 1"
+   ```
+
+   ```bash
+   orrery run
+   ```
+
+   ```bash
+   git log -1 --stat
+   ```
+
+   Expect: `orrery run` ends with the step `Passed`, and the last commit is from `orrery step pass` and touches only `.tracker/`. If the hook fails, `on_failure = "Halt"` leaves the step awaiting the operator, and `orrery logs --tail 50` shows the tool's error.
+
+4. Hook, no-commit form: `orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass"}'`, then `orrery reset --step 1`, `neb task "orrery hook check 2"` and `orrery run` again. Expect: no new commit; the hook result in `orrery status` / the live log shows `"dry_run": true`.
 
 Report back: pass/fail for 2–4, plus `git log --oneline -3` from the scratch repo.
 
