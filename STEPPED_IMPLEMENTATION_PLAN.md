@@ -20,7 +20,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
 
 ### Completed
 
@@ -119,6 +118,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 90** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 91** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` |
 | **STEP 92** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | README hook/gate args and live env vars | `README.md` |
+| **[USER] NEB-1** | **COMPLETED** (2026-11-18, operator run) | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo: `dry_run: false` committed `.tracker/` only; `dry_run` omitted → no commit, hook reported `"dry_run": true`. Model: Qwen3.8-27B IQ3_XXS with written role rules. |
 
 ---
 
