@@ -20,11 +20,10 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **STEP 89** | `/goal` | `merge_tool_args`; hooks and gates send merged args | `crates/orrery-core/src/engine.rs` | STEP 88 |
-| 3 | **STEP 90** | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 89 |
-| 4 | **STEP 91** | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` | STEP 89 |
-| 5 | **STEP 92** | `/goal` | README hook/gate args and live env vars | `README.md` | STEPs 90, 91 |
-| 6 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
+| 2 | **STEP 90** | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 89 |
+| 3 | **STEP 91** | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` | STEP 89 |
+| 4 | **STEP 92** | `/goal` | README hook/gate args and live env vars | `README.md` | STEPs 90, 91 |
+| 5 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
 
 ### Completed
 
@@ -119,6 +118,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 86** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) |
 | **STEP 87** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | README CI section | `README.md` |
 | **STEP 88** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `HookConfig.args`, `ProjectConfig.gate_args`, `validate_tool_args` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-tui/src/widgets.rs` |
+| **STEP 89** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `merge_tool_args`; hooks and gates send merged args | `crates/orrery-core/src/engine.rs` |
 
 ---
 
