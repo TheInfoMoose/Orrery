@@ -115,12 +115,33 @@ In the `Ingest` modal, `Tab` / `BackTab` switches between the plan path input an
 └── logs/live_stream.log, .log.1, .log.2
 ```
 
-- `project.toml`: Workflow stages, `plan_path`, `step_marker`, `execution_mode` (`Run` or `Loop`), `validation_mode` (`Auto`, `Agents`, or `GateAndOperator`), `gate_tools`, `[hooks]`, `[[inference]]`, and optional `[limits]`.
+- `project.toml`: Workflow stages, `plan_path`, `step_marker`, `execution_mode` (`Run` or `Loop`), `validation_mode` (`Auto`, `Agents`, or `GateAndOperator`), `gate_tools` (with optional `[gate_args]`), `[hooks]` (each with optional `args`), `[[inference]]`, and optional `[limits]`.
 - `roles/<role_id>.toml` + `.md`: Role kind (`Orchestrator`, `Implementer`, or `Validator`), allowed MCP tools (`<server>:<tool>` or `<server>:*`), and Markdown system-prompt rules.
 - `agents/<agent_id>.toml`: Agent backend definition (`LocalModel`, `AgentCli`, or `CloudApi`).
 - `mcp/servers.toml`: Configured `Stdio` and `StreamableHttp` MCP servers and their `write_tools` path-argument definitions.
 - `checkpoints/`: Atomic workflow checkpoint (`workflow_state.toml`) and per-round stamped agent reports.
 - `logs/`: Redacted JSON-lines event logs rotated across `live_stream.log`, `live_stream.log.1`, and `live_stream.log.2`.
+
+### Hook and gate arguments
+
+Each hook and gate is called with its configured `args` merged with an `orrery` object (`project_name`, `run_id`, `step_number`, `step_title`, `plan_step_sha256`, `event`); `orrery` is a reserved key, and `args` cannot contain `null` (`neb:gate_run` below is an example gate tool name).
+
+```toml
+[hooks.on_step_pass]
+tool = "neb:git_commit_documented"
+on_failure = "Halt"
+args = { summary = "orrery step pass", dry_run = false }
+
+[gate_args."neb:gate_run"]
+profile = "ci"
+```
+
+```bash
+orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass","dry_run":false}'
+orrery gate args neb:gate_run '{"profile":"ci"}'
+```
+
+`orrery gate args <tool> '{}'` removes a gate's args; `gate set` drops args for tools no longer listed; `gate clear` clears them.
 
 ## Security
 
@@ -168,6 +189,7 @@ Required environment variables and keychain setup for the full suite:
 
 - `live_keyring`: Uses the OS keychain directly (service `orrery.test`, account `testuser`); requires an active D-Bus Secret Service session or kernel `keyutils`.
 - `ORRERY_LIVE_MCP_CMD`: Executable name or command for a stdio MCP server (`live_mcp`).
+- `ORRERY_LIVE_MCP_TOOL` and `ORRERY_LIVE_MCP_ARGS`: Tool name on that server and a JSON object of arguments (default `{}`), used by `live_stdio_call_with_merged_args` (`live_mcp`); the test adds the `orrery` object itself and asserts the result is not an error.
 - `ORRERY_LIVE_IMAGE`: Small container image with `/bin/sh`, such as `busybox:1.37` (`live_docker`).
 - `ORRERY_LIVE_CONTAINER`: Existing idle container (`orrery-live-test`) that Orrery starts and stops (`live_docker`).
 - `ORRERY_LIVE_LLM_URL` and `ORRERY_LIVE_LLM_MODEL`: OpenAI-compatible local server URL (e.g. `http://127.0.0.1:8080`) and model ID (`live_llm` and `live_engine`).
