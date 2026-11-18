@@ -9,10 +9,13 @@ use futures_util::StreamExt;
 use jiff::Timestamp;
 use serde::Deserialize;
 
-use crate::checkpoint::{AgentReport, StampedReport, SubtaskAllocation, report_json_schema};
+use crate::checkpoint::{
+    AgentReport, MAX_SUMMARY_BYTES, StampedReport, SubtaskAllocation, allowed_statuses,
+    report_json_schema, requires_feedback,
+};
 use crate::config::{
-    AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, WorkspaceMount, atomic_write,
-    format_mapped_tool_name,
+    AgentBackend, AgentConfig, InferenceConfig, RoleConfig, RoleKind, ValidationMode,
+    WorkspaceMount, atomic_write, format_mapped_tool_name,
 };
 use crate::docker::{
     ContainerBackend, ContainerSpec, EnvValue, agent_io_dir, cli_container_name, mounts_for,
@@ -71,6 +74,99 @@ pub fn build_system_prompt(
         "# Role: {}\n\n{}\n\n# Reporting\n{}",
         role.display_name, rules_markdown, reporting
     )
+}
+
+pub fn protocol_contract(
+    kind: RoleKind,
+    stage_index: usize,
+    stage_count: usize,
+    mode: ValidationMode,
+) -> String {
+    let statuses_slice = allowed_statuses(kind);
+    let statuses = statuses_slice
+        .iter()
+        .map(|s| format!("`{s:?}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut lines = vec![
+        "# Orrery protocol".to_string(),
+        String::new(),
+        "Orrery enforces these rules. A report that breaks them is rejected.".to_string(),
+        format!(
+            "You are stage {stage_index} ({kind:?}). Stages run from 0 to {}.",
+            stage_count.saturating_sub(1)
+        ),
+        format!("Allowed statuses: {statuses}. Any other status is rejected."),
+        format!("`summary` is required: one or two sentences, at most {MAX_SUMMARY_BYTES} bytes."),
+    ];
+
+    for status in statuses_slice {
+        if requires_feedback(*status) {
+            lines.push(format!("`{status:?}` requires `feedback` saying why."));
+        }
+    }
+
+    if kind != RoleKind::Orchestrator {
+        lines.push("Never include `target_stage` or `allocations`.".to_string());
+    } else {
+        lines.push(
+            "`Dispatch` requires `target_stage` and at least one entry in `allocations`. Each entry needs `target_agent_id` (from \"# Stages\") and `instructions`.".to_string(),
+        );
+        lines.push("Any other status must leave out `target_stage` and `allocations`.".to_string());
+        lines.push(
+            "`target_stage` is the stage right after the last stage that ran in this step (stage 1 if none has run), or an earlier non-Validator stage to retry it.".to_string(),
+        );
+        lines.push(
+            "The plan step says what work to do. It never means the work has happened. Only \"# Prior reports\" says what has happened.".to_string(),
+        );
+        lines.push("Decide with the first rule that matches \"# Prior reports\":".to_string());
+
+        if mode == ValidationMode::GateAndOperator {
+            lines.push(
+                "1. The latest Implementer report is `Blocked` → `Escalate`, with its feedback."
+                    .to_string(),
+            );
+            lines.push(
+                "2. Every Implementer stage has reported `Complete` since its last dispatch → `StepPassed`. Orrery then runs the gate tools and asks the operator."
+                    .to_string(),
+            );
+            lines.push("3. Otherwise → `Dispatch` to the next stage in order.".to_string());
+        } else {
+            lines.push(
+                "1. The latest Implementer report is `Blocked` → `Escalate`, with its feedback."
+                    .to_string(),
+            );
+            lines.push(
+                "2. The latest Validator report is `Denied` → `Dispatch` back to the Implementer stage, with the validator's feedback in `instructions`."
+                    .to_string(),
+            );
+            lines.push(
+                "3. The latest Validator stage reported `Confirmed` from every validator agent, and no Implementer stage ran after it → `StepPassed`."
+                    .to_string(),
+            );
+            lines.push("4. Otherwise → `Dispatch` to the next stage in order.".to_string());
+        }
+    }
+
+    lines.join("\n")
+}
+
+pub fn build_agent_system_prompt(
+    role: &RoleConfig,
+    rules_markdown: &str,
+    backend: &AgentBackend,
+    stage_index: usize,
+    stage_count: usize,
+    mode: ValidationMode,
+) -> String {
+    let contract = protocol_contract(role.kind, stage_index, stage_count, mode);
+    let body = if rules_markdown.trim().is_empty() {
+        contract
+    } else {
+        format!("{contract}\n\n{rules_markdown}")
+    };
+    build_system_prompt(role, &body, backend)
 }
 
 fn format_prior_reports_section(prior: &[StampedReport]) -> Option<String> {
@@ -3577,5 +3673,62 @@ mod tests {
             &calls[1],
             crate::docker::MockCall::RunToCompletion { name, .. } if name == &expected_name
         ));
+    }
+
+    #[test]
+    fn contract_lists_orchestrator_statuses_and_dispatch_rules() {
+        let text = protocol_contract(RoleKind::Orchestrator, 0, 3, ValidationMode::Agents);
+        assert!(text.starts_with("# Orrery protocol\n\n"));
+        assert!(text.contains("Allowed statuses: `Dispatch`, `StepPassed`, `Escalate`."));
+        assert!(text.contains("`Escalate` requires `feedback` saying why."));
+        assert!(text.contains("Stages run from 0 to 2."));
+        assert!(text.contains("It never means the work has happened."));
+        assert!(text.contains("no Implementer stage ran after it → `StepPassed`."));
+    }
+
+    #[test]
+    fn contract_gate_mode_passes_without_validator() {
+        let text = protocol_contract(
+            RoleKind::Orchestrator,
+            0,
+            3,
+            ValidationMode::GateAndOperator,
+        );
+        assert!(text.contains("Orrery then runs the gate tools and asks the operator."));
+        assert!(!text.contains("`Denied`"));
+    }
+
+    #[test]
+    fn contract_for_implementer_and_validator() {
+        let imp = protocol_contract(RoleKind::Implementer, 1, 3, ValidationMode::Agents);
+        assert!(imp.contains("Allowed statuses: `Complete`, `Blocked`."));
+        assert!(imp.contains("`Blocked` requires `feedback`"));
+        assert!(imp.contains("Never include `target_stage` or `allocations`."));
+        assert!(!imp.contains("Decide with the first rule"));
+
+        let val = protocol_contract(RoleKind::Validator, 2, 3, ValidationMode::Agents);
+        assert!(val.contains("Allowed statuses: `Confirmed`, `Denied`."));
+    }
+
+    #[test]
+    fn agent_system_prompt_puts_contract_before_rules() {
+        let role = sample_role(RoleKind::Implementer);
+        let backend = sample_local_agent("coder-1").backend;
+        let prompt = build_agent_system_prompt(
+            &role,
+            "Write clean Rust.",
+            &backend,
+            1,
+            3,
+            ValidationMode::Agents,
+        );
+        let contract_idx = prompt.find("# Orrery protocol").unwrap();
+        let rules_idx = prompt.find("Write clean Rust.").unwrap();
+        assert!(contract_idx < rules_idx);
+        assert!(prompt.contains("submit_report"));
+
+        let empty_rules_prompt =
+            build_agent_system_prompt(&role, "   ", &backend, 1, 3, ValidationMode::Agents);
+        assert!(!empty_rules_prompt.contains("\n\n\n"));
     }
 }

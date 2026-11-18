@@ -46,20 +46,28 @@ pub struct AgentReport {
     pub artifacts: Vec<String>,
 }
 
+pub fn allowed_statuses(kind: RoleKind) -> &'static [ReportStatus] {
+    match kind {
+        RoleKind::Orchestrator => &[
+            ReportStatus::Dispatch,
+            ReportStatus::StepPassed,
+            ReportStatus::Escalate,
+        ],
+        RoleKind::Implementer => &[ReportStatus::Complete, ReportStatus::Blocked],
+        RoleKind::Validator => &[ReportStatus::Confirmed, ReportStatus::Denied],
+    }
+}
+
+pub fn requires_feedback(status: ReportStatus) -> bool {
+    matches!(
+        status,
+        ReportStatus::Denied | ReportStatus::Blocked | ReportStatus::Escalate
+    )
+}
+
 impl AgentReport {
     pub fn validate_for_role(&self, role: &RoleConfig, stage_count: usize) -> Result<()> {
-        let allowed = match role.kind {
-            RoleKind::Orchestrator => matches!(
-                self.status,
-                ReportStatus::Dispatch | ReportStatus::StepPassed | ReportStatus::Escalate
-            ),
-            RoleKind::Implementer => {
-                matches!(self.status, ReportStatus::Complete | ReportStatus::Blocked)
-            }
-            RoleKind::Validator => {
-                matches!(self.status, ReportStatus::Confirmed | ReportStatus::Denied)
-            }
-        };
+        let allowed = allowed_statuses(role.kind).contains(&self.status);
         if !allowed {
             return Err(Error::Report {
                 message: format!(
@@ -136,13 +144,11 @@ impl AgentReport {
             }
         }
 
-        if matches!(
-            self.status,
-            ReportStatus::Denied | ReportStatus::Blocked | ReportStatus::Escalate
-        ) && self
-            .feedback
-            .as_deref()
-            .is_none_or(|text| text.trim().is_empty())
+        if requires_feedback(self.status)
+            && self
+                .feedback
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
         {
             return Err(Error::Report {
                 message: format!("{:?} report requires non-empty feedback", self.status),
@@ -562,7 +568,8 @@ mod tests {
     use super::{
         AgentReport, CheckpointManager, EnginePhase, HookResult, MAX_SUMMARY_BYTES,
         OperatorDecision, ReconcileOutcome, ReportStatus, StampedReport, StepStatus,
-        SubtaskAllocation, WorkflowCheckpoint, report_json_schema,
+        SubtaskAllocation, WorkflowCheckpoint, allowed_statuses, report_json_schema,
+        requires_feedback,
     };
     use crate::Error;
     use crate::config::{HookEvent, RoleConfig, RoleKind};
@@ -1329,6 +1336,43 @@ extra = 123
             let decoded: HookResult = serde_json::from_value(value).unwrap();
             assert_eq!(decoded.recorded_at, text.parse::<Timestamp>().unwrap());
             assert_eq!(serde_json::to_value(&decoded).unwrap()["recorded_at"], text);
+        }
+    }
+
+    #[test]
+    fn allowed_statuses_match_role_kinds() {
+        assert_eq!(
+            allowed_statuses(RoleKind::Orchestrator),
+            &[
+                ReportStatus::Dispatch,
+                ReportStatus::StepPassed,
+                ReportStatus::Escalate
+            ]
+        );
+        assert_eq!(
+            allowed_statuses(RoleKind::Implementer),
+            &[ReportStatus::Complete, ReportStatus::Blocked]
+        );
+        assert_eq!(
+            allowed_statuses(RoleKind::Validator),
+            &[ReportStatus::Confirmed, ReportStatus::Denied]
+        );
+
+        let all = [
+            ReportStatus::Dispatch,
+            ReportStatus::StepPassed,
+            ReportStatus::Escalate,
+            ReportStatus::Complete,
+            ReportStatus::Blocked,
+            ReportStatus::Confirmed,
+            ReportStatus::Denied,
+        ];
+        for status in all {
+            let expected = matches!(
+                status,
+                ReportStatus::Denied | ReportStatus::Blocked | ReportStatus::Escalate
+            );
+            assert_eq!(requires_feedback(status), expected);
         }
     }
 }
