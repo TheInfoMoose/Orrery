@@ -20,12 +20,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **STEP 88** | `/goal` | `HookConfig.args`, `ProjectConfig.gate_args`, `validate_tool_args` | `crates/orrery-core/src/config.rs` (+ one-line literal fixes in `engine.rs`, `commands.rs`, `widgets.rs`) | — |
-| 3 | **STEP 89** | `/goal` | `merge_tool_args`; hooks and gates send merged args | `crates/orrery-core/src/engine.rs` | STEP 88 |
-| 4 | **STEP 90** | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 89 |
-| 5 | **STEP 91** | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` | STEP 89 |
-| 6 | **STEP 92** | `/goal` | README hook/gate args and live env vars | `README.md` | STEPs 90, 91 |
-| 7 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
+| 2 | **STEP 89** | `/goal` | `merge_tool_args`; hooks and gates send merged args | `crates/orrery-core/src/engine.rs` | STEP 88 |
+| 3 | **STEP 90** | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 89 |
+| 4 | **STEP 91** | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` | STEP 89 |
+| 5 | **STEP 92** | `/goal` | README hook/gate args and live env vars | `README.md` | STEPs 90, 91 |
+| 6 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
 
 ### Completed
 
@@ -119,6 +118,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 85** | **COMPLETED** (2026-11-18, gate fixed by Claude, re-run by Claude) | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` |
 | **STEP 86** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) |
 | **STEP 87** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | README CI section | `README.md` |
+| **STEP 88** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `HookConfig.args`, `ProjectConfig.gate_args`, `validate_tool_args` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-tui/src/widgets.rs` |
 
 ---
 
@@ -4549,7 +4549,7 @@ Written 2026-11-18 against `b1a58bc`. Facts checked while planning:
 - Gate args go in a parallel `gate_args` map keyed by tool ref, so `gate_tools = ["server:tool", …]` keeps its shape.
 - Nebulous `git_commit_documented` (`Nebulous/crates/backend_core/src/mcp/mod.rs:2235-2290`) deserializes its args without `deny_unknown_fields`, so the extra `orrery` key is ignored. `dry_run` defaults to `true`; `summary` must be non-empty.
 - `neb mcp` picks its project from the registry's **active** project first and the working directory second (`resolve_active_storage`, same file, 171-189). User Step NEB-1 switches the active project first so the commit can't land in the wrong repo.
-- Adding `HookConfig.args` breaks every `HookConfig { .. }` literal: 1 in `config.rs` tests, 19 in `engine.rs` tests, 2 in `commands.rs`, 1 in `widgets.rs`. Step 88 fixes them with one added line each.
+- Adding `HookConfig.args` breaks every `HookConfig { .. }` literal: 1 in `config.rs` tests, 17 in `engine.rs` tests, 2 in `commands.rs`, 1 in `widgets.rs`. Step 88 fixes them with one added line each.
 
 ### STEP 88: Hook and Gate Args in Config
 
@@ -4654,6 +4654,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1460p $S | grep -q '^#### 9.17.2 '
    `    merged.insert("orrery".to_string(), orrery);`
    `    serde_json::Value::Object(merged)`
    `}`
+   Let rustfmt wrap the signature; no `#[rustfmt::skip]`.
    Why insert last: config validation already rejects an `orrery` key; inserting last means Orrery's object still wins if a config bypassed validation.
 2. `run_hook`: replace `let args = serde_json::json!({ "orrery": { <fields> } });` with `let orrery = serde_json::json!({ <the same fields> });` then `let args = merge_tool_args(&hook_cfg.args, orrery);`.
 3. `run_gates`: replace `let args = serde_json::json!({ "orrery": { <fields> } });` with `let orrery = serde_json::json!({ <the same fields, "event": "gate"> });` and `let no_args = serde_json::Map::new();`. Inside the `for (idx, tool_ref)` loop, before `execute_for_role`: `let args = merge_tool_args(self.ctx.project.gate_args.get(tool_ref).unwrap_or(&no_args), orrery.clone());` and pass `args` (not `args.clone()`).
@@ -4665,7 +4666,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1460p $S | grep -q '^#### 9.17.2 '
    - `gate_sends_per_tool_args`: `test_context` with orch/imp/val as in `gate_failure_blocks_pass`; `ctx.project.gate_tools = vec!["cargo:test".to_string(), "cargo:clippy".to_string()]`; `ctx.project.gate_args.insert("cargo:test".to_string(), <{"profile": "ci"}>)`; transport `MockMcpTransport::new("cargo")` `.with_tool("test", json!({"content": [{"type": "text", "text": "ok"}]}))` `.with_tool("clippy", json!({"content": [{"type": "text", "text": "clean"}]}))`, registered on a `McpGatekeeper` as in that test; `script_passing_step(&mock, "orch", "imp", "val")`. Run → `RunOutcome::Completed { steps_passed: 1 }`. `calls.len() == 2`; `calls[0].0 == "test"`, `calls[0].1["profile"] == "ci"`, `calls[0].1["orrery"]["event"] == "gate"`; `calls[1].0 == "clippy"`, `calls[1].1.get("profile").is_none()`, `calls[1].1["orrery"]["event"] == "gate"`.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn merge_tool_args(configured: &serde_json::Map<String, serde_json::Value>, orrery: serde_json::Value) -> serde_json::Value' crates/orrery-core/src/engine.rs && grep -q 'merge_tool_args(&hook_cfg.args, orrery)' crates/orrery-core/src/engine.rs && grep -q 'gate_args.get(tool_ref)' crates/orrery-core/src/engine.rs && test "$(grep -c 'let orrery = serde_json::json!({' crates/orrery-core/src/engine.rs)" -eq 2 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(merge_tool_args_adds_orrery_and_keeps_configured|merge_tool_args_empty_config_is_orrery_only|merge_tool_args_orrery_wins_over_configured|step_pass_hook_sends_configured_args|gate_sends_per_tool_args): test$')" -eq 5
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn merge_tool_args(' crates/orrery-core/src/engine.rs && grep -q 'merge_tool_args(&hook_cfg.args, orrery)' crates/orrery-core/src/engine.rs && grep -q 'gate_args.get(tool_ref)' crates/orrery-core/src/engine.rs && test "$(grep -c 'let orrery = serde_json::json!({' crates/orrery-core/src/engine.rs)" -eq 2 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(merge_tool_args_adds_orrery_and_keeps_configured|merge_tool_args_empty_config_is_orrery_only|merge_tool_args_orrery_wins_over_configured|step_pass_hook_sends_configured_args|gate_sends_per_tool_args): test$')" -eq 5
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -4715,7 +4716,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1464p $S | grep -q '^#### 9.17.3 '
    - `gate_args_set_replace_and_clear`: `gate set fs:test fs:lint`; `GateCmd::Args { tool: "fs:test", json: r#"{"profile":"ci"}"# }` → code 0, `cfg.gate_args["fs:test"]["profile"] == "ci"`; `Args { tool: "fs:missing", json: "{}" }` → `Err(Error::Validation { field, .. })` with `field == "gate args"`; `Args { tool: "fs:test", json: "{}" }` → `gate_args` empty; set `{"profile":"ci"}` again, then `gate set fs:lint` → `gate_args` empty; set `fs:lint` args `{"x":1}`, then `GateCmd::Clear` → `gate_tools` and `gate_args` both empty.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn parse_tool_args(text: &str, field: &str) -> Result<serde_json::Map<String, serde_json::Value>>' crates/orrery-cli/src/commands.rs && grep -q 'gate_args.retain' crates/orrery-cli/src/commands.rs && grep -q 'Args { tool: String, json: String }' crates/orrery-cli/src/args.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(hook_set_with_args_saves_them|hook_set_rejects_bad_args|gate_args_set_replace_and_clear): test$')" -eq 3
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn parse_tool_args(' crates/orrery-cli/src/commands.rs && grep -q 'gate_args.retain' crates/orrery-cli/src/commands.rs && grep -q 'Args { tool: String, json: String }' crates/orrery-cli/src/args.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(hook_set_with_args_saves_them|hook_set_rejects_bad_args|gate_args_set_replace_and_clear): test$')" -eq 3
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
@@ -4849,3 +4850,7 @@ After Step 92 is committed. This is the phase's acceptance check. Use a scratch 
 4. Hook, no-commit form: `orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass"}'`, make another `.tracker/` change with `neb task "orrery hook check 2"`, pass another step. Expect: no new commit; the hook result in `orrery status` / the live log shows `"dry_run": true`.
 
 Report back: pass/fail for 2–4, plus `git log --oneline -3` from the scratch repo.
+
+### Parked (Phase L)
+
+- `crates/orrery-core/src/config.rs:1376` — `#[rustfmt::skip]` on `validate_tool_args` exists only so Step 88's POST_GATE grep could match the signature on one line (planning error: the signature is 129 chars). — Remove the attribute and run `cargo fmt --all`; Steps 89–90 markers no longer grep full signatures.
