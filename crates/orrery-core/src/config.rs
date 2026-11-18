@@ -1835,24 +1835,27 @@ impl ConfigStore {
         }
 
         let role = Self::read_single_role(&roles_dir, &role_toml_path)?;
+        let orphaned_rules =
+            match resolve_safe_within_dir(&roles_dir, Path::new(&role.rules_file), "rules_file") {
+                Ok(rules_path) if rules_path.exists() => {
+                    let still_used = Self::read_roles_from_dir(&roles_dir)?.iter().any(|other| {
+                        other.role_id != role.role_id && other.rules_file == role.rules_file
+                    });
+                    (!still_used).then_some(rules_path)
+                }
+                _ => None,
+            };
+
         fs::remove_file(&role_toml_path).map_err(|source| Error::Io {
             path: role_toml_path,
             source,
         })?;
 
-        if let Ok(rules_path) =
-            resolve_safe_within_dir(&roles_dir, Path::new(&role.rules_file), "rules_file")
-            && rules_path.exists()
-        {
-            let still_used = Self::read_roles_from_dir(&roles_dir)?
-                .iter()
-                .any(|other| other.rules_file == role.rules_file);
-            if !still_used {
-                fs::remove_file(&rules_path).map_err(|source| Error::Io {
-                    path: rules_path,
-                    source,
-                })?;
-            }
+        if let Some(rules_path) = orphaned_rules {
+            fs::remove_file(&rules_path).map_err(|source| Error::Io {
+                path: rules_path,
+                source,
+            })?;
         }
 
         Ok(())
@@ -4241,5 +4244,69 @@ max_context_tokens = 1024
         cfg.assign_agent(0, "a").unwrap();
         cfg.replace_agent(0, 0, "b").unwrap();
         assert_eq!(cfg.stages[0].agent_ids, vec!["b"]);
+    }
+
+    #[test]
+    fn remove_role_keeps_toml_when_peer_unreadable() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("shared-rules").unwrap();
+
+        let role_one = RoleConfig {
+            role_id: "role-one".to_string(),
+            display_name: "Role One".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "shared.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        let role_two = RoleConfig {
+            role_id: "role-two".to_string(),
+            display_name: "Role Two".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "shared.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        store.save_role(&role_one, "# Shared rules\n").unwrap();
+        store.save_role(&role_two, "# Shared rules\n").unwrap();
+
+        let roles_dir = store.orrery_dir().join("roles");
+        atomic_write(&roles_dir.join("broken.toml"), b"role_id = [\n").unwrap();
+
+        assert!(store.remove_role("role-one").is_err());
+        assert!(roles_dir.join("role-one.toml").exists());
+        assert!(roles_dir.join("shared.md").exists());
+    }
+
+    #[test]
+    fn remove_role_deletes_own_rules_after_peer_scan() {
+        let proj_tmp = tempfile::TempDir::new().unwrap();
+        let xdg_tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(proj_tmp.path(), Some(xdg_tmp.path().to_path_buf())).unwrap();
+        store.init_project("solo-rules").unwrap();
+
+        let solo = RoleConfig {
+            role_id: "solo".to_string(),
+            display_name: "Solo".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "solo.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        let other = RoleConfig {
+            role_id: "other".to_string(),
+            display_name: "Other".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "other.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+        };
+        store.save_role(&solo, "# Solo rules\n").unwrap();
+        store.save_role(&other, "# Other rules\n").unwrap();
+
+        store.remove_role("solo").unwrap();
+        let roles_dir = store.orrery_dir().join("roles");
+        assert!(!roles_dir.join("solo.toml").exists());
+        assert!(!roles_dir.join("solo.md").exists());
+        assert!(roles_dir.join("other.toml").exists());
+        assert!(roles_dir.join("other.md").exists());
     }
 }
