@@ -93,7 +93,7 @@ Versions and features below were resolved together, built, and checked with `car
 | `dbus-secret-service-keyring-store` | `dbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }` | Secret Service via libdbus. Build host needs `libdbus-1-dev` + `pkg-config`. **Not** the zbus store: zbus 5 pulls `zvariant`/`zbus_names`, flagged unmaintained (RUSTSEC-2026-0370/0371/0372) | Step 4 |
 | `linux-keyutils-keyring-store` | `linux-keyutils-keyring-store = "1.0.0"` | Kernel keyutils fallback | Step 4 |
 | `sha2` | `sha2 = "0.11.1"` | FIPS 180-4 SHA-256. Hex encoding is hand-written (no `hex` crate: last release 2021) | Step 6 |
-| `chrono` | `chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }` | Timestamps | Step 7 |
+| `jiff` | `jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }` | Timestamps: `jiff::Timestamp` (UTC instant, RFC 3339 with `Z` on the wire). Replaced chrono in Step 84 | Step 7 |
 | `uuid` | `uuid = { version = "1.29.2", features = ["v4", "serde"] }` | Run IDs | Step 8 |
 | `tokio` | `tokio = { version = "1.54.1", features = ["sync"] }` — features grow per step (§3.2) | Runtime | Step 9 |
 | `async-trait` | `async-trait = "0.1.92"` | `dyn`-compatible async traits (native `async fn` in traits is not `dyn`-compatible) | Step 10 |
@@ -734,7 +734,7 @@ impl AgentReport { pub fn validate_for_role(&self, role: &RoleConfig, stage_coun
 pub fn report_json_schema() -> serde_json::Value;
 #[serde(deny_unknown_fields)]
 pub struct StampedReport { pub report: AgentReport, pub step_number: usize, pub plan_step_sha256: String, pub round: usize,
-                           pub stage_index: usize, pub role_id: String, pub agent_id: String, pub recorded_at: chrono::DateTime<chrono::Utc> }
+                           pub stage_index: usize, pub role_id: String, pub agent_id: String, pub recorded_at: jiff::Timestamp }
 ```
 `validate_for_role` rules, checked in this order, every failure `Error::Report { message }`:
 1. `status` allowed for `role.kind` (§5.5 table).
@@ -749,7 +749,7 @@ pub struct StampedReport { pub report: AgentReport, pub step_number: usize, pub 
 pub enum StepStatus { Pending, InProgress, Passed, AwaitingOperator, Failed }
 pub enum EnginePhase { Idle, OrchestratorTurn, StageTurn, Gate, AwaitingOperator, Hook, Done }
 pub enum OperatorDecision { Approve, Reject { feedback: String } }
-pub struct HookResult { pub event: HookEvent, pub step_number: usize, pub tool: String, pub success: bool, pub output: String, pub recorded_at: chrono::DateTime<chrono::Utc> }
+pub struct HookResult { pub event: HookEvent, pub step_number: usize, pub tool: String, pub success: bool, pub output: String, pub recorded_at: jiff::Timestamp }
 #[serde(deny_unknown_fields)]
 pub struct WorkflowCheckpoint {
     pub run_id: uuid::Uuid, pub plan_sha256: String, pub step_hashes: Vec<String>, pub step_statuses: Vec<StepStatus>,
@@ -779,7 +779,7 @@ impl CheckpointManager {
 ### 9.4 `stream_log.rs`
 ```rust
 pub enum StreamEventKind { Output, Reasoning, SystemNotice, ToolCall, ReportSaved, GateResult, Error }
-pub struct StreamEvent { pub timestamp: DateTime<Utc>, pub step_number: Option<usize>, pub stage_index: Option<usize>,
+pub struct StreamEvent { pub timestamp: Timestamp, pub step_number: Option<usize>, pub stage_index: Option<usize>,
                          pub agent_id: Option<String>, pub kind: StreamEventKind, pub text: String }
 impl StreamEvent { pub fn notice(text: impl Into<String>) -> Self; } // SystemNotice, all Options None, timestamp now
 pub struct LiveStreamConfig { pub ring_capacity: usize, pub max_file_bytes: u64, pub max_files: usize } // Default: 2_000, 10 * 1024 * 1024, 3
@@ -1315,7 +1315,7 @@ impl LogFollower {
 
 #### 9.12.5 Log write errors reach the operator (Step 55) (adds to §9.11.4)
 - `LiveStreamHub` gains `write_error: Arc<Mutex<Option<String>>>`, shared with `LogWriter` (field `shared_error`). `LogWriter::record_error` sets the shared slot in the same branch where it sets `kept_error` (only when `kept_error` was `None`).
-- `emit`, after its broadcast, takes the shared slot. On `Some(msg)` it builds one `StreamEvent { timestamp: Utc::now(), step_number: None, stage_index: None, agent_id: None, kind: StreamEventKind::Error, text }`, where `text` is the redacted `"live stream log write failed: {msg}"`. That event goes to the ring and the broadcast only, never to the writer, since the log is what's failing. A poisoned lock is `Error::Security`, like the ring lock.
+- `emit`, after its broadcast, takes the shared slot. On `Some(msg)` it builds one `StreamEvent { timestamp: Timestamp::now(), step_number: None, stage_index: None, agent_id: None, kind: StreamEventKind::Error, text }`, where `text` is the redacted `"live stream log write failed: {msg}"`. That event goes to the ring and the broadcast only, never to the writer, since the log is what's failing. A poisoned lock is `Error::Security`, like the ring lock.
 - `flush()` is unchanged: it still returns the kept error once.
 
 #### 9.12.6 TUI operator forwarding and Loop progress (Step 56) (overrides §9.11.10 forwarder, §9.11.11 `run_passed` reset)

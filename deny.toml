@@ -2,10 +2,8 @@
 unmaintained = "all"
 yanked = "deny"
 ignore = [
-    # chrono is unmaintained (all versions; no safe upgrade). It is also a
-    # transitive dependency of rmcp 3.9, so migrating orrery-core alone would
-    # not clear it. Revisit when rmcp drops chrono. Accepted 2026-11-17.
-    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; also required by rmcp 3.9 with no safe upgrade" },
+    # chrono is unmaintained (all versions; no safe upgrade). orrery-core no longer uses it (Step 84), but rmcp 3.9 still depends on it, so it stays in the tree. Revisit when rmcp drops chrono. Accepted 2026-11-17, narrowed 2026-11-18.
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; transitive via rmcp 3.9 only, no safe upgrade" },
 ]
 
 [bans]
