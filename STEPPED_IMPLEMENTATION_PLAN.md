@@ -19,7 +19,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 83** | `/goal` | Secret input without copies | `crates/orrery-cli/src/main.rs` | — |
 
 ### Completed
 
@@ -108,6 +107,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 80** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Redacted run errors in the CLI | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 81** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Redacted run errors in the TUI | `crates/orrery-tui/src/bridge.rs` |
 | **STEP 82** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | MCP bearer header | `crates/orrery-core/src/mcp.rs` |
+| **STEP 83** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Secret input without copies | `crates/orrery-cli/src/main.rs` |
 
 ---
 
