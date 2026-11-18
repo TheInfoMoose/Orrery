@@ -10,7 +10,7 @@ use crate::config::{
     McpServerConfig, McpTransportConfig, RoleConfig, WriteToolSpec, format_mapped_tool_name,
     validate_concrete_tool_ref, validate_safe_relative_path,
 };
-use crate::security::SecretStore;
+use crate::security::{SecretStore, SecretValue};
 use crate::stream_log::{LiveStreamHub, StreamEvent};
 use crate::{Error, Result};
 
@@ -613,7 +613,7 @@ impl RmcpTransport {
                 match (keychain_service.as_deref(), keychain_account.as_deref()) {
                     (Some(svc), Some(acc)) => {
                         let secret = secrets.get(svc, acc)?;
-                        cfg = cfg.auth_header(secret.expose());
+                        cfg = cfg.custom_headers(mcp_bearer_headers(&secret)?);
                     }
                     (None, None) => {}
                     _ => {
@@ -643,6 +643,22 @@ impl RmcpTransport {
 
         Ok(Self { server_id, service })
     }
+}
+
+pub(crate) fn mcp_bearer_headers(
+    secret: &SecretValue,
+) -> Result<std::collections::HashMap<reqwest::header::HeaderName, reqwest::header::HeaderValue>> {
+    let bearer = zeroize::Zeroizing::new(format!("Bearer {}", secret.expose()));
+    let mut value =
+        reqwest::header::HeaderValue::from_str(&bearer).map_err(|_| Error::Validation {
+            field: "keychain".to_string(),
+            message: "MCP bearer token is not a valid HTTP header value".to_string(),
+        })?;
+    value.set_sensitive(true);
+    Ok(std::collections::HashMap::from([(
+        reqwest::header::AUTHORIZATION,
+        value,
+    )]))
 }
 
 pub fn spawn_stderr_forwarder<R>(
@@ -816,8 +832,8 @@ mod tests {
 
     use super::{
         McpConnector, McpGatekeeper, McpTransport, MockMcpConnector, MockMcpTransport,
-        RmcpConnector, RmcpTransport, WriteScope, resolve_stdio_command, scopes_overlap,
-        spawn_stderr_forwarder, tool_result_is_error, tool_result_text,
+        RmcpConnector, RmcpTransport, WriteScope, mcp_bearer_headers, resolve_stdio_command,
+        scopes_overlap, spawn_stderr_forwarder, tool_result_is_error, tool_result_text,
     };
     use crate::Error;
     use crate::config::{McpServerConfig, McpTransportConfig, RoleConfig, RoleKind, WriteToolSpec};
@@ -1736,5 +1752,22 @@ mod tests {
             }
             other => panic!("expected Error::Mcp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_bearer_headers_are_sensitive() {
+        let headers = mcp_bearer_headers(&SecretValue::new("tok-123")).unwrap();
+        assert_eq!(headers.len(), 1);
+        let value = headers.get(&reqwest::header::AUTHORIZATION).unwrap();
+        assert_eq!(value.to_str().unwrap(), "Bearer tok-123");
+        assert!(value.is_sensitive());
+        assert!(!format!("{value:?}").contains("tok-123"));
+    }
+
+    #[test]
+    fn mcp_bearer_headers_reject_invalid() {
+        let err = mcp_bearer_headers(&SecretValue::new("bad\ntoken")).unwrap_err();
+        assert!(matches!(err, Error::Validation { .. }));
+        assert!(!err.to_string().contains("bad"));
     }
 }
