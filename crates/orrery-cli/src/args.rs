@@ -387,6 +387,11 @@ pub enum GateCmd {
         #[arg(required = true, num_args = 1..)]
         tools: Vec<String>,
     },
+    // Args { tool: String, json: String }
+    Args {
+        tool: String,
+        json: String,
+    },
     Clear,
 }
 
@@ -433,6 +438,8 @@ pub enum HookCmd {
         tool: String,
         #[arg(long, value_enum, default_value_t = HookFailureArg::Halt)]
         on_failure: HookFailureArg,
+        #[arg(long)]
+        args: Option<String>,
     },
     Clear {
         #[arg(value_enum)]
@@ -610,6 +617,7 @@ mod tests {
             &["orrery", "mcp", "tools", "fs"],
             &["orrery", "mcp", "remove", "fs"],
             &["orrery", "gate", "set", "fs:test", "fs:lint"],
+            &["orrery", "gate", "args", "fs:test", "{\"profile\":\"ci\"}"],
             &["orrery", "gate", "clear"],
             &[
                 "orrery",
@@ -619,6 +627,15 @@ mod tests {
                 "fs:notify",
                 "--on-failure",
                 "warn",
+            ],
+            &[
+                "orrery",
+                "hook",
+                "set",
+                "pass",
+                "neb:git_commit_documented",
+                "--args",
+                "{\"dry_run\":false}",
             ],
             &["orrery", "hook", "clear", "start"],
             &["orrery", "run", "--loop", "--cycles", "3", "--step", "1"],

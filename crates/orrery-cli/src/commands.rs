@@ -248,20 +248,62 @@ fn dispatch_workflow(command: WorkflowCmd, project: &Path, ctx: &mut CliContext)
     }
 }
 
+fn parse_tool_args(text: &str, field: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(serde_json::Value::Object(map)) => Ok(map),
+        Ok(_) => Err(Error::Validation {
+            field: field.to_string(),
+            message: "expected a JSON object".to_string(),
+        }),
+        Err(e) => Err(Error::Validation {
+            field: field.to_string(),
+            message: format!("invalid JSON: {e}"),
+        }),
+    }
+}
+
 fn dispatch_gate(command: GateCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
     let store = ConfigStore::new(project, None)?;
     match command {
         GateCmd::Set { tools } => {
             edit_project(&store, |cfg| {
+                cfg.gate_args.retain(|key, _| tools.contains(key));
                 cfg.gate_tools = tools;
                 Ok(())
             })?;
             write_stdout_line(ctx, "Updated gate tools")?;
             Ok(0)
         }
+        GateCmd::Args { tool, json } => {
+            let args = parse_tool_args(&json, "gate args")?;
+            let cleared = args.is_empty();
+            edit_project(&store, |cfg| {
+                if !cfg.gate_tools.contains(&tool) {
+                    return Err(Error::Validation {
+                        field: "gate args".to_string(),
+                        message: format!(
+                            "'{tool}' is not in gate_tools; run 'orrery gate set' first"
+                        ),
+                    });
+                }
+                if cleared {
+                    cfg.gate_args.remove(&tool);
+                } else {
+                    cfg.gate_args.insert(tool.clone(), args);
+                }
+                Ok(())
+            })?;
+            if cleared {
+                write_stdout_line(ctx, &format!("Cleared gate args for {tool}"))?;
+            } else {
+                write_stdout_line(ctx, &format!("Set gate args for {tool}"))?;
+            }
+            Ok(0)
+        }
         GateCmd::Clear => {
             edit_project(&store, |cfg| {
                 cfg.gate_tools.clear();
+                cfg.gate_args.clear();
                 Ok(())
             })?;
             write_stdout_line(ctx, "Cleared gate tools")?;
@@ -277,12 +319,17 @@ fn dispatch_hook(command: HookCmd, project: &Path, ctx: &mut CliContext) -> Resu
             event,
             tool,
             on_failure,
+            args,
         } => {
+            let args = match args {
+                Some(text) => parse_tool_args(&text, "--args")?,
+                None => serde_json::Map::new(),
+            };
             let hook_event = HookEvent::from(event);
             let hook_cfg = HookConfig {
                 tool,
                 on_failure: HookFailure::from(on_failure),
-                args: Default::default(),
+                args,
             };
             edit_project(&store, |cfg| {
                 cfg.hooks.set(hook_event, hook_cfg);
@@ -1591,6 +1638,7 @@ mod tests {
                     event: HookEventArg::Start,
                     tool: "fs:notify".to_string(),
                     on_failure: HookFailureArg::Warn,
+                    args: None,
                 },
             },
             dir.path(),
@@ -1628,6 +1676,259 @@ mod tests {
         assert!(cfg2.hooks.on_step_start.is_none());
 
         assert_eq!(exit_code_for(&Error::Interrupted), 130);
+    }
+
+    #[tokio::test]
+    async fn hook_set_with_args_saves_them() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("hook-args-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let code = dispatch(
+            Command::Hook {
+                command: HookCmd::Set {
+                    event: HookEventArg::Pass,
+                    tool: "neb:git_commit_documented".to_string(),
+                    on_failure: HookFailureArg::Halt,
+                    args: Some(r#"{"summary":"orrery step pass","dry_run":false}"#.to_string()),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("hook set with args");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let cfg = store.load_project().expect("load_project");
+        assert_eq!(
+            cfg.hooks.on_step_pass.expect("on_step_pass").args,
+            serde_json::json!({"summary": "orrery step pass", "dry_run": false})
+                .as_object()
+                .expect("object")
+                .clone()
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_set_rejects_bad_args() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("hook-bad-args-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let err_reserved = dispatch(
+            Command::Hook {
+                command: HookCmd::Set {
+                    event: HookEventArg::Pass,
+                    tool: "neb:git_commit_documented".to_string(),
+                    on_failure: HookFailureArg::Halt,
+                    args: Some(r#"{"orrery":{}}"#.to_string()),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("reserved key must fail");
+        match err_reserved {
+            Error::Validation { field, .. } => assert_eq!(field, "hooks.on_step_pass.args"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let cfg = store.load_project().expect("load_project");
+        assert!(cfg.hooks.on_step_pass.is_none());
+
+        let err_non_obj = dispatch(
+            Command::Hook {
+                command: HookCmd::Set {
+                    event: HookEventArg::Pass,
+                    tool: "neb:git_commit_documented".to_string(),
+                    on_failure: HookFailureArg::Halt,
+                    args: Some("[1]".to_string()),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("non-object JSON must fail");
+        match err_non_obj {
+            Error::Validation { field, .. } => assert_eq!(field, "--args"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        let err_bad_json = dispatch(
+            Command::Hook {
+                command: HookCmd::Set {
+                    event: HookEventArg::Pass,
+                    tool: "neb:git_commit_documented".to_string(),
+                    on_failure: HookFailureArg::Halt,
+                    args: Some("{bad".to_string()),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("unparsable JSON must fail");
+        match err_bad_json {
+            Error::Validation { field, .. } => assert_eq!(field, "--args"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_args_set_replace_and_clear() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("gate-args-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Set {
+                    tools: vec!["fs:test".to_string(), "fs:lint".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate set");
+
+        let code = dispatch(
+            Command::Gate {
+                command: GateCmd::Args {
+                    tool: "fs:test".to_string(),
+                    json: r#"{"profile":"ci"}"#.to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate args set");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let cfg = store.load_project().expect("load_project");
+        assert_eq!(cfg.gate_args["fs:test"]["profile"], "ci");
+
+        let err_missing = dispatch(
+            Command::Gate {
+                command: GateCmd::Args {
+                    tool: "fs:missing".to_string(),
+                    json: "{}".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("missing gate tool must fail");
+        match err_missing {
+            Error::Validation { field, .. } => assert_eq!(field, "gate args"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Args {
+                    tool: "fs:test".to_string(),
+                    json: "{}".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate args clear via empty object");
+        let cfg = store.load_project().expect("load_project");
+        assert!(cfg.gate_args.is_empty());
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Args {
+                    tool: "fs:test".to_string(),
+                    json: r#"{"profile":"ci"}"#.to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate args set again");
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Set {
+                    tools: vec!["fs:lint".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate set drops stale gate_args");
+        let cfg = store.load_project().expect("load_project");
+        assert!(cfg.gate_args.is_empty());
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Args {
+                    tool: "fs:lint".to_string(),
+                    json: r#"{"x":1}"#.to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate args set fs:lint");
+
+        dispatch(
+            Command::Gate {
+                command: GateCmd::Clear,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("gate clear");
+        let cfg = store.load_project().expect("load_project");
+        assert!(cfg.gate_tools.is_empty());
+        assert!(cfg.gate_args.is_empty());
     }
 
     fn mock_backends_with_transports(
