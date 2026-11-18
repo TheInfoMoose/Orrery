@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79) and Phase J secret-handling fixes (80–83). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83) and Phase K (84–87). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (83). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (87). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -19,6 +19,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
+| 1 | **STEP 84** | `/goal` | Swap chrono for jiff in orrery-core | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `checkpoint.rs`, `stream_log.rs`, `llm.rs`, `engine.rs` | — |
+| 2 | **STEP 85** | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` | Step 84 |
+| 3 | **STEP 86** | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) | Step 85 |
+| 4 | **STEP 87** | `/goal` | README CI section | `README.md` | Step 86 |
+| 5 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 
 ### Completed
 
@@ -848,7 +853,7 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/nul
 3. config.rs, from §9.6a (spec lines 923 and 939):
    - `pub enum ConfigScope { Project, Machine }` (derive `Debug, Clone, Copy, PartialEq, Eq`).
    - `pub fn resolve_compose_file(..)` exactly as specified. Reuse `resolve_safe_within_dir` for the Project case.
-   - `McpServerConfig::validate_project_scope(&self) -> Result<()>`: a Stdio `command` containing `/` or `\` → `Error::Validation { field: "transport.command", .. }`; any `args` entry where `Path::new(a).is_absolute()` → `Error::Validation { field: "transport.args", .. }`.
+   - `McpServerConfig::validate_project_scope(&self) -> Result<()>`: a Stdio `command` containing `/` or `` → `Error::Validation { field: "transport.command", .. }`; any `args` entry where `Path::new(a).is_absolute()` → `Error::Validation { field: "transport.args", .. }`.
    - `InferenceConfig::validate_project_scope(&self) -> Result<()>`: a Compose `file` that `is_absolute()` → the same `Error::Validation` as `resolve_compose_file` (Project).
    - `ConfigStore::load_inference`: resolve each Compose `file` with `resolve_compose_file` before `upsert_by_key`. Global entries use `Machine` with `global_dir()`; `.orrery/inference.toml` and `project.toml` entries use `Project`, after `validate_project_scope`.
    - `ConfigStore::load_mcp_servers`: call `validate_project_scope` on every project-scope entry.
@@ -3140,7 +3145,7 @@ FORBIDDEN_SCOPE:
 S=ORRERY_TECHNICAL_SPECIFICATION.md && cargo test --workspace --locked >/dev/null 2>&1 && grep -q '^| `Up` / `Down` / `Left` / `Right` |' README.md && ! grep -q 'PageUp' README.md && sed -n 1332p $S | grep -q '^#### 9.13.1 '
 
 [MUTATION_SPEC]
-1. README.md TUI keys table: replace the `| \`Up\` / \`Down\` / \`Left\` / \`Right\` | … |` row with one row per §9.13.1 bullet, in that order (TopMenu/FooterMenu, StepsPanel, StageCanvas arrows, StageCanvas `Delete`, LiveStream, Selector/Settings/Help). Each row's first cell names the keys; the second names the focus area or modal and the action.
+1. README.md TUI keys table: replace the `| `Up` / `Down` / `Left` / `Right` | … |` row with one row per §9.13.1 bullet, in that order (TopMenu/FooterMenu, StepsPanel, StageCanvas arrows, StageCanvas `Delete`, LiveStream, Selector/Settings/Help). Each row's first cell names the keys; the second names the focus area or modal and the action.
 2. Add a row for the quit confirmation: `y` / `Enter` quits, `n` / `Esc` cancels.
 3. No other row, line or section changes.
 
@@ -4337,3 +4342,192 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 ---
 
+
+## Phase K — chrono to jiff, then GitHub CI (Steps 84–87)
+
+**Phase goal (frozen until the phase ends):** drop `chrono` from Orrery's own code in favor of `jiff` (RUSTSEC-2026-0543: chrono is unmaintained), and add the project's first GitHub Actions workflow so the fmt, clippy and test gates run on every push and pull request.
+
+Written 2026-11-18 against `96b5270`. Facts checked while planning:
+- `chrono` is used only in `orrery-core` (`checkpoint.rs`, `stream_log.rs`, `llm.rs`, `engine.rs`). `orrery-tui` and `orrery-cli` have no direct use.
+- `rmcp 3.9` still depends on `chrono` (`cargo tree -i chrono`). Step 84 removes only our direct dependency. The RUSTSEC-2026-0543 ignore in `deny.toml` stays until rmcp drops chrono; Step 85 rewords it.
+- `jiff::Timestamp` serializes through `Display` as RFC 3339 with a `Z` suffix, the same shape chrono wrote (`2026-11-13T18:00:00Z`, or nine fractional digits). Step 84 pins that with tests instead of assuming it, because checkpoints and the live stream log written by older builds must still load.
+- The live-backend tests sit behind the `live-backends` feature (`crates/orrery-core/tests/live_*.rs`, `required-features`), so `cargo test --workspace --locked` already skips them. CI needs no exclusion list and no secrets.
+- `dbus-secret-service-keyring-store` needs `libdbus-1-dev` and `pkg-config` on the build host, so the CI runner must install them (Step 86).
+- Out of scope, by operator choice (2026-11-18): CI jobs for `cargo deny`, `cargo llvm-cov` and aarch64. Those gates stay in each step's `POST_GATE`.
+
+### STEP 84: Swap chrono for jiff in orrery-core
+
+* **Recommended Command:** `/goal`
+
+Scope note: the timestamp type is shared by four files, so none of them compiles alone. This is one mechanical step over four source files. Splitting it would leave a tree that doesn't build.
+
+```text
+[STEP_ID]
+STEP 84: orrery-core uses jiff::Timestamp instead of chrono::DateTime<Utc>; chrono is no longer a direct dependency
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - Cargo.toml
+  - Cargo.lock
+  - crates/orrery-core/Cargo.toml
+  - crates/orrery-core/src/checkpoint.rs
+  - crates/orrery-core/src/stream_log.rs
+  - crates/orrery-core/src/llm.rs
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - crates/orrery-core/src/checkpoint.rs:215-218, 255-258 (`StampedReport.recorded_at`, `HookResult.recorded_at`)
+  - crates/orrery-core/src/checkpoint.rs:556-562 (`mod tests` imports), 852, 929, 984, 1286 (`Utc.with_ymd_and_hms(..)` in tests)
+  - crates/orrery-core/src/stream_log.rs:9, 31, 42 (`StreamEvent.timestamp`, `StreamEvent::notice`)
+  - crates/orrery-core/src/llm.rs:8, 1246 (imports)
+  - crates/orrery-core/src/engine.rs:6, 2138 (imports)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Field names, field order, `serde` attributes and every public signature other than the timestamp type stay the same. No new dependency besides `jiff`. orrery-tui and orrery-cli are not edited (they have no direct chrono use).
+
+[PRE_GATE]
+grep -q '^chrono = ' Cargo.toml && ! grep -q '^jiff' Cargo.toml && test "$(grep -rlE 'use chrono|chrono::' crates | wc -l)" -eq 4 && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. Cargo.toml (workspace `[workspace.dependencies]`): remove the `chrono = ...` line. Add, in alphabetical position (after `futures-util`): `jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }`. Why: only UTC instants are used, so no time-zone database is needed; `std` gives `Timestamp::now()`.
+2. crates/orrery-core/Cargo.toml: replace `chrono.workspace = true` with `jiff.workspace = true`, kept in alphabetical order (after `futures-util.workspace = true`, before `keyring-core.workspace = true`).
+3. checkpoint.rs: `recorded_at: chrono::DateTime<chrono::Utc>` becomes `recorded_at: jiff::Timestamp` in both structs (lines 217 and 257). In `mod tests`, replace `use chrono::{TimeZone, Utc};` with `use jiff::Timestamp;`. Replace each `Utc.with_ymd_and_hms(2026, 11, 13, H, M, 0).unwrap()` (4 sites) with `"2026-11-13THH:MM:00Z".parse::<Timestamp>().unwrap()` using the same hour and minute (18:00, 19:00, 19:30, 19:30).
+4. stream_log.rs: `use chrono::{DateTime, Utc};` becomes `use jiff::Timestamp;`; `timestamp: DateTime<Utc>` becomes `timestamp: Timestamp`; every `Utc::now()` becomes `Timestamp::now()` (non-test code at line 42 and 251). In `mod tests`, `use chrono::Utc;` becomes `use jiff::Timestamp;` and its `Utc::now()` becomes `Timestamp::now()`.
+5. llm.rs and engine.rs: `use chrono::Utc;` becomes `use jiff::Timestamp;` at the top of each file and in each `mod tests`; every `Utc::now()` becomes `Timestamp::now()`. No other edits. Keep the import blocks in rustfmt order.
+6. Tests (all use `serde_json`, already a dependency):
+   - checkpoint.rs `mod tests`, `stamped_report_reads_legacy_timestamp`: build a `StampedReport { step_number: 7, plan_step_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), round: 1, stage_index: 0, role_id: "orchestrator".to_string(), agent_id: "local-orch".to_string(), recorded_at: Timestamp::UNIX_EPOCH, report: base_report(ReportStatus::Dispatch) }`. For each text in `["2026-11-13T18:00:00Z", "2026-11-13T10:00:00.123456789Z"]`: `let mut value = serde_json::to_value(&stamped).unwrap(); value["recorded_at"] = serde_json::json!(text);` then `let decoded: StampedReport = serde_json::from_value(value).unwrap();`. Assert `decoded.recorded_at == text.parse::<Timestamp>().unwrap()` and `serde_json::to_value(&decoded).unwrap()["recorded_at"] == text`. Why: pins that timestamps written by the chrono-era builds still load and re-serialize unchanged.
+   - checkpoint.rs `mod tests`, `hook_result_reads_legacy_timestamp`: the same loop over a `HookResult { event: HookEvent::StepStart, step_number: 2, tool: "git:status".to_string(), success: true, output: "clean".to_string(), recorded_at: Timestamp::UNIX_EPOCH }`.
+   - stream_log.rs `mod tests`, `stream_event_reads_legacy_timestamp`: the same loop over `StreamEvent::notice("hello")`, using the `"timestamp"` key.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && ! grep -rnE 'use chrono|chrono::|^chrono' crates Cargo.toml && grep -q '^jiff = ' Cargo.toml && grep -q '^jiff.workspace = true' crates/orrery-core/Cargo.toml && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^(checkpoint::tests::stamped_report_reads_legacy_timestamp|checkpoint::tests::hook_result_reads_legacy_timestamp|stream_log::tests::stream_event_reads_legacy_timestamp): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 85: Spec and deny.toml Follow Step 84
+
+* **Recommended Command:** `/goal`
+
+Scope note: docs and config only. The advisory ignore stays because `rmcp 3.9` still pulls in chrono.
+
+```text
+[STEP_ID]
+STEP 85: the spec names jiff instead of chrono, and the deny.toml ignore says chrono now arrives only through rmcp
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - ORRERY_TECHNICAL_SPECIFICATION.md
+  - deny.toml
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:96 (dependency table row for `chrono`)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:737, 752 (`recorded_at: chrono::DateTime<chrono::Utc>`)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:782 (`StreamEvent`, `timestamp: DateTime<Utc>`)
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1318 (`timestamp: Utc::now()`)
+  - deny.toml:4-9 (the `ignore` entry)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The RUSTSEC-2026-0543 entry is NOT removed: `cargo deny check` fails without it while rmcp depends on chrono. No other spec line changes.
+
+[PRE_GATE]
+grep -q 'jiff = ' Cargo.toml && test "$(grep -cE 'chrono|Utc' ORRERY_TECHNICAL_SPECIFICATION.md)" -eq 5 && grep -q 'RUSTSEC-2026-0543' deny.toml
+
+[MUTATION_SPEC]
+1. Spec line 96: replace the `chrono` table row with `| `jiff` | `jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"] }` | Timestamps: `jiff::Timestamp` (UTC instant, RFC 3339 with `Z` on the wire). Replaced chrono in Step 84 | Step 7 |`. Keep the row's position and column count.
+2. Spec lines 737 and 752: `chrono::DateTime<chrono::Utc>` becomes `jiff::Timestamp`.
+3. Spec line 782: `timestamp: DateTime<Utc>` becomes `timestamp: Timestamp`. Spec line 1318: `Utc::now()` becomes `Timestamp::now()`.
+4. deny.toml: replace the comment and `reason` of the RUSTSEC-2026-0543 entry. Comment: `# chrono is unmaintained (all versions; no safe upgrade). orrery-core no longer uses it (Step 84), but rmcp 3.9 still depends on it, so it stays in the tree. Revisit when rmcp drops chrono. Accepted 2026-11-17, narrowed 2026-11-18.` Reason: `"chrono unmaintained; transitive via rmcp 3.9 only, no safe upgrade"`. The `id` stays.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && ! grep -qE 'chrono|Utc' ORRERY_TECHNICAL_SPECIFICATION.md && grep -q 'transitive via rmcp 3.9 only' deny.toml && grep -q 'RUSTSEC-2026-0543' deny.toml
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 86: GitHub Actions CI Workflow
+
+* **Recommended Command:** `/goal`
+
+Scope note: the repo has no `.github/` directory. One workflow, one job. `deny`, `llvm-cov` and aarch64 are out of scope by operator choice.
+
+```text
+[STEP_ID]
+STEP 86: .github/workflows/ci.yml runs fmt, clippy and tests on every push to main and every pull request
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - .github/workflows/ci.yml (NEW)
+READ_ONLY_REFS:
+  - Cargo.toml:5 (`rust-version = "1.99.1"`)
+  - README.md:5-13 (Requirements: libdbus-1-dev and pkg-config)
+  - crates/orrery-core/Cargo.toml:`[[test]]` tables (the live tests need the `live-backends` feature, so a default test run skips them)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No secrets, no deploy or release job, no third-party actions: `actions/checkout` is the only `uses:`. No `cargo deny`, `cargo llvm-cov` or aarch64 job.
+
+[PRE_GATE]
+test ! -e .github && grep -q '^jiff = ' Cargo.toml && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. Create `.github/workflows/ci.yml` with `name: CI`.
+2. `on:` `push` with `branches: [main]`, and `pull_request`.
+3. Top-level `permissions: { contents: read }` and `env: { CARGO_TERM_COLOR: always }`.
+4. Top-level `concurrency: { group: ci-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: true }`.
+5. One job, `gates`, `runs-on: ubuntu-latest`, `timeout-minutes: 30`. Steps, in order:
+   a. `uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`
+   b. Install system packages: `sudo apt-get update && sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config`. Why: `dbus-secret-service-keyring-store` links libdbus.
+   c. Install the toolchain from `rust-version`: `rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy && rustup default 1.99.1`. Why: runners ship rustup, so no third-party action is needed.
+   d. `cargo fmt --all -- --check`
+   e. `cargo clippy --workspace --all-targets --locked -- -D warnings`
+   f. `cargo test --workspace --locked`
+   Give each of d–f its own `name:`. No `continue-on-error` anywhere.
+6. Do not add a build cache. Why: it would need a third-party action; revisit if CI time hurts.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && python3 -c "import sys,yaml; yaml.safe_load(open('.github/workflows/ci.yml'))" && grep -q 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' .github/workflows/ci.yml && grep -q 'libdbus-1-dev' .github/workflows/ci.yml && grep -q 'cargo clippy --workspace --all-targets --locked -- -D warnings' .github/workflows/ci.yml && grep -q 'cargo test --workspace --locked' .github/workflows/ci.yml && test "$(grep -c 'uses:' .github/workflows/ci.yml)" -eq 1 && ! grep -q 'continue-on-error' .github/workflows/ci.yml
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 87: README CI Section
+
+* **Recommended Command:** `/goal`
+
+Scope note: the README must state only what has been verified. The section says what the workflow runs; the first green run on GitHub is the operator's check (`[USER] CI-1`).
+
+```text
+[STEP_ID]
+STEP 87: the README has a CI section naming what the workflow runs and how to run the same gates locally
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - README.md:135-152 (`## Live-backend tests`; the new section goes directly above it)
+  - .github/workflows/ci.yml (the three gate commands)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other README section changes.
+
+[PRE_GATE]
+test -f .github/workflows/ci.yml && grep -q '^## Live-backend tests' README.md && ! grep -q '^## CI' README.md
+
+[MUTATION_SPEC]
+1. README.md: add `## CI` directly above `## Live-backend tests`. Content: one sentence that `.github/workflows/ci.yml` runs on every push to `main` and every pull request; the three gates as a `bash` code block (`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`); one sentence that CI runs on Ubuntu x86_64 with Rust 1.99.1 and installs `libdbus-1-dev` and `pkg-config`; one sentence that the live-backend tests are not run in CI because they need a feature flag and real backends. State nothing about `cargo deny`, coverage or aarch64 in CI.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && grep -q '^## CI' README.md && grep -q 'libdbus-1-dev' README.md
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### User Step: CI-1
+
+After Step 86 is committed, the operator pushes a branch and opens a pull request. The check is that the `CI` workflow's `gates` job goes green. This is the only place the workflow itself runs; the local gates prove the commands, not the YAML on GitHub's runner.
