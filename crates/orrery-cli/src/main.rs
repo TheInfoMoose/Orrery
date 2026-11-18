@@ -14,6 +14,12 @@ use orrery_core::security::OsKeyringStore;
 use crate::args::Cli;
 use crate::commands::{CliContext, dispatch, exit_code_for, render_error};
 
+fn trim_line_end_in_place(mut s: String) -> String {
+    let len = s.trim_end_matches(['\r', '\n']).len();
+    s.truncate(len);
+    s
+}
+
 fn read_secret_from_stdin() -> orrery_core::Result<String> {
     let mut line = String::new();
     std::io::stdin()
@@ -22,7 +28,7 @@ fn read_secret_from_stdin() -> orrery_core::Result<String> {
             path: PathBuf::from("<stdin>"),
             source,
         })?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    Ok(trim_line_end_in_place(line))
 }
 
 fn read_secret_input() -> orrery_core::Result<String> {
@@ -31,7 +37,7 @@ fn read_secret_input() -> orrery_core::Result<String> {
             path: PathBuf::from("<tty>"),
             source,
         })?;
-        Ok(value.trim_end_matches(['\r', '\n']).to_string())
+        Ok(trim_line_end_in_place(value))
     } else {
         read_secret_from_stdin()
     }
@@ -69,5 +75,21 @@ async fn main() -> ExitCode {
             let _ = writeln!(ctx.err, "{}", render_error(&err));
             ExitCode::from(exit_code_for(&err))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trim_line_end_keeps_allocation() {
+        let mut s = String::with_capacity(32);
+        s.push_str("tok\r\n");
+        let ptr = s.as_ptr();
+        let out = trim_line_end_in_place(s);
+        assert_eq!(out, "tok");
+        assert_eq!(out.as_ptr(), ptr);
+        assert_eq!(trim_line_end_in_place("plain".to_string()), "plain");
     }
 }
