@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83) and Phase K (84–87). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87) and Phase L configured tool arguments (88–92). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (87). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (92). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -20,6 +20,12 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
+| 2 | **STEP 88** | `/goal` | `HookConfig.args`, `ProjectConfig.gate_args`, `validate_tool_args` | `crates/orrery-core/src/config.rs` (+ one-line literal fixes in `engine.rs`, `commands.rs`, `widgets.rs`) | — |
+| 3 | **STEP 89** | `/goal` | `merge_tool_args`; hooks and gates send merged args | `crates/orrery-core/src/engine.rs` | STEP 88 |
+| 4 | **STEP 90** | `/goal` | `hook set --args`, `gate args`, stale `gate_args` cleanup | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 89 |
+| 5 | **STEP 91** | `/goal` | Live MCP call with merged args | `crates/orrery-core/tests/live_mcp.rs` | STEP 89 |
+| 6 | **STEP 92** | `/goal` | README hook/gate args and live env vars | `README.md` | STEPs 90, 91 |
+| 7 | **[USER] NEB-1** | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo `.tracker/` | **[USER]** runs the steps under "User Step: NEB-1". |
 
 ### Completed
 
@@ -4531,3 +4537,315 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 ### User Step: CI-1
 
 After Step 86 is committed, the operator pushes a branch and opens a pull request. The check is that the `CI` workflow's `gates` job goes green. This is the only place the workflow itself runs; the local gates prove the commands, not the YAML on GitHub's runner.
+
+---
+
+## Phase L — configured tool arguments for hooks and gates (Steps 88–92, User Step NEB-1)
+
+**Phase goal (frozen until the phase ends):** let hooks and gates send fixed, configured arguments next to the `orrery` object, so Orrery can drive Nebulous MCP tools that need them (`git_commit_documented` needs `summary`, and only commits with `dry_run: false`). Existing `project.toml` files load unchanged. Done when User Step NEB-1 shows the `on_step_pass` hook committing `.tracker/` with `dry_run: false`, and not committing with `dry_run` left out. Design: spec §9.17 (`ORRERY_TECHNICAL_SPECIFICATION.md:1451-1472`).
+
+Written 2026-11-18 against `b1a58bc`. Facts checked while planning:
+- `toml 1.1.5` round-trips a `serde_json::Map<String, serde_json::Value>` field (inline tables, arrays, nested tables, ints, floats, bools), and a config with no `args` key loads with an empty map. It fails to serialize a JSON `null` (`UnsupportedType(Some("unit"))`), which is why `validate_tool_args` rejects `null` before `save_project` writes anything (`save_project` runs `validate_staging` first, `config.rs:1727-1736`).
+- Gate args go in a parallel `gate_args` map keyed by tool ref, so `gate_tools = ["server:tool", …]` keeps its shape.
+- Nebulous `git_commit_documented` (`Nebulous/crates/backend_core/src/mcp/mod.rs:2235-2290`) deserializes its args without `deny_unknown_fields`, so the extra `orrery` key is ignored. `dry_run` defaults to `true`; `summary` must be non-empty.
+- `neb mcp` picks its project from the registry's **active** project first and the working directory second (`resolve_active_storage`, same file, 171-189). User Step NEB-1 switches the active project first so the commit can't land in the wrong repo.
+- Adding `HookConfig.args` breaks every `HookConfig { .. }` literal: 1 in `config.rs` tests, 19 in `engine.rs` tests, 2 in `commands.rs`, 1 in `widgets.rs`. Step 88 fixes them with one added line each.
+
+### STEP 88: Hook and Gate Args in Config
+
+* **Recommended Command:** `/goal`
+
+Scope note: four source files, but `engine.rs`, `commands.rs` and `widgets.rs` only get one `args: Default::default(),` line per existing `HookConfig` literal so the workspace compiles. All logic is in `config.rs`.
+
+```text
+[STEP_ID]
+STEP 88: HookConfig gains args and ProjectConfig gains gate_args (JSON objects, default empty); validation rejects the reserved 'orrery' key, null values, and gate_args keys not in gate_tools
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+  - crates/orrery-core/src/engine.rs (test literals only)
+  - crates/orrery-cli/src/commands.rs (two literals only)
+  - crates/orrery-tui/src/widgets.rs (one test literal only)
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1454-1458 (§9.17.1; binding)
+  - crates/orrery-core/src/config.rs:1-10 (imports), 60-73 (`HookConfig`, `HookConfig::validate`), 123-138 (`HooksConfig::validate` field names), 224-243 (`ProjectConfig`), 245-273 (`default_template`), 374-378 (`gate_tools` loop in `validate_staging`), 1328-1346 (`validate_concrete_tool_ref`), 2995-3020 (`hooks_and_inference_validation_edges`)
+  - crates/orrery-core/src/config.rs:1727-1736 (`save_project` runs `validate_staging` before `toml::to_string_pretty`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `gate_tools` stays `Vec<String>`. No change to `tool`, `on_failure`, their serde attributes, or `#[serde(deny_unknown_fields)]`. No engine logic change (Step 89). No CLI logic change (Step 90): `commands.rs:282` gets `args: Default::default(),` only.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1454p $S | grep -q '^#### 9.17.1 ' && ! grep -q 'pub gate_args' crates/orrery-core/src/config.rs && ! grep -q 'fn validate_tool_args' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs imports: add `use std::collections::BTreeMap;` in rustfmt order (first `std` line, before `use std::ffi::OsStr;`).
+2. config.rs `HookConfig`: after `on_failure`, add
+   `#[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]`
+   `pub args: serde_json::Map<String, serde_json::Value>,`
+   Keep the existing derives (`serde_json::Map` and `Value` implement `Eq`).
+3. config.rs, directly after `validate_concrete_tool_ref`: add
+   `pub fn validate_tool_args(args: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<()>`
+   - `args.contains_key("orrery")` → `Err(Error::Validation { field: field.to_string(), message: "'orrery' is reserved for Orrery's call context".to_string() })`.
+   - any value in `args` holds a JSON null at any depth → `Err(Error::Validation { field: field.to_string(), message: "null is not allowed (project.toml can't store it)".to_string() })`. Use a private recursive helper `fn json_contains_null(value: &serde_json::Value) -> bool` (`Null` → true; `Array` → any element; `Object` → any value; else false).
+   - otherwise `Ok(())`.
+   Why null: `toml` can't serialize unit, so `save_project` would fail after the edit with an unhelpful error.
+4. config.rs `HookConfig::validate(&self, field)`: after the `validate_concrete_tool_ref` call add
+   `let args_field = format!("{}.args", field.strip_suffix(".tool").unwrap_or(field));`
+   `validate_tool_args(&self.args, &args_field)?;`
+   So `"hooks.on_step_pass.tool"` reports args errors as `"hooks.on_step_pass.args"`.
+5. config.rs `ProjectConfig`: directly after `gate_tools`, add
+   `#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]`
+   `pub gate_args: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,`
+   `default_template`: add `gate_args: BTreeMap::new(),` after `gate_tools: Vec::new(),`.
+6. config.rs `validate_staging`: directly after the `gate_tools` loop, add
+   `for (key, args) in &self.gate_args {`
+   `    let field = format!("gate_args.\"{key}\"");`
+   `    if !self.gate_tools.iter().any(|t| t == key) { return Err(Error::Validation { field, message: format!("no gate_tools entry '{key}'") }); }`
+   `    validate_tool_args(args, &field)?;`
+   `}`
+7. Every other `HookConfig { .. }` struct literal in the workspace gets `args: Default::default(),` as its last field and nothing else: `config.rs` test at ~3001, all 19 in `engine.rs` `mod tests` (`grep -n 'HookConfig {' crates/orrery-core/src/engine.rs`), `commands.rs` ~282 and ~1606, `widgets.rs` ~1256.
+8. Tests in config.rs `mod tests` (build JSON maps with `serde_json::json!({..}).as_object().unwrap().clone()`):
+   - `hook_and_gate_args_round_trip_toml`: `let mut cfg = ProjectConfig::default_template("args-proj");` set `cfg.hooks.on_step_pass = Some(HookConfig { tool: "neb:git_commit_documented".to_string(), on_failure: HookFailure::Halt, args: <{"summary": "orrery step pass", "dry_run": false}> })`, `cfg.gate_tools = vec!["neb:gate_run".to_string()]`, `cfg.gate_args.insert("neb:gate_run".to_string(), <{"profile": "ci", "paths": ["src"]}>)`. Assert `cfg.validate_staging()` is `Ok`. `let text = toml::to_string_pretty(&cfg).unwrap(); let back: ProjectConfig = toml::from_str(&text).unwrap();` assert `back == cfg`.
+   - `hook_without_args_loads_empty_and_omits_key`: `let hook: HookConfig = toml::from_str("tool = \"git:commit\"\n").unwrap();` assert `hook.args.is_empty()`; assert `!toml::to_string(&hook).unwrap().contains("args")`. Then `let cfg = ProjectConfig::default_template("p");` assert `cfg.gate_args.is_empty()` and `!toml::to_string_pretty(&cfg).unwrap().contains("gate_args")`.
+   - `tool_args_reject_reserved_orrery_key`: hook on `on_step_pass` with tool `"neb:git_commit_documented"` and args `{"orrery": {}}` → `validate_staging()` is `Err(Error::Validation { field, .. })` with `field == "hooks.on_step_pass.args"`. Separately, a fresh template with `gate_tools = ["neb:gate_run"]` and `gate_args["neb:gate_run"] = {"orrery": 1}` → `field == "gate_args.\"neb:gate_run\""`.
+   - `tool_args_reject_null`: hook on `on_step_start` (tool `"git:status"`) with args `{"a": {"b": [1, null]}}` → `Err(Error::Validation { field, message })` with `field == "hooks.on_step_start.args"` and `message.contains("null")`.
+   - `gate_args_key_must_be_gate_tool`: template with empty `gate_tools` and `gate_args["neb:gate_run"] = {}` → `Err(Error::Validation { field, .. })` with `field == "gate_args.\"neb:gate_run\""`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn validate_tool_args(args: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<()>' crates/orrery-core/src/config.rs && grep -q 'pub gate_args: BTreeMap<String, serde_json::Map<String, serde_json::Value>>' crates/orrery-core/src/config.rs && grep -q 'pub args: serde_json::Map<String, serde_json::Value>' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(hook_and_gate_args_round_trip_toml|hook_without_args_loads_empty_and_omits_key|tool_args_reject_reserved_orrery_key|tool_args_reject_null|gate_args_key_must_be_gate_tool): test$')" -eq 5
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 89: Merge Configured Args into Hook and Gate Calls
+
+* **Recommended Command:** `/goal`
+
+Scope note: one file. The `orrery` object's contents don't change; only where it sits.
+
+```text
+[STEP_ID]
+STEP 89: a pure pub fn merge_tool_args builds call args from configured args plus the orrery object, and run_hook / run_gates use it
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1460-1462 (§9.17.2; binding)
+  - crates/orrery-core/src/engine.rs:1292-1330 (`run_hook`, its `let args = serde_json::json!({ "orrery": .. })`)
+  - crates/orrery-core/src/engine.rs:1392-1432 (`run_gates`, its `args` and the per-tool loop passing `args.clone()`)
+  - crates/orrery-core/src/engine.rs:1945 (`pub fn referenced_mcp_servers`: the new fn goes directly above it)
+  - crates/orrery-core/src/engine.rs:2166 (`test_context`), 2358 (`script_passing_step`), 3427-3470 (`gate_failure_blocks_pass`: gate test setup), 4052-4096 (`step_pass_hook_runs_after_pass`: hook test setup)
+  - crates/orrery-core/src/mcp.rs:391 (`MockMcpTransport::calls() -> Vec<(String, serde_json::Value)>`)
+  - crates/orrery-core/src/config.rs (`HookConfig.args`, `ProjectConfig.gate_args`, from Step 88)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The keys and values inside the `orrery` object stay exactly as they are. No change to hook role, gate role, `WriteScope`, success/failure handling or event emission.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1460p $S | grep -q '^#### 9.17.2 ' && grep -q 'pub gate_args: BTreeMap' crates/orrery-core/src/config.rs && ! grep -q 'pub fn merge_tool_args' crates/orrery-core/src/engine.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. engine.rs, directly above `pub fn referenced_mcp_servers`:
+   `pub fn merge_tool_args(configured: &serde_json::Map<String, serde_json::Value>, orrery: serde_json::Value) -> serde_json::Value {`
+   `    let mut merged = configured.clone();`
+   `    merged.insert("orrery".to_string(), orrery);`
+   `    serde_json::Value::Object(merged)`
+   `}`
+   Why insert last: config validation already rejects an `orrery` key; inserting last means Orrery's object still wins if a config bypassed validation.
+2. `run_hook`: replace `let args = serde_json::json!({ "orrery": { <fields> } });` with `let orrery = serde_json::json!({ <the same fields> });` then `let args = merge_tool_args(&hook_cfg.args, orrery);`.
+3. `run_gates`: replace `let args = serde_json::json!({ "orrery": { <fields> } });` with `let orrery = serde_json::json!({ <the same fields, "event": "gate"> });` and `let no_args = serde_json::Map::new();`. Inside the `for (idx, tool_ref)` loop, before `execute_for_role`: `let args = merge_tool_args(self.ctx.project.gate_args.get(tool_ref).unwrap_or(&no_args), orrery.clone());` and pass `args` (not `args.clone()`).
+4. Tests in engine.rs `mod tests` (maps via `serde_json::json!({..}).as_object().unwrap().clone()`):
+   - `merge_tool_args_adds_orrery_and_keeps_configured`: configured `{"summary": "s", "dry_run": false}`, orrery `json!({"event": "step_pass"})` → result `== json!({"summary": "s", "dry_run": false, "orrery": {"event": "step_pass"}})`.
+   - `merge_tool_args_empty_config_is_orrery_only`: `serde_json::Map::new()`, orrery `json!({"event": "gate"})` → `== json!({"orrery": {"event": "gate"}})`.
+   - `merge_tool_args_orrery_wins_over_configured`: configured `{"orrery": "x", "a": 1}`, orrery `json!({"event": "halt"})` → `== json!({"a": 1, "orrery": {"event": "halt"}})`.
+   - `step_pass_hook_sends_configured_args`: copy `step_pass_hook_runs_after_pass`'s setup with `HookConfig { tool: "git:tag".to_string(), on_failure: HookFailure::Halt, args: <{"summary": "orrery step pass", "dry_run": false}> }`. After the run (`RunOutcome::Completed { steps_passed: 1 }`): `calls.len() == 1`, `calls[0].1["summary"] == "orrery step pass"`, `calls[0].1["dry_run"] == false`, `calls[0].1["orrery"]["event"] == "step_pass"`.
+   - `gate_sends_per_tool_args`: `test_context` with orch/imp/val as in `gate_failure_blocks_pass`; `ctx.project.gate_tools = vec!["cargo:test".to_string(), "cargo:clippy".to_string()]`; `ctx.project.gate_args.insert("cargo:test".to_string(), <{"profile": "ci"}>)`; transport `MockMcpTransport::new("cargo")` `.with_tool("test", json!({"content": [{"type": "text", "text": "ok"}]}))` `.with_tool("clippy", json!({"content": [{"type": "text", "text": "clean"}]}))`, registered on a `McpGatekeeper` as in that test; `script_passing_step(&mock, "orch", "imp", "val")`. Run → `RunOutcome::Completed { steps_passed: 1 }`. `calls.len() == 2`; `calls[0].0 == "test"`, `calls[0].1["profile"] == "ci"`, `calls[0].1["orrery"]["event"] == "gate"`; `calls[1].0 == "clippy"`, `calls[1].1.get("profile").is_none()`, `calls[1].1["orrery"]["event"] == "gate"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn merge_tool_args(configured: &serde_json::Map<String, serde_json::Value>, orrery: serde_json::Value) -> serde_json::Value' crates/orrery-core/src/engine.rs && grep -q 'merge_tool_args(&hook_cfg.args, orrery)' crates/orrery-core/src/engine.rs && grep -q 'gate_args.get(tool_ref)' crates/orrery-core/src/engine.rs && test "$(grep -c 'let orrery = serde_json::json!({' crates/orrery-core/src/engine.rs)" -eq 2 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(merge_tool_args_adds_orrery_and_keeps_configured|merge_tool_args_empty_config_is_orrery_only|merge_tool_args_orrery_wins_over_configured|step_pass_hook_sends_configured_args|gate_sends_per_tool_args): test$')" -eq 5
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 90: CLI --args for Hooks and gate args
+
+* **Recommended Command:** `/goal`
+
+Scope note: two files. Reserved-key and null checks are not repeated in the CLI: `save_project` runs `validate_staging` (Step 88), so a bad value fails before anything is written.
+
+```text
+[STEP_ID]
+STEP 90: orrery hook set takes --args <JSON>, orrery gate args <SERVER:TOOL> <JSON> sets per-gate args, gate set drops stale gate_args and gate clear clears them
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1464-1467 (§9.17.3; binding)
+  - crates/orrery-cli/src/args.rs:384-391 (`GateCmd`), 428-442 (`HookCmd`), 448-638 (`every_spec_row_parses` rows array, `hook` rows at ~612-623)
+  - crates/orrery-cli/src/commands.rs:251-303 (`dispatch_gate`, `dispatch_hook`), 305-313 (`edit_project`: load, mutate, `save_project`), 1510-1620 (`gate_set_and_clear`, `hook_set_and_clear`: test setup to copy)
+  - crates/orrery-core/src/config.rs:1727-1736 (`save_project` → `validate_staging`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `GateCmd::Set { tools }` and `GateCmd::Clear` keep their argv shape. No change to other subcommands.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && sed -n 1464p $S | grep -q '^#### 9.17.3 ' && grep -q 'pub fn merge_tool_args' crates/orrery-core/src/engine.rs && ! grep -q 'fn parse_tool_args' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs `HookCmd::Set`: after `on_failure`, add `#[arg(long)] args: Option<String>,`.
+2. args.rs `GateCmd`: add variant `Args { tool: String, json: String },` between `Set` and `Clear`. Subcommand name is `args` (clap's default kebab-case of the variant).
+3. args.rs `every_spec_row_parses` rows: add `&["orrery", "hook", "set", "pass", "neb:git_commit_documented", "--args", "{\"dry_run\":false}"]` and `&["orrery", "gate", "args", "fs:test", "{\"profile\":\"ci\"}"]`.
+4. commands.rs: private `fn parse_tool_args(text: &str, field: &str) -> Result<serde_json::Map<String, serde_json::Value>>`: `serde_json::from_str::<serde_json::Value>(text)`; parse error → `Error::Validation { field: field.to_string(), message: format!("invalid JSON: {e}") }`; `Value::Object(map)` → `Ok(map)`; any other value → `Error::Validation { field: field.to_string(), message: "expected a JSON object".to_string() }`.
+5. commands.rs `dispatch_hook` `HookCmd::Set`: destructure `args`; `let args = match args { Some(text) => parse_tool_args(&text, "--args")?, None => serde_json::Map::new() };` and use it in the `HookConfig` literal (replacing Step 88's `args: Default::default()` there).
+6. commands.rs `dispatch_gate`:
+   - `Set { tools }`: inside `edit_project`, `cfg.gate_args.retain(|key, _| tools.contains(key));` before `cfg.gate_tools = tools;`.
+   - `Clear`: also `cfg.gate_args.clear();`.
+   - new `Args { tool, json }`: `let args = parse_tool_args(&json, "gate args")?;` then `edit_project`: if `!cfg.gate_tools.contains(&tool)` → `Err(Error::Validation { field: "gate args".to_string(), message: format!("'{tool}' is not in gate_tools; run 'orrery gate set' first") })`; if `args.is_empty()` → `cfg.gate_args.remove(&tool)`, else `cfg.gate_args.insert(tool.clone(), args)`. Print `Cleared gate args for <tool>` or `Set gate args for <tool>` with `write_stdout_line`. Return `Ok(0)`.
+7. Existing tests: `hook_set_and_clear`'s `HookCmd::Set { .. }` literal gets `args: None`. No other existing test changes.
+8. New tests in commands.rs `mod tests` (each starts with `TempDir`, `test_ctx()` and `Command::Init` as `hook_set_and_clear` does):
+   - `hook_set_with_args_saves_them`: `HookCmd::Set { event: HookEventArg::Pass, tool: "neb:git_commit_documented".to_string(), on_failure: HookFailureArg::Halt, args: Some(r#"{"summary":"orrery step pass","dry_run":false}"#.to_string()) }` → code 0; loaded `cfg.hooks.on_step_pass.unwrap().args == json!({"summary": "orrery step pass", "dry_run": false}).as_object().unwrap().clone()`.
+   - `hook_set_rejects_bad_args`: `args: Some(r#"{"orrery":{}}"#)` → `dispatch` returns `Err(Error::Validation { field, .. })` with `field == "hooks.on_step_pass.args"`, and the loaded config's `on_step_pass` is `None`. Then `args: Some("[1]")` → `Err(Error::Validation { field, .. })` with `field == "--args"`.
+   - `gate_args_set_replace_and_clear`: `gate set fs:test fs:lint`; `GateCmd::Args { tool: "fs:test", json: r#"{"profile":"ci"}"# }` → code 0, `cfg.gate_args["fs:test"]["profile"] == "ci"`; `Args { tool: "fs:missing", json: "{}" }` → `Err(Error::Validation { field, .. })` with `field == "gate args"`; `Args { tool: "fs:test", json: "{}" }` → `gate_args` empty; set `{"profile":"ci"}` again, then `gate set fs:lint` → `gate_args` empty; set `fs:lint` args `{"x":1}`, then `GateCmd::Clear` → `gate_tools` and `gate_args` both empty.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn parse_tool_args(text: &str, field: &str) -> Result<serde_json::Map<String, serde_json::Value>>' crates/orrery-cli/src/commands.rs && grep -q 'gate_args.retain' crates/orrery-cli/src/commands.rs && grep -q 'Args { tool: String, json: String }' crates/orrery-cli/src/args.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(hook_set_with_args_saves_them|hook_set_rejects_bad_args|gate_args_set_replace_and_clear): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 91: Live MCP Call with Merged Args
+
+* **Recommended Command:** `/goal`
+
+Scope note: one test file. Written and compiled, never run by the agent (Rules: live-backend tests). The operator runs it in User Step NEB-1.
+
+```text
+[STEP_ID]
+STEP 91: tests/live_mcp.rs gains live_stdio_call_with_merged_args, which calls ORRERY_LIVE_MCP_TOOL with merge_tool_args(ORRERY_LIVE_MCP_ARGS, orrery object) and asserts the result is not an error
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/tests/live_mcp.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1469-1470 (§9.17.4; binding)
+  - crates/orrery-core/tests/live_mcp.rs:1-41 (`live_stdio_list_and_call`: env parsing and connect)
+  - crates/orrery-core/src/mcp.rs:139-146 (`tool_result_is_error`, `tool_result_text`)
+  - crates/orrery-core/src/engine.rs (`merge_tool_args`, from Step 89)
+  - crates/orrery-core/Cargo.toml:40-42 (`live_mcp` needs `live-backends`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `live_stdio_list_and_call` keeps its behavior. Don't run the live test.
+
+[PRE_GATE]
+grep -q 'pub fn merge_tool_args' crates/orrery-core/src/engine.rs && ! grep -q 'live_stdio_call_with_merged_args' crates/orrery-core/tests/live_mcp.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. live_mcp.rs: move the `ORRERY_LIVE_MCP_CMD` parsing and `McpServerConfig` building into `fn live_server() -> McpServerConfig` (same `expect` messages, `server_id: "live"`), and use it from `live_stdio_list_and_call`. Why: both tests connect the same way.
+2. New `#[tokio::test] async fn live_stdio_call_with_merged_args()`:
+   - `let tool = std::env::var("ORRERY_LIVE_MCP_TOOL").expect("ORRERY_LIVE_MCP_TOOL must name a tool on the ORRERY_LIVE_MCP_CMD server");`
+   - `let raw = std::env::var("ORRERY_LIVE_MCP_ARGS").unwrap_or_else(|_| "{}".to_string());` parse with `serde_json::from_str::<serde_json::Value>`, `.expect("ORRERY_LIVE_MCP_ARGS must be JSON")`, then `.as_object().cloned().expect("ORRERY_LIVE_MCP_ARGS must be a JSON object")`.
+   - `let orrery = json!({ "project_name": "live-test", "run_id": "00000000-0000-0000-0000-000000000000", "step_number": 1, "step_title": "live merged args", "plan_step_sha256": "0".repeat(64), "event": "step_pass" });`
+   - `let args = orrery_core::engine::merge_tool_args(&configured, orrery);`
+   - connect with `RmcpTransport::connect(&live_server(), &InMemorySecretStore::new())`, then `let val = transport.call_tool(&tool, args).await.unwrap_or_else(|err| panic!("transport error calling '{tool}': {err}"));`
+   - `assert!(!tool_result_is_error(&val), "'{tool}' returned isError: {}", tool_result_text(&val));`
+3. Update the `use orrery_core::mcp::{..}` line to also import `tool_result_text`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo clippy -p orrery-core --all-targets --locked --features live-backends -- -D warnings && cargo test --workspace --locked && grep -q 'async fn live_stdio_call_with_merged_args' crates/orrery-core/tests/live_mcp.rs && grep -q 'ORRERY_LIVE_MCP_TOOL' crates/orrery-core/tests/live_mcp.rs && grep -q 'merge_tool_args(&configured, orrery)' crates/orrery-core/tests/live_mcp.rs && grep -q '!tool_result_is_error(&val)' crates/orrery-core/tests/live_mcp.rs
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### STEP 92: README Hook and Gate Args
+
+* **Recommended Command:** `/goal`
+
+Scope note: docs only. The README states only what Steps 88–91 built; it makes no claim about Nebulous behavior beyond the tool's own argument names.
+
+```text
+[STEP_ID]
+STEP 92: the README documents hook and gate args, the reserved orrery key, the new CLI forms, and the ORRERY_LIVE_MCP_TOOL / ORRERY_LIVE_MCP_ARGS env vars
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1451-1472 (§9.17; binding)
+  - README.md:117-124 (project layout bullets; the `project.toml` bullet), 147-172 (`## Live-backend tests`, env var list)
+  - crates/orrery-cli/src/args.rs (`HookCmd::Set`, `GateCmd::Args`, from Step 90)
+  - crates/orrery-core/tests/live_mcp.rs (`live_stdio_call_with_merged_args`, from Step 91)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No other README section changes.
+
+[PRE_GATE]
+grep -q 'live_stdio_call_with_merged_args' crates/orrery-core/tests/live_mcp.rs && grep -q '^## Live-backend tests' README.md && ! grep -q '^### Hook and gate arguments' README.md
+
+[MUTATION_SPEC]
+1. README.md: in the `project.toml` bullet, change ``gate_tools`` to ``gate_tools` (with optional `[gate_args]`)` and ``[hooks]`` to ``[hooks]` (each with optional `args`)`.
+2. README.md: add `### Hook and gate arguments` directly after the project layout bullet list (before `## Security`). Content:
+   - One sentence: each hook and gate is called with its configured `args` plus an `orrery` object (`project_name`, `run_id`, `step_number`, `step_title`, `plan_step_sha256`, `event`); `orrery` is reserved, and `args` can't contain `null`.
+   - A `toml` block:
+     `[hooks.on_step_pass]` / `tool = "neb:git_commit_documented"` / `on_failure = "Halt"` / `args = { summary = "orrery step pass", dry_run = false }`, then `[gate_args."neb:gate_run"]` / `profile = "ci"`.
+   - A `bash` block: `orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass","dry_run":false}'` and `orrery gate args neb:gate_run '{"profile":"ci"}'`.
+   - One sentence: `orrery gate args <tool> '{}'` removes a gate's args; `gate set` drops args for tools no longer listed; `gate clear` clears them.
+   Use `neb:gate_run` only as an example name; state it's an example.
+3. README.md env var list: directly after the `ORRERY_LIVE_MCP_CMD` bullet, add one bullet naming `ORRERY_LIVE_MCP_TOOL` (tool name on that server) and `ORRERY_LIVE_MCP_ARGS` (JSON object of args, default `{}`), used by `live_stdio_call_with_merged_args` in `live_mcp`. Say the test adds the `orrery` object itself and asserts the result is not an error. Match the existing bullets' format (backticked names, then a colon).
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && grep -q '^### Hook and gate arguments' README.md && grep -q 'ORRERY_LIVE_MCP_TOOL' README.md && grep -q 'orrery gate args' README.md && grep -q -- '--args' README.md
+
+[HALT_INVARIANT]
+Halt immediately after POST_GATE exits 0 and report verification status.
+```
+
+---
+
+### User Step: NEB-1
+
+After Step 92 is committed. This is the phase's acceptance check. Use a scratch project, not a real one: the hook makes a real git commit.
+
+1. Make a scratch git repo with a Nebulous tracker and make it neb's **active** project (`neb mcp` uses the registry's active project before its working directory):
+
+   ```bash
+   mkdir -p ~/scratch/orrery-neb && cd ~/scratch/orrery-neb && git init && neb init
+   ```
+
+   ```bash
+   neb project switch ~/scratch/orrery-neb
+   ```
+
+2. Live test, safe form (`dry_run` left out, so neb only reports). From the Orrery repo:
+
+   ```bash
+   ORRERY_LIVE_MCP_CMD="neb mcp" ORRERY_LIVE_MCP_TOOL=git_commit_documented ORRERY_LIVE_MCP_ARGS='{"summary":"orrery live test"}' cargo test -p orrery-core --locked --features orrery-core/live-backends --test live_mcp live_stdio_call_with_merged_args
+   ```
+
+   Expect: passes; `git -C ~/scratch/orrery-neb log --oneline` shows no new commit.
+
+3. Hook, commit form. In the scratch project, with its Orrery stages already set up:
+
+   ```bash
+   orrery mcp add-stdio --id neb --command neb --arg mcp
+   ```
+
+   ```bash
+   orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass","dry_run":false}'
+   ```
+
+   Make a `.tracker/` change with `neb task "orrery hook check 1"`, then `orrery run` one step to `Passed`. Expect: `git log -1 --stat` shows a commit titled from `orrery step pass` touching only `.tracker/`.
+
+4. Hook, no-commit form: `orrery hook set pass neb:git_commit_documented --args '{"summary":"orrery step pass"}'`, make another `.tracker/` change with `neb task "orrery hook check 2"`, pass another step. Expect: no new commit; the hook result in `orrery status` / the live log shows `"dry_run": true`.
+
+Report back: pass/fail for 2–4, plus `git log --oneline -3` from the scratch repo.

@@ -1448,3 +1448,25 @@ Operator-picked Phase G Lows F63-9, F64-5 and F62-5 (2026-11-17). Minimal fixes 
 #### 9.16.4 Secret input without copies (Step 83) (adds to §5.3)
 - `read_secret_from_stdin` and `read_secret_input` strip the trailing `\r` / `\n` by truncating the same `String` in place, so no second plaintext copy is allocated. (F64-5, copy half)
 
+### 9.17 Phase L: configured tool arguments (Steps 88–92, User Step NEB-1)
+Hooks and gates can send fixed arguments next to the `orrery` object, so a tool with required or safety-default arguments (Nebulous `git_commit_documented`: `summary` required, `dry_run` defaults to `true`) can be driven from `project.toml`. Existing configs load unchanged.
+
+#### 9.17.1 Config (Step 88) (adds to §5.2, §5.10.4)
+- `HookConfig { tool, on_failure, #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")] pub args: serde_json::Map<String, serde_json::Value> }`.
+- `ProjectConfig` gains, directly after `gate_tools`: `#[serde(default, skip_serializing_if = "BTreeMap::is_empty")] pub gate_args: BTreeMap<String, serde_json::Map<String, serde_json::Value>>`, keyed by a `gate_tools` entry. TOML: `[gate_args."neb:gate_run"]`. `gate_tools` keeps its `Vec<String>` shape.
+- `pub fn validate_tool_args(args: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<()>` (config.rs): `Error::Validation { field, .. }` when `args` has the key `"orrery"` (message: `'orrery' is reserved for Orrery's call context`) or holds a JSON `null` at any depth (message: `null is not allowed (project.toml can't store it)`; `toml` fails to serialize unit).
+- `HookConfig::validate(field)` also runs `validate_tool_args(&self.args, <field with ".tool" replaced by ".args">)`. `validate_staging` checks each `gate_args` key equals a `gate_tools` entry (else `Error::Validation { field: "gate_args.\"<key>\"", message: "no gate_tools entry '<key>'" }`) and runs `validate_tool_args(value, "gate_args.\"<key>\"")`.
+
+#### 9.17.2 Merged call arguments (Step 89) (overrides §5.10.4 / §9.8 hook and gate args)
+- `pub fn merge_tool_args(configured: &serde_json::Map<String, serde_json::Value>, orrery: serde_json::Value) -> serde_json::Value` (engine.rs): clone `configured`, insert `"orrery" => orrery` (replacing any key of that name), return the object. Pure, no I/O.
+- Hook call args = `merge_tool_args(&hook.args, <orrery object>)`. Gate call args for `gate_tools[i]` = `merge_tool_args(gate_args.get(gate_tools[i]) or empty, <orrery object>)`. The `orrery` object itself is unchanged. With no configured args the call is exactly `{ "orrery": { .. } }`, as before.
+
+#### 9.17.3 CLI (Step 90) (adds to §7)
+- `orrery hook set <EVENT> <SERVER:TOOL> [--on-failure halt|warn] [--args <JSON>]`: `--args` must parse to a JSON object; omitted means no args.
+- `orrery gate args <SERVER:TOOL> <JSON>`: sets `gate_args` for a tool already in `gate_tools`; `{}` removes the entry. `gate set` drops `gate_args` keys not in the new list; `gate clear` also clears `gate_args`.
+- A non-object or unparsable JSON value → `Error::Validation { field: "--args" }` (`hook set`) or `{ field: "gate args" }` (`gate args`). Reserved-key and `null` errors come from `save_project` → `validate_staging`, so nothing is written.
+
+#### 9.17.4 Live check and README (Steps 91–92)
+- `tests/live_mcp.rs::live_stdio_call_with_merged_args`: connects to `ORRERY_LIVE_MCP_CMD`, calls `ORRERY_LIVE_MCP_TOOL` with `merge_tool_args(<ORRERY_LIVE_MCP_ARGS, default {}>, <placeholder orrery object>)`, asserts the result is not `isError`.
+- README documents hook/gate `args`, the reserved `orrery` key, and the two new env vars.
+- Acceptance (User Step NEB-1): `on_step_pass` = `neb:git_commit_documented` with args `{"summary": "orrery step pass", "dry_run": false}` commits `.tracker/`; with `dry_run` omitted it does not.
