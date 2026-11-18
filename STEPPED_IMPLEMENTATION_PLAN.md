@@ -4815,7 +4815,7 @@ Halt immediately after POST_GATE exits 0 and report verification status.
 
 ### User Step: NEB-1
 
-After Step 92 is committed. This is the phase's acceptance check. Use a scratch project, not a real one: the hook makes a real git commit.
+After Step 92 is committed. This is the phase's acceptance check. `neb` must be built from Nebulous `bc00dd3` (STEP 40A) or later: older builds have no `dry_run` default and commit on every `git_commit_documented` call, so step 2 would commit. Rebuild with `/srv/devshare/Nebulous/scripts/install.sh --user` if `~/.local/bin/neb` predates 2026-11-18 11:48. Use a scratch project, not a real one: the hook makes a real git commit.
 
 1. Make a scratch git repo with a Nebulous tracker and make it neb's **active** project (`neb mcp` uses the registry's active project before its working directory):
 
