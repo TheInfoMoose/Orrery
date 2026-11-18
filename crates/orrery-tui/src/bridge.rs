@@ -99,7 +99,7 @@ pub struct EngineController {
     make_backends: Arc<dyn Fn() -> Result<Backends> + Send + Sync>,
     cancel: CancellationToken,
     operator_tx: Option<mpsc::Sender<OperatorDecision>>,
-    task: Option<JoinHandle<Result<RunOutcome>>>,
+    task: Option<JoinHandle<std::result::Result<RunOutcome, String>>>,
     engine_tx: mpsc::Sender<EngineEvent>,
     engine_rx: mpsc::Receiver<EngineEvent>,
     stream_tx: mpsc::Sender<StreamEvent>,
@@ -144,14 +144,14 @@ impl EngineController {
 
     fn apply_task_result(
         app: &mut App,
-        res: std::result::Result<Result<RunOutcome>, String>,
+        res: std::result::Result<std::result::Result<RunOutcome, String>, String>,
     ) -> bool {
         match res {
             Ok(Ok(_)) => false,
-            Ok(Err(err)) => {
+            Ok(Err(text)) => {
                 app.status = RunStatus::Error;
                 app.awaiting_operator = false;
-                app.status_message = Some(err.to_string());
+                app.status_message = Some(text);
                 true
             }
             Err(join_err) => {
@@ -237,8 +237,10 @@ impl EngineController {
         let stream_tx = self.stream_tx.clone();
 
         self.task = Some(tokio::spawn(async move {
-            let backends = (make_backends)()?;
-            let engine = build_engine(&store, backends).await?;
+            let backends = (make_backends)().map_err(|e| e.to_string())?;
+            let engine = build_engine(&store, backends)
+                .await
+                .map_err(|e| e.to_string())?;
 
             let mut eng_sub = engine.subscribe();
             let mut stream_sub = engine.subscribe_stream();
@@ -318,10 +320,11 @@ impl EngineController {
             )
             .await;
 
-            if let Err(ref err) = res {
+            let res = res.map_err(|err| engine.redact(&err.to_string()));
+            if let Err(ref text) = res {
                 let _ = stream_tx.try_send(StreamEvent {
                     kind: StreamEventKind::Error,
-                    text: err.to_string(),
+                    text: text.clone(),
                     ..StreamEvent::notice("")
                 });
             }
@@ -781,7 +784,7 @@ mod tests {
     use orrery_core::engine::{Backends, DriverSet, EngineEvent};
     use orrery_core::llm::{AgentDriver, MockAgentDriver};
     use orrery_core::mcp::MockMcpConnector;
-    use orrery_core::security::InMemorySecretStore;
+    use orrery_core::security::{InMemorySecretStore, SecretStore, SecretValue};
     use orrery_core::stream_log::{StreamEvent, StreamEventKind};
     use ratatui::layout::Rect;
     use tempfile::TempDir;
@@ -1362,7 +1365,9 @@ mod tests {
             .try_send(OperatorDecision::Approve)
             .expect("fill 1-slot op channel");
         controller.operator_tx = Some(op_tx);
-        controller.task = Some(tokio::spawn(std::future::pending::<Result<RunOutcome>>()));
+        controller.task = Some(tokio::spawn(std::future::pending::<
+            std::result::Result<RunOutcome, String>,
+        >()));
         controller
             .handle(&AppAction::Approve, &mut app)
             .await
@@ -2047,6 +2052,84 @@ mod tests {
                 StepStatus::Pending,
                 StepStatus::Pending,
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn run_error_is_redacted_in_tui() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::Auto);
+        store
+            .save_agent(&AgentConfig {
+                agent_id: "cloud-orch".into(),
+                display_name: "Cloud Orch".into(),
+                backend: AgentBackend::CloudApi {
+                    endpoint_url: "https://api.example.com/v1/chat/completions".into(),
+                    model: "cloud-model".into(),
+                    temperature: 0.0,
+                    max_context_tokens: 8192,
+                    keychain_service: "orrery.test".into(),
+                    keychain_account: "testuser".into(),
+                },
+            })
+            .expect("save cloud-orch");
+        app.config
+            .replace_agent(0, 0, "cloud-orch")
+            .expect("replace agent");
+        store.save_project(&app.config).expect("save project");
+
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.push(
+            "cloud-orch",
+            Err(Error::Agent {
+                agent_id: "cloud-orch".into(),
+                message: "upstream echoed sk-test-leak-123".into(),
+            }),
+        );
+        let driver_for_factory = Arc::clone(&driver);
+
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || {
+                let mut backends = make_mock_backends(Arc::clone(&driver_for_factory) as _);
+                let secrets = InMemorySecretStore::new();
+                secrets
+                    .set(
+                        "orrery.test",
+                        "testuser",
+                        &SecretValue::new("sk-test-leak-123"),
+                    )
+                    .expect("set secret");
+                backends.secrets = Arc::new(secrets);
+                Ok(backends)
+            }),
+        );
+
+        controller
+            .handle(&AppAction::Run, &mut app)
+            .await
+            .expect("handle Run");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if controller.poll_finished(&mut app).await {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("timed out");
+
+        assert_eq!(app.status, RunStatus::Error);
+        let msg = app.status_message.as_deref().expect("status_message");
+        assert!(msg.contains("[REDACTED]"), "got {msg:?}");
+        assert!(!msg.contains("sk-test-leak-123"), "leaked in {msg:?}");
+        assert!(
+            app.stream
+                .iter()
+                .all(|ev| !ev.text.contains("sk-test-leak-123")),
+            "leaked in stream: {:?}",
+            app.stream
         );
     }
 }
