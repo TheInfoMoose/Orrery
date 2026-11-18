@@ -19,10 +19,9 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **STEP 85** | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` | — |
-| 2 | **STEP 86** | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) | Step 85 |
-| 3 | **STEP 87** | `/goal` | README CI section | `README.md` | Step 86 |
-| 4 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
+| 1 | **STEP 86** | `/goal` | GitHub Actions CI: fmt, clippy, test | `.github/workflows/ci.yml` (NEW) | — |
+| 2 | **STEP 87** | `/goal` | README CI section | `README.md` | Step 86 |
+| 3 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 
 ### Completed
 
@@ -113,6 +112,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 82** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | MCP bearer header | `crates/orrery-core/src/mcp.rs` |
 | **STEP 83** | **COMPLETED** (2026-11-17, validate-step PASS) | `/goal` | Secret input without copies | `crates/orrery-cli/src/main.rs` |
 | **STEP 84** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Swap chrono for jiff in orrery-core | `Cargo.toml`, `Cargo.lock`, `crates/orrery-core/Cargo.toml`, `checkpoint.rs`, `stream_log.rs`, `llm.rs`, `engine.rs` |
+| **STEP 85** | **COMPLETED** (2026-11-18, gate fixed by Claude, re-run by Claude) | `/goal` | Spec and `deny.toml` follow Step 84 | `ORRERY_TECHNICAL_SPECIFICATION.md`, `deny.toml` |
 
 ---
 
@@ -4439,7 +4439,7 @@ grep -q 'jiff = ' Cargo.toml && test "$(grep -cE 'chrono|Utc' ORRERY_TECHNICAL_S
 4. deny.toml: replace the comment and `reason` of the RUSTSEC-2026-0543 entry. Comment: `# chrono is unmaintained (all versions; no safe upgrade). orrery-core no longer uses it (Step 84), but rmcp 3.9 still depends on it, so it stays in the tree. Revisit when rmcp drops chrono. Accepted 2026-11-17, narrowed 2026-11-18.` Reason: `"chrono unmaintained; transitive via rmcp 3.9 only, no safe upgrade"`. The `id` stays.
 
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && ! grep -qE 'chrono|Utc' ORRERY_TECHNICAL_SPECIFICATION.md && grep -q 'transitive via rmcp 3.9 only' deny.toml && grep -q 'RUSTSEC-2026-0543' deny.toml
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && test "$(grep -cE 'chrono|Utc' ORRERY_TECHNICAL_SPECIFICATION.md)" -eq 1 && grep -q 'Replaced chrono in Step 84' ORRERY_TECHNICAL_SPECIFICATION.md && grep -q 'transitive via rmcp 3.9 only' deny.toml && grep -q 'RUSTSEC-2026-0543' deny.toml
 
 [HALT_INVARIANT]
 Halt immediately after POST_GATE exits 0 and report verification status.
