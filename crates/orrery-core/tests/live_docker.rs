@@ -128,6 +128,7 @@ async fn live_cli_driver_reads_report() {
         kind: RoleKind::Implementer,
         rules_file: "roles/coder.md".to_string(),
         allowed_mcp_tools: Vec::new(),
+        skills: Vec::new(),
     };
     let agent = AgentConfig {
         agent_id: "live-cli".to_string(),

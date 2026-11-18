@@ -53,6 +53,7 @@ async fn live_single_turn() {
         kind: RoleKind::Implementer,
         rules_file: "roles/coder.md".to_string(),
         allowed_mcp_tools: Vec::new(),
+        skills: Vec::new(),
     };
     let agent = AgentConfig {
         agent_id: "live-coder".to_string(),
@@ -133,6 +134,7 @@ async fn live_cloud_api_turn() {
         kind: RoleKind::Implementer,
         rules_file: "roles/coder.md".to_string(),
         allowed_mcp_tools: Vec::new(),
+        skills: Vec::new(),
     };
     let agent = AgentConfig {
         agent_id: "live-cloud".to_string(),

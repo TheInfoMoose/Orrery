@@ -847,6 +847,7 @@ mod tests {
             kind: RoleKind::Implementer,
             rules_file: "roles/coder.md".to_string(),
             allowed_mcp_tools: allowed_mcp_tools.into_iter().map(String::from).collect(),
+            skills: Vec::new(),
         }
     }
 

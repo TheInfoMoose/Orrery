@@ -587,6 +587,7 @@ mod tests {
             kind,
             rules_file: format!("roles/{id}.md"),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         }
     }
 

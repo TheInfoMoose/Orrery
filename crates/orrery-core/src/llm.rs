@@ -1367,6 +1367,7 @@ mod tests {
             kind,
             rules_file: "roles/coder.md".to_string(),
             allowed_mcp_tools: vec!["filesystem:*".to_string()],
+            skills: Vec::new(),
         }
     }
 

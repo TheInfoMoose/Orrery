@@ -572,6 +572,7 @@ fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Resu
                 kind: RoleKind::from(kind),
                 rules_file: format!("{id}.md"),
                 allowed_mcp_tools: allow_tools,
+                skills: Vec::new(),
             };
             store.save_role(&role, &rules_markdown)?;
             write_stdout_line(ctx, &format!("Saved role '{}'", role.role_id))?;

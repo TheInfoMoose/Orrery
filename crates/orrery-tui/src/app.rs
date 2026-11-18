@@ -1200,6 +1200,7 @@ mod tests {
                 kind: RoleKind::Orchestrator,
                 rules_file: "roles/orchestrator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "coder".to_string(),
@@ -1207,6 +1208,7 @@ mod tests {
                 kind: RoleKind::Implementer,
                 rules_file: "roles/coder.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "validator".to_string(),
@@ -1214,6 +1216,7 @@ mod tests {
                 kind: RoleKind::Validator,
                 rules_file: "roles/validator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
         ]
     }

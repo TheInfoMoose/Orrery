@@ -654,6 +654,8 @@ pub struct RoleConfig {
     pub rules_file: String,
     #[serde(default)]
     pub allowed_mcp_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 }
 
 impl RoleConfig {
@@ -717,6 +719,15 @@ impl RoleConfig {
 
         for (idx, pattern) in self.allowed_mcp_tools.iter().enumerate() {
             validate_role_tool_pattern(pattern, &format!("allowed_mcp_tools[{idx}]"))?;
+        }
+        for (idx, name) in self.skills.iter().enumerate() {
+            validate_config_file_id(name, &format!("skills[{idx}]"))?;
+            if self.skills[..idx].contains(name) {
+                return Err(Error::Validation {
+                    field: format!("skills[{idx}]"),
+                    message: format!("duplicate skill '{name}'"),
+                });
+            }
         }
         Ok(())
     }
@@ -2381,6 +2392,7 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 kind: RoleKind::Orchestrator,
                 rules_file: "orchestrator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             "# Orchestrator Role Rules\n\nCoordinate stage execution and dispatch tasks per the stepped implementation plan.\n",
         ),
@@ -2391,6 +2403,7 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 kind: RoleKind::Implementer,
                 rules_file: "coder.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             "# Implementation Role Rules\n\nImplement the allocated plan step changes within the assigned write scope.\n",
         ),
@@ -2401,6 +2414,7 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 kind: RoleKind::Validator,
                 rules_file: "validator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             "# Validator Role Rules\n\nVerify that all requirements and quality gates for the current plan step are satisfied.\n",
         ),
@@ -2421,6 +2435,7 @@ mod tests {
                 kind: RoleKind::Orchestrator,
                 rules_file: "orchestrator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "coder".to_string(),
@@ -2432,6 +2447,7 @@ mod tests {
                     "filesystem:write_file".to_string(),
                     "cargo:check".to_string(),
                 ],
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "validator".to_string(),
@@ -2439,6 +2455,7 @@ mod tests {
                 kind: RoleKind::Validator,
                 rules_file: "validator.md".to_string(),
                 allowed_mcp_tools: vec!["cargo:*".to_string()],
+                skills: Vec::new(),
             },
         ]
     }
@@ -2684,6 +2701,7 @@ transport = { type = "StreamableHttp", endpoint_url = "https://mcp.example.com/m
             kind: RoleKind::Orchestrator,
             rules_file: "orchestrator.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         });
         let agents = sample_agents();
 
@@ -3006,6 +3024,7 @@ unknown = 123
             kind: RoleKind::Validator,
             rules_file: "reader.md".to_string(),
             allowed_mcp_tools: vec!["filesystem:read_file".to_string()],
+            skills: Vec::new(),
         };
         assert!(!read_only_role.is_writer(&servers, &[]));
 
@@ -3343,6 +3362,7 @@ lifecycle = { type = "External" }
             kind: RoleKind::Implementer,
             rules_file: "coder.md".to_string(),
             allowed_mcp_tools: vec!["filesystem:read_file".to_string()],
+            skills: Vec::new(),
         };
         let global_auditor = RoleConfig {
             role_id: "auditor".to_string(),
@@ -3350,6 +3370,7 @@ lifecycle = { type = "External" }
             kind: RoleKind::Validator,
             rules_file: "auditor.md".to_string(),
             allowed_mcp_tools: vec!["cargo:clippy".to_string()],
+            skills: Vec::new(),
         };
         atomic_write(
             &global_roles_dir.join("coder.toml"),
@@ -3375,6 +3396,7 @@ lifecycle = { type = "External" }
             kind: RoleKind::Implementer,
             rules_file: "coder.md".to_string(),
             allowed_mcp_tools: vec!["cargo:check".to_string()],
+            skills: Vec::new(),
         };
         store
             .save_role(&project_coder, "project coder rules")
@@ -4174,6 +4196,7 @@ max_context_tokens = 1024
             kind: RoleKind::Validator,
             rules_file: "reviewer.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         atomic_write(
             &roles_dir.join("custom.toml"),
@@ -4250,6 +4273,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "shared.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         let role_two = RoleConfig {
             role_id: "role-two".to_string(),
@@ -4257,6 +4281,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "shared.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         store.save_role(&role_one, "# Shared rules\n").unwrap();
         store.save_role(&role_two, "# Shared rules\n").unwrap();
@@ -4305,6 +4330,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "shared.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         let role_two = RoleConfig {
             role_id: "role-two".to_string(),
@@ -4312,6 +4338,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "shared.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         store.save_role(&role_one, "# Shared rules\n").unwrap();
         store.save_role(&role_two, "# Shared rules\n").unwrap();
@@ -4337,6 +4364,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "solo.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         let other = RoleConfig {
             role_id: "other".to_string(),
@@ -4344,6 +4372,7 @@ max_context_tokens = 1024
             kind: RoleKind::Implementer,
             rules_file: "other.md".to_string(),
             allowed_mcp_tools: Vec::new(),
+            skills: Vec::new(),
         };
         store.save_role(&solo, "# Solo rules\n").unwrap();
         store.save_role(&other, "# Other rules\n").unwrap();
@@ -4460,6 +4489,54 @@ max_context_tokens = 1024
                 assert_eq!(field, "gate_args.\"neb:gate_run\"");
             }
             other => panic!("expected Validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn role_skills_default_empty_and_omitted() {
+        let role: RoleConfig = toml::from_str(
+            "role_id = \"coder\"\ndisplay_name = \"Coder\"\nkind = \"Implementer\"\nrules_file = \"coder.md\"\n",
+        )
+        .unwrap();
+        assert!(role.skills.is_empty());
+        assert!(!toml::to_string(&role).unwrap().contains("skills"));
+    }
+
+    #[test]
+    fn role_skills_round_trip_and_validate() {
+        let role = RoleConfig {
+            role_id: "coder".to_string(),
+            display_name: "Coder".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "coder.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+            skills: vec!["rust-style".to_string(), "neb-tracker".to_string()],
+        };
+        assert!(role.validate().is_ok());
+        let text = toml::to_string(&role).unwrap();
+        let back: RoleConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back, role);
+    }
+
+    #[test]
+    fn role_skills_reject_bad_names() {
+        let mut role = RoleConfig {
+            role_id: "coder".to_string(),
+            display_name: "Coder".to_string(),
+            kind: RoleKind::Implementer,
+            rules_file: "coder.md".to_string(),
+            allowed_mcp_tools: Vec::new(),
+            skills: vec!["../x".to_string()],
+        };
+        assert!(matches!(role.validate(), Err(Error::PathTraversal { .. })));
+
+        role.skills = vec!["a".to_string(), "a".to_string()];
+        match role.validate() {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "skills[1]");
+                assert_eq!(message, "duplicate skill 'a'");
+            }
+            other => panic!("expected duplicate skill Validation error, got {other:?}"),
         }
     }
 }

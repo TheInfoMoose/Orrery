@@ -814,6 +814,7 @@ mod tests {
                 kind: RoleKind::Orchestrator,
                 rules_file: "roles/orchestrator.md".into(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "coder".into(),
@@ -821,6 +822,7 @@ mod tests {
                 kind: RoleKind::Implementer,
                 rules_file: "roles/coder.md".into(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "validator".into(),
@@ -828,6 +830,7 @@ mod tests {
                 kind: RoleKind::Validator,
                 rules_file: "roles/validator.md".into(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
         ];
         let agents = vec![

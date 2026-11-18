@@ -272,6 +272,7 @@ fn build_hook_role(hooks: &HooksConfig) -> RoleConfig {
         kind: RoleKind::Orchestrator,
         rules_file: String::new(),
         allowed_mcp_tools,
+        skills: Vec::new(),
     }
 }
 
@@ -1406,6 +1407,7 @@ impl WorkflowEngine {
             kind: RoleKind::Validator,
             rules_file: String::new(),
             allowed_mcp_tools: self.ctx.project.gate_tools.clone(),
+            skills: Vec::new(),
         };
         let orrery = serde_json::json!({
             "project_name": self.ctx.project.project_name,
@@ -2208,6 +2210,7 @@ mod tests {
                 kind: *kind,
                 rules_file: format!("roles/{role_id}.md"),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             });
             role_rules.insert(role_id.clone(), format!("Rules for {role_id}"));
 
@@ -5649,6 +5652,7 @@ mod tests {
                 kind: RoleKind::Orchestrator,
                 rules_file: "orchestrator.md".to_string(),
                 allowed_mcp_tools: vec!["fs:read_file".to_string()],
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "coder".to_string(),
@@ -5656,6 +5660,7 @@ mod tests {
                 kind: RoleKind::Implementer,
                 rules_file: "coder.md".to_string(),
                 allowed_mcp_tools: vec!["git:*".to_string()],
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "validator".to_string(),
@@ -5663,6 +5668,7 @@ mod tests {
                 kind: RoleKind::Validator,
                 rules_file: "validator.md".to_string(),
                 allowed_mcp_tools: Vec::new(),
+                skills: Vec::new(),
             },
             RoleConfig {
                 role_id: "researcher".to_string(),
@@ -5670,6 +5676,7 @@ mod tests {
                 kind: RoleKind::Implementer,
                 rules_file: "researcher.md".to_string(),
                 allowed_mcp_tools: vec!["web:fetch".to_string()],
+                skills: Vec::new(),
             },
         ];
 
