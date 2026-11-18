@@ -22,7 +22,7 @@ use crate::docker::{
 };
 use crate::llm::{
     AgentDriver, AgentInvocation, CliContainerDriver, HttpChatDriver, StageSummary,
-    build_orchestrator_prompt, build_system_prompt, build_user_prompt,
+    build_agent_system_prompt, build_orchestrator_prompt, build_user_prompt,
 };
 use crate::mcp::{
     McpConnector, McpGatekeeper, RmcpConnector, WriteScope, tool_result_is_error, tool_result_text,
@@ -1675,7 +1675,14 @@ impl WorkflowEngine {
             .unwrap_or_default();
 
         let prior = self.ctx.checkpoints.load_reports(step.number, None)?;
-        let system_prompt = build_system_prompt(&role, rules, &agent.backend);
+        let system_prompt = build_agent_system_prompt(
+            &role,
+            rules,
+            &agent.backend,
+            0,
+            self.ctx.project.stages.len(),
+            self.ctx.project.effective_validation_mode(&self.ctx.roles),
+        );
         let user_prompt = build_orchestrator_prompt(step, stage_summaries, &prior, notes);
         let tools = self.ctx.gatekeeper.tools_for_role(&role);
 
@@ -1759,6 +1766,7 @@ impl WorkflowEngine {
         };
 
         let prior = self.ctx.checkpoints.load_reports(step.number, None)?;
+        let mode = self.ctx.project.effective_validation_mode(&self.ctx.roles);
 
         let mut invocations = Vec::with_capacity(effective_allocations.len());
         for alloc in &effective_allocations {
@@ -1768,7 +1776,14 @@ impl WorkflowEngine {
             } else {
                 WriteScope::new(alloc.write_scope.clone())?
             };
-            let system_prompt = build_system_prompt(&role, rules, &agent.backend);
+            let system_prompt = build_agent_system_prompt(
+                &role,
+                rules,
+                &agent.backend,
+                stage_index,
+                self.ctx.project.stages.len(),
+                mode,
+            );
             let user_prompt = build_user_prompt(step, Some(alloc), &prior, &[]);
             invocations.push(AgentInvocation {
                 run_id: state.run_id,
@@ -2156,8 +2171,8 @@ mod tests {
     use crate::config::{
         AgentBackend, AgentConfig, ConfigStore, ExecutionMode, HookConfig, HookEvent, HookFailure,
         HooksConfig, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
-        McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, StageConfig, WorkspaceMount,
-        WriteToolSpec,
+        McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, StageConfig, ValidationMode,
+        WorkspaceMount, WriteToolSpec,
     };
     use crate::docker::{
         MockCall, MockContainerBackend, MockInferenceControl, ResourceManager, cli_container_name,
@@ -6491,5 +6506,78 @@ mod tests {
         assert_eq!(calls[1].0, "clippy");
         assert!(calls[1].1.get("profile").is_none());
         assert_eq!(calls[1].1["orrery"]["event"], "gate");
+    }
+
+    #[tokio::test]
+    async fn agents_receive_protocol_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let invs = mock.invocations();
+        let s0 = invs.iter().find(|i| i.stage_index == 0).unwrap();
+        assert!(
+            s0.system_prompt
+                .contains("Allowed statuses: `Dispatch`, `StepPassed`, `Escalate`.")
+        );
+        let s1 = invs.iter().find(|i| i.stage_index == 1).unwrap();
+        assert!(
+            s1.system_prompt
+                .contains("Allowed statuses: `Complete`, `Blocked`.")
+        );
+        let s2 = invs.iter().find(|i| i.stage_index == 2).unwrap();
+        assert!(
+            s2.system_prompt
+                .contains("Allowed statuses: `Confirmed`, `Denied`.")
+        );
+        for inv in &invs {
+            assert!(inv.system_prompt.contains("# Orrery protocol"));
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrator_contract_follows_validation_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+            ],
+        );
+        ctx.project.validation_mode = ValidationMode::GateAndOperator;
+        let mock = attach_mock_driver(&mut ctx);
+        mock.push("orch", Ok(dispatch_report(1, "imp", "Implement step")));
+        mock.push("imp", Ok(complete_report()));
+        mock.push("orch", Ok(step_passed_report()));
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::AwaitingOperator { .. }));
+
+        let invs = mock.invocations();
+        let s0 = invs.iter().find(|i| i.stage_index == 0).unwrap();
+        assert!(
+            s0.system_prompt
+                .contains("Orrery then runs the gate tools and asks the operator.")
+        );
     }
 }
