@@ -132,6 +132,18 @@ In the `Ingest` modal, `Tab` / `BackTab` switches between the plan path input an
   - Residual risk: Secrets are injected as an environment variable at container create time and the container is removed when the stage ends. Anyone with Docker socket access can read container environment variables while it runs (that access is already root-equivalent).
   - Residual risk: A `ReadWrite` mount (`--mount rw`) can write `.git/hooks`, which the host runs at the next `git` command.
 
+## CI
+
+`.github/workflows/ci.yml` runs the following gates on every push to `main` and every pull request (and you can run the same gates locally):
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+CI runs on Ubuntu x86_64 with Rust 1.99.1 and installs `libdbus-1-dev` and `pkg-config`. The live-backend tests are not run in CI because they need a feature flag and real backends.
+
 ## Live-backend tests
 
 Live-backend integration tests live in `crates/orrery-core/tests/live_*.rs` behind the `live-backends` feature flag and are not run in the default test gate.
