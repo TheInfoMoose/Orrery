@@ -214,7 +214,7 @@ pub struct StampedReport {
     pub stage_index: usize,
     pub role_id: String,
     pub agent_id: String,
-    pub recorded_at: chrono::DateTime<chrono::Utc>,
+    pub recorded_at: jiff::Timestamp,
     pub report: AgentReport,
 }
 
@@ -254,7 +254,7 @@ pub struct HookResult {
     pub tool: String,
     pub success: bool,
     pub output: String,
-    pub recorded_at: chrono::DateTime<chrono::Utc>,
+    pub recorded_at: jiff::Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -556,7 +556,7 @@ impl CheckpointManager {
 mod tests {
     use std::collections::BTreeSet;
 
-    use chrono::{TimeZone, Utc};
+    use jiff::Timestamp;
     use tempfile::TempDir;
 
     use super::{
@@ -849,7 +849,7 @@ extra = 123
             stage_index: 0,
             role_id: "orchestrator".to_string(),
             agent_id: "local-orch".to_string(),
-            recorded_at: Utc.with_ymd_and_hms(2026, 11, 13, 18, 0, 0).unwrap(),
+            recorded_at: "2026-11-13T18:00:00Z".parse::<Timestamp>().unwrap(),
         };
 
         let encoded = toml::to_string(&stamped).unwrap();
@@ -926,7 +926,7 @@ extra = 123
             stage_index,
             role_id: "coder".to_string(),
             agent_id: agent_id.to_string(),
-            recorded_at: Utc.with_ymd_and_hms(2026, 11, 13, 19, 0, 0).unwrap(),
+            recorded_at: "2026-11-13T19:00:00Z".parse::<Timestamp>().unwrap(),
             report: base_report(ReportStatus::Complete),
         }
     }
@@ -981,7 +981,7 @@ extra = 123
             tool: "git:status".to_string(),
             success: true,
             output: "clean".to_string(),
-            recorded_at: Utc.with_ymd_and_hms(2026, 11, 13, 19, 30, 0).unwrap(),
+            recorded_at: "2026-11-13T19:30:00Z".parse::<Timestamp>().unwrap(),
         });
 
         mgr.save_state(&cp).unwrap();
@@ -1283,11 +1283,52 @@ extra = 123
                 tool: "git:status".to_string(),
                 success: true,
                 output: "ok".to_string(),
-                recorded_at: Utc.with_ymd_and_hms(2026, 11, 13, 19, 30, 0).unwrap(),
+                recorded_at: "2026-11-13T19:30:00Z".parse::<Timestamp>().unwrap(),
             });
         }
         assert_eq!(cp.hook_results.len(), 200);
         assert_eq!(cp.hook_results[0].step_number, 6);
         assert_eq!(cp.hook_results[199].step_number, 205);
+    }
+
+    #[test]
+    fn stamped_report_reads_legacy_timestamp() {
+        let stamped = StampedReport {
+            step_number: 7,
+            plan_step_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            round: 1,
+            stage_index: 0,
+            role_id: "orchestrator".to_string(),
+            agent_id: "local-orch".to_string(),
+            recorded_at: Timestamp::UNIX_EPOCH,
+            report: base_report(ReportStatus::Dispatch),
+        };
+        for text in ["2026-11-13T18:00:00Z", "2026-11-13T10:00:00.123456789Z"] {
+            let mut value = serde_json::to_value(&stamped).unwrap();
+            value["recorded_at"] = serde_json::json!(text);
+            let decoded: StampedReport = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.recorded_at, text.parse::<Timestamp>().unwrap());
+            assert_eq!(serde_json::to_value(&decoded).unwrap()["recorded_at"], text);
+        }
+    }
+
+    #[test]
+    fn hook_result_reads_legacy_timestamp() {
+        let hook = HookResult {
+            event: HookEvent::StepStart,
+            step_number: 2,
+            tool: "git:status".to_string(),
+            success: true,
+            output: "clean".to_string(),
+            recorded_at: Timestamp::UNIX_EPOCH,
+        };
+        for text in ["2026-11-13T18:00:00Z", "2026-11-13T10:00:00.123456789Z"] {
+            let mut value = serde_json::to_value(&hook).unwrap();
+            value["recorded_at"] = serde_json::json!(text);
+            let decoded: HookResult = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.recorded_at, text.parse::<Timestamp>().unwrap());
+            assert_eq!(serde_json::to_value(&decoded).unwrap()["recorded_at"], text);
+        }
     }
 }

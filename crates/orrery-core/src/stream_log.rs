@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -28,7 +28,7 @@ pub enum StreamEventKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamEvent {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub step_number: Option<usize>,
     pub stage_index: Option<usize>,
     pub agent_id: Option<String>,
@@ -39,7 +39,7 @@ pub struct StreamEvent {
 impl StreamEvent {
     pub fn notice(text: impl Into<String>) -> Self {
         Self {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             step_number: None,
             stage_index: None,
             agent_id: None,
@@ -248,7 +248,7 @@ impl LiveStreamHub {
 
         if let Some(msg) = write_err {
             let err_event = StreamEvent {
-                timestamp: Utc::now(),
+                timestamp: Timestamp::now(),
                 step_number: None,
                 stage_index: None,
                 agent_id: None,
@@ -557,7 +557,7 @@ mod tests {
     use std::io::Write;
     use std::sync::Arc;
 
-    use chrono::Utc;
+    use jiff::Timestamp;
     use tempfile::TempDir;
 
     use super::{
@@ -614,7 +614,7 @@ mod tests {
 
         for i in 0..10 {
             hub.emit(StreamEvent {
-                timestamp: Utc::now(),
+                timestamp: Timestamp::now(),
                 step_number: Some(1),
                 stage_index: Some(0),
                 agent_id: Some("coder".into()),
@@ -1094,5 +1094,17 @@ mod tests {
             tail_log(dir.path(), 10).expect("tail_log"),
             vec!["x\u{FFFD}y".to_string()]
         );
+    }
+
+    #[test]
+    fn stream_event_reads_legacy_timestamp() {
+        let ev = StreamEvent::notice("hello");
+        for text in ["2026-11-13T18:00:00Z", "2026-11-13T10:00:00.123456789Z"] {
+            let mut value = serde_json::to_value(&ev).unwrap();
+            value["timestamp"] = serde_json::json!(text);
+            let decoded: StreamEvent = serde_json::from_value(value).unwrap();
+            assert_eq!(decoded.timestamp, text.parse::<Timestamp>().unwrap());
+            assert_eq!(serde_json::to_value(&decoded).unwrap()["timestamp"], text);
+        }
     }
 }

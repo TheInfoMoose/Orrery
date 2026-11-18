@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use futures_util::StreamExt;
+use jiff::Timestamp;
 use serde::Deserialize;
 
 use crate::checkpoint::{AgentReport, StampedReport, SubtaskAllocation, report_json_schema};
@@ -691,7 +691,7 @@ impl LineBuffer {
 
     fn emit_line(&self, text: String, inv: &AgentInvocation, stream: &LiveStreamHub) -> Result<()> {
         stream.emit(StreamEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             step_number: Some(inv.step_number),
             stage_index: Some(inv.stage_index),
             agent_id: Some(inv.agent.agent_id.clone()),
@@ -908,7 +908,7 @@ impl TurnState {
                 Ok(pair) => pair,
                 Err(err) => {
                     stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(inv.step_number),
                         stage_index: Some(inv.stage_index),
                         agent_id: Some(inv.agent.agent_id.clone()),
@@ -935,7 +935,7 @@ impl TurnState {
             match exec_res {
                 Ok(val) => {
                     stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(inv.step_number),
                         stage_index: Some(inv.stage_index),
                         agent_id: Some(inv.agent.agent_id.clone()),
@@ -950,7 +950,7 @@ impl TurnState {
                 }
                 Err(err) => {
                     stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(inv.step_number),
                         stage_index: Some(inv.stage_index),
                         agent_id: Some(inv.agent.agent_id.clone()),
@@ -1169,7 +1169,7 @@ impl AgentDriver for CliContainerDriver {
 
             let on_output = |line: String| {
                 let _ = stream.emit(StreamEvent {
-                    timestamp: Utc::now(),
+                    timestamp: Timestamp::now(),
                     step_number: Some(inv.step_number),
                     stage_index: Some(inv.stage_index),
                     agent_id: Some(inv.agent.agent_id.clone()),
@@ -1243,7 +1243,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use chrono::Utc;
+    use jiff::Timestamp;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1321,7 +1321,7 @@ mod tests {
             stage_index,
             role_id: "coder".to_string(),
             agent_id: agent_id.to_string(),
-            recorded_at: Utc::now(),
+            recorded_at: Timestamp::now(),
             report: AgentReport {
                 status,
                 summary: summary.to_string(),
@@ -1421,7 +1421,7 @@ mod tests {
 
         let sentinel = "STREAM-SENTINEL-7f3a";
         hub.emit(StreamEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             step_number: Some(1),
             stage_index: Some(1),
             agent_id: Some("coder-1".to_string()),

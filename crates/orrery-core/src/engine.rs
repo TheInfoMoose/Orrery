@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -384,7 +384,7 @@ impl WorkflowEngine {
                         .map(|&i| self.ctx.plan.steps.get(i).map_or(i + 1, |s| s.number))
                         .collect();
                     self.ctx.stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: None,
                         stage_index: None,
                         agent_id: None,
@@ -1359,7 +1359,7 @@ impl WorkflowEngine {
             tool: hook_cfg.tool.clone(),
             success,
             output: output.clone(),
-            recorded_at: Utc::now(),
+            recorded_at: Timestamp::now(),
         });
         self.ctx.checkpoints.save_state(state)?;
 
@@ -1376,7 +1376,7 @@ impl WorkflowEngine {
                     format!("hook {event_str} ({}) failed: {output}", hook_cfg.tool)
                 };
                 self.ctx.stream.emit(StreamEvent {
-                    timestamp: Utc::now(),
+                    timestamp: Timestamp::now(),
                     step_number: Some(step.number),
                     stage_index: None,
                     agent_id: None,
@@ -1443,7 +1443,7 @@ impl WorkflowEngine {
                         format!("{server_id}:{tool} passed: {text}")
                     };
                     self.ctx.stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(step.number),
                         stage_index: None,
                         agent_id: None,
@@ -1460,7 +1460,7 @@ impl WorkflowEngine {
                     };
                     let msg = format!("gate '{server_id}:{tool}' failed: {detail}");
                     self.ctx.stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(step.number),
                         stage_index: None,
                         agent_id: None,
@@ -1476,7 +1476,7 @@ impl WorkflowEngine {
                     };
                     let msg = format!("gate '{server_id}:{tool}' failed: {detail}");
                     self.ctx.stream.emit(StreamEvent {
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         step_number: Some(step.number),
                         stage_index: None,
                         agent_id: None,
@@ -1871,7 +1871,7 @@ impl WorkflowEngine {
         agent_id: &str,
         report: &AgentReport,
     ) -> Result<()> {
-        let recorded_at = Utc::now();
+        let recorded_at = Timestamp::now();
         let stamped = StampedReport {
             step_number: step.number,
             plan_step_sha256: step.sha256_hex.clone(),
@@ -2135,7 +2135,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use chrono::Utc;
+    use jiff::Timestamp;
     use tokio_util::sync::CancellationToken;
 
     use super::{
@@ -5498,7 +5498,7 @@ mod tests {
             .ctx
             .stream
             .emit(StreamEvent {
-                timestamp: Utc::now(),
+                timestamp: Timestamp::now(),
                 step_number: Some(1),
                 stage_index: Some(1),
                 agent_id: Some("imp".to_string()),
@@ -6198,7 +6198,7 @@ mod tests {
                 stage_index: 0,
                 role_id: "orchestrator".to_string(),
                 agent_id: "orch".to_string(),
-                recorded_at: Utc::now(),
+                recorded_at: Timestamp::now(),
                 report: AgentReport {
                     status: ReportStatus::Complete,
                     summary: "stale-from-before-reset".to_string(),
