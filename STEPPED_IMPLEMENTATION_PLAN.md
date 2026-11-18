@@ -4909,3 +4909,4 @@ Report back: pass/fail for 2–4, plus `git log --oneline -3` from the scratch r
 
 - `crates/orrery-core/src/config.rs:1376` — `#[rustfmt::skip]` on `validate_tool_args` exists only so Step 88's POST_GATE grep could match the signature on one line (planning error: the signature is 129 chars). — Remove the attribute and run `cargo fmt --all`; Steps 89–90 markers no longer grep full signatures.
 - `crates/orrery-cli/src/args.rs:390` — comment `// Args { tool: String, json: String }` exists only so Step 90's POST_GATE grep matched (rustfmt splits the variant over lines; planning error). — Delete the comment.
+- `crates/orrery-cli/src/commands.rs` (`dispatch_run`) — `orrery run` exits 0 with no output when the current step is already `AwaitingOperator` (seen in NEB-1). — Print `awaiting operator: <reason>; run orrery approve or orrery reject` before returning.
