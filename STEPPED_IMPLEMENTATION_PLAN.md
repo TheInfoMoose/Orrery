@@ -20,12 +20,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **STEP 95** | `/goal` | `RoleConfig.skills` + validation | `crates/orrery-core/src/config.rs` (+ one-line literal fixes in 10 files) | STEP 94 |
-| 3 | **STEP 96** | `/goal` | `load_skill`, `compose_role_rules`, skills in `build_engine` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | STEP 95 |
-| 4 | **STEP 97** | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 96 |
-| 5 | **STEP 98** | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` | STEP 97 |
-| 6 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
-| 7 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 2 | **STEP 96** | `/goal` | `load_skill`, `compose_role_rules`, skills in `build_engine` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` | STEP 95 |
+| 3 | **STEP 97** | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 96 |
+| 4 | **STEP 98** | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` | STEP 97 |
+| 5 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
+| 6 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
 
 ### Completed
 
@@ -127,6 +126,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **[USER] NEB-1** | **COMPLETED** (2026-11-18, operator run) | — | Acceptance: `on_step_pass` → Nebulous `git_commit_documented` | scratch repo: `dry_run: false` committed `.tracker/` only; `dry_run` omitted → no commit, hook reported `"dry_run": true`. Model: Qwen3.8-27B IQ3_XXS with written role rules. |
 | **STEP 93** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `allowed_statuses`, `requires_feedback`, `protocol_contract`, `build_agent_system_prompt` | `crates/orrery-core/src/checkpoint.rs`, `crates/orrery-core/src/llm.rs` |
 | **STEP 94** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Engine sends the contract in every system prompt | `crates/orrery-core/src/engine.rs` |
+| **STEP 95** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `RoleConfig.skills` + validation | `crates/orrery-core/src/config.rs` + one-line literal fixes in 10 files |
 
 ---
 
