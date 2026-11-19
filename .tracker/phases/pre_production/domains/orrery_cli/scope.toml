@@ -29,7 +29,7 @@ created_at = "2026-11-19T01:58:11Z"
 [[items.bugs]]
 id = "BUG-0013"
 title = "Refuse orrery init on an already-initialized project"
-status = "open"
+status = "closed"
 severity = "high"
 created_at = "2026-11-19T02:21:11Z"
 
