@@ -1384,8 +1384,10 @@ fn json_contains_null(value: &serde_json::Value) -> bool {
     }
 }
 
-#[rustfmt::skip]
-pub fn validate_tool_args(args: &serde_json::Map<String, serde_json::Value>, field: &str) -> Result<()> {
+pub fn validate_tool_args(
+    args: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<()> {
     if args.contains_key("orrery") {
         return Err(Error::Validation {
             field: field.to_string(),
@@ -2431,7 +2433,14 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 allowed_mcp_tools: Vec::new(),
                 skills: Vec::new(),
             },
-            "# Orchestrator Role Rules\n\nCoordinate stage execution and dispatch tasks per the stepped implementation plan.\n",
+            concat!(
+                "# Orchestrator Role Rules\n\n",
+                "You coordinate the stages. You never do the work yourself.\n\n",
+                "- Give each allocation clear, self-contained instructions: what to do, which files or areas, and what \"done\" looks like.\n",
+                "- Keep each allocation to one concern. Split bigger work across allocations or rounds.\n",
+                "- When a Validator reports `Denied`, pass its feedback on word for word.\n",
+                "- If you can't tell what the plan step wants, `Escalate` and say what is unclear. Don't guess.\n",
+            ),
         ),
         (
             RoleConfig {
@@ -2442,7 +2451,14 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 allowed_mcp_tools: Vec::new(),
                 skills: Vec::new(),
             },
-            "# Implementation Role Rules\n\nImplement the allocated plan step changes within the assigned write scope.\n",
+            concat!(
+                "# Implementation Role Rules\n\n",
+                "You do only what \"# Your assignment\" says, inside its write scope.\n\n",
+                "- Don't fix, improve or reformat anything you weren't asked to change.\n",
+                "- If the assignment says no files change, change nothing.\n",
+                "- If you need a tool you don't have, or the assignment is unclear, report `Blocked` and say what you need. Don't guess.\n",
+                "- Your summary says what you changed, or that you changed nothing.\n",
+            ),
         ),
         (
             RoleConfig {
@@ -2453,7 +2469,14 @@ fn default_roles_with_rules() -> [(RoleConfig, &'static str); 3] {
                 allowed_mcp_tools: Vec::new(),
                 skills: Vec::new(),
             },
-            "# Validator Role Rules\n\nVerify that all requirements and quality gates for the current plan step are satisfied.\n",
+            concat!(
+                "# Validator Role Rules\n\n",
+                "You check the Implementer's work against the plan step. You never change anything.\n\n",
+                "- Compare the plan step and \"# Your assignment\" with the Implementer's latest report in \"# Prior reports\", and with whatever your tools let you inspect.\n",
+                "- Confirm only what you can check. When the plan step changes no files, the Implementer's report that it changed nothing is enough.\n",
+                "- If the Implementer's report is missing, `Blocked`, or contradicts the plan step, report `Denied`.\n",
+                "- Your feedback names exactly what is wrong, so the Implementer can fix it.\n",
+            ),
         ),
     ]
 }
@@ -4618,5 +4641,20 @@ max_context_tokens = 1024
             store.load_skill("../x"),
             Err(Error::PathTraversal { .. })
         ));
+    }
+
+    #[test]
+    fn default_role_rules_describe_behavior_only() {
+        for (role, text) in default_roles_with_rules() {
+            assert!(!text.contains("Allowed statuses"));
+            assert!(!text.contains("target_stage"));
+            assert!(text.ends_with('\n'));
+            match role.role_id.as_str() {
+                "orchestrator" => assert!(text.contains("You never do the work yourself.")),
+                "coder" => assert!(text.contains("Don't guess.")),
+                "validator" => assert!(text.contains("You never change anything.")),
+                other => panic!("unexpected default role_id: {other}"),
+            }
+        }
     }
 }
