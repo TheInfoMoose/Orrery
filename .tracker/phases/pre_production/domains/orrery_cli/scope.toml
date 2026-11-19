@@ -12,9 +12,6 @@ tracked_files = [
     "crates/orrery-cli/tests/cli_smoke.rs",
 ]
 
-[items]
-features = []
-
 [[items.bugs]]
 id = "BUG-0002"
 title = "Isolate CLI tests from the operator's global agent catalog"
@@ -35,6 +32,13 @@ title = "Refuse orrery init on an already-initialized project"
 status = "pending"
 severity = "high"
 created_at = "2026-11-19T02:21:11Z"
+
+[[items.features]]
+id = "FEAT-0002"
+title = "Let the operator mark a step Passed after host validation"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T04:15:48Z"
 
 [[items.tasks]]
 id = "TASK-0005"
