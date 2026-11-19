@@ -248,6 +248,18 @@ pub struct ProjectConfig {
     pub limits: RuntimeLimits,
 }
 
+pub const SETTABLE_KEYS: [&str; 9] = [
+    "validation_mode",
+    "max_step_retries",
+    "max_concurrent_agents",
+    "limits.max_tool_calls",
+    "limits.model_idle_timeout_secs",
+    "limits.mcp_call_timeout_secs",
+    "limits.live_stream_ring_capacity",
+    "limits.live_stream_max_file_bytes",
+    "limits.live_stream_max_files",
+];
+
 impl ProjectConfig {
     pub fn default_template(project_name: impl Into<String>) -> Self {
         Self {
@@ -635,6 +647,69 @@ impl ProjectConfig {
         next.validate_staging()?;
         *self = next;
         Ok(())
+    }
+
+    pub fn set_field(&mut self, key: &str, value: &str) -> Result<()> {
+        let bad_int = |k: &str| Error::Validation {
+            field: k.to_string(),
+            message: format!("expected a non-negative integer, got '{value}'"),
+        };
+        match key {
+            "validation_mode" => {
+                self.validation_mode = match value {
+                    "auto" | "Auto" => ValidationMode::Auto,
+                    "agents" | "Agents" => ValidationMode::Agents,
+                    "gate-and-operator" | "GateAndOperator" => ValidationMode::GateAndOperator,
+                    _ => {
+                        return Err(Error::Validation {
+                            field: "validation_mode".to_string(),
+                            message: format!(
+                                "expected auto, agents or gate-and-operator, got '{value}'"
+                            ),
+                        });
+                    }
+                };
+            }
+            "max_step_retries" => {
+                self.max_step_retries = value.parse::<usize>().map_err(|_| bad_int(key))?;
+            }
+            "max_concurrent_agents" => {
+                self.max_concurrent_agents = value.parse::<usize>().map_err(|_| bad_int(key))?;
+            }
+            "limits.max_tool_calls" => {
+                self.limits.max_tool_calls = value.parse::<usize>().map_err(|_| bad_int(key))?;
+            }
+            "limits.model_idle_timeout_secs" => {
+                self.limits.model_idle_timeout_secs =
+                    value.parse::<u64>().map_err(|_| bad_int(key))?;
+            }
+            "limits.mcp_call_timeout_secs" => {
+                self.limits.mcp_call_timeout_secs =
+                    value.parse::<u64>().map_err(|_| bad_int(key))?;
+            }
+            "limits.live_stream_ring_capacity" => {
+                self.limits.live_stream_ring_capacity =
+                    value.parse::<usize>().map_err(|_| bad_int(key))?;
+            }
+            "limits.live_stream_max_file_bytes" => {
+                self.limits.live_stream_max_file_bytes =
+                    value.parse::<u64>().map_err(|_| bad_int(key))?;
+            }
+            "limits.live_stream_max_files" => {
+                self.limits.live_stream_max_files =
+                    value.parse::<usize>().map_err(|_| bad_int(key))?;
+            }
+            _ => {
+                return Err(Error::Validation {
+                    field: "config".to_string(),
+                    message: format!(
+                        "unknown key '{key}'; settable keys: {}",
+                        SETTABLE_KEYS.join(", ")
+                    ),
+                });
+            }
+        }
+        self.validate_staging()
     }
 }
 
@@ -4693,5 +4768,96 @@ max_context_tokens = 1024
 
         assert_eq!(store.load_project().unwrap().max_step_retries, 7);
         assert_eq!(fs::read_to_string(&coder_md).unwrap(), "custom rules\n");
+    }
+
+    #[test]
+    fn set_field_known_keys() {
+        let mut cfg = ProjectConfig::default_template("t");
+        assert_eq!(SETTABLE_KEYS.len(), 9);
+
+        cfg.set_field("validation_mode", "agents").unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::Agents);
+
+        cfg.set_field("validation_mode", "GateAndOperator").unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::GateAndOperator);
+
+        cfg.set_field("validation_mode", "auto").unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::Auto);
+
+        cfg.set_field("validation_mode", "Auto").unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::Auto);
+
+        cfg.set_field("validation_mode", "Agents").unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::Agents);
+
+        cfg.set_field("validation_mode", "gate-and-operator")
+            .unwrap();
+        assert_eq!(cfg.validation_mode, ValidationMode::GateAndOperator);
+
+        cfg.set_field("max_step_retries", "2").unwrap();
+        assert_eq!(cfg.max_step_retries, 2);
+
+        cfg.set_field("max_concurrent_agents", "1").unwrap();
+        assert_eq!(cfg.max_concurrent_agents, 1);
+
+        cfg.set_field("limits.mcp_call_timeout_secs", "1800")
+            .unwrap();
+        assert_eq!(cfg.limits.mcp_call_timeout_secs, 1800);
+
+        cfg.set_field("limits.max_tool_calls", "40").unwrap();
+        assert_eq!(cfg.limits.max_tool_calls, 40);
+
+        cfg.set_field("limits.model_idle_timeout_secs", "120")
+            .unwrap();
+        assert_eq!(cfg.limits.model_idle_timeout_secs, 120);
+
+        cfg.set_field("limits.live_stream_ring_capacity", "500")
+            .unwrap();
+        assert_eq!(cfg.limits.live_stream_ring_capacity, 500);
+
+        cfg.set_field("limits.live_stream_max_file_bytes", "1048576")
+            .unwrap();
+        assert_eq!(cfg.limits.live_stream_max_file_bytes, 1_048_576);
+
+        cfg.set_field("limits.live_stream_max_files", "2").unwrap();
+        assert_eq!(cfg.limits.live_stream_max_files, 2);
+    }
+
+    #[test]
+    fn set_field_rejects_bad_input() {
+        let mut cfg = ProjectConfig::default_template("t");
+
+        match cfg.set_field("validation_mode", "sometimes") {
+            Err(Error::Validation { field, .. }) => assert_eq!(field, "validation_mode"),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        match cfg.set_field("max_step_retries", "-1") {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "max_step_retries");
+                assert!(message.contains("non-negative integer"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        match cfg.set_field("execution_mode", "loop") {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "config");
+                assert!(message.contains("unknown key 'execution_mode'"));
+                assert!(message.contains("limits.max_tool_calls"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        match cfg.set_field("max_concurrent_agents", "0") {
+            Err(Error::Validation { field, .. }) => assert_eq!(field, "max_concurrent_agents"),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        cfg.max_concurrent_agents = 2;
+
+        match cfg.set_field("limits.max_tool_calls", "0") {
+            Err(Error::Validation { field, .. }) => assert_eq!(field, "limits.max_tool_calls"),
+            other => panic!("expected Validation error, got {other:?}"),
+        }
     }
 }
