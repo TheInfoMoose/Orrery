@@ -17,6 +17,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 **Tracking (2026-11-18):** side findings become **pending neb items** (`neb status <ID> pending`) in this repo's `.tracker/`, not entries in a Parked list. The operator reviews `neb list --status pending` once at phase end. Every Up Next step has a neb task (`source_ref` = step ID); commits start with `[<TASK-ID>](<scope>)`.
 
+**Orrery (2026-11-18):** steps can also run through Orrery (`.orrery/`, Agents mode, `orrery run --step <position>`): the `hybrid:step_start` hook does `neb start` + `validate-step.sh start`, `agy-impl` executes the Argon block, `claude-val` reads the diff, and the `hybrid:step_check` gate runs `validate-step.sh check` on the host. Failures go back to the implementer automatically, up to 2 retries. Claude still reads the diff, commits and moves the row. See the `orrery-setup` skill.
+
 ### Up Next
 
 | # | Step | Command | Scope | Target Files | Waits on |
