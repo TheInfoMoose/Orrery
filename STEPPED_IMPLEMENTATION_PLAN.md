@@ -20,8 +20,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
-| 3 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
 
 ### Completed
 
@@ -127,6 +126,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 96** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `load_skill`, `compose_role_rules`, skills in `build_engine` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` |
 | **STEP 97** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 98** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` |
+| **STEP 99** | **COMPLETED** (2026-11-18, validate-step PASS with empty `XDG_CONFIG_HOME`) | `/goal` | README roles, protocol and skills | `README.md` |
 
 ---
 
@@ -5331,3 +5331,5 @@ After Step 99 is committed. Proves the generated protocol plus the new default r
 Report back: pass/fail for 3 and 4, plus `orrery status`.
 
 ### Parked (Phase M)
+
+- `crates/orrery-cli/src/commands.rs:1145` (and every `ConfigStore::new(dir.path(), None)` / `dispatch` test) — CLI tests resolve the global catalog through `dirs::config_dir()`, so any real `~/.config/orrery/agents/*.toml` leaks into `load_agents` and fails `agent_add_each_backend_and_list_json` (6 ≠ 3), `agent_show_and_remove` and `agent_add_with_embedded_secret_exits_1`. Seen during the Step 99 check; it passed with `XDG_CONFIG_HOME` pointed at an empty dir — tests should pass an explicit temp `xdg_override` (or the CLI context should carry one) so they never read the operator's catalog.
