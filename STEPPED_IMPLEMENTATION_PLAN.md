@@ -15,6 +15,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 - **Claude** writes and refreshes the blocks, checks each finished step's diff against its `MUTATION_SPEC`, and moves the row to **Completed**. Around each handoff Claude runs `scripts/validate-step.sh start <N>` (runs the step's `PRE_GATE`, then snapshots the tree) and, after Gemini reports, `scripts/validate-step.sh check <N>` (fails on a commit, an edit to this file, any change outside `ALLOWED_FILES`, or a failing `POST_GATE`). Claude commits each step after `check` passes. Gemini never commits.
 - **The operator** runs `sudo`, installs host packages and tools, and runs the live-backend tests.
 
+**Tracking (2026-11-18):** side findings become **pending neb items** (`neb status <ID> pending`) in this repo's `.tracker/`, not entries in a Parked list. The operator reviews `neb list --status pending` once at phase end. Every Up Next step has a neb task (`source_ref` = step ID); commits start with `[<TASK-ID>](<scope>)`.
+
 ### Up Next
 
 | # | Step | Command | Scope | Target Files | Waits on |
@@ -2239,6 +2241,8 @@ cargo test --workspace --locked --features orrery-core/live-backends
 Env vars: `ORRERY_LIVE_MCP_CMD`, `ORRERY_LIVE_IMAGE`, `ORRERY_LIVE_CONTAINER`, `ORRERY_LIVE_LLM_URL`, `ORRERY_LIVE_LLM_MODEL`. `live_keyring` needs Secret Service or keyutils.
 
 ### Parked
+Tracked in neb since 2026-11-18 (`neb list --status pending`). The four items below → TASK-0001 (PATHEXT), FEAT-0001 (TUI catalog editing), BUG-0003 (TUI error chain), TASK-0002 (chrono); the 13 open Phase G Lows → BUG-0004…0012, TASK-0003…0006; Nebulous audit A3 → BUG-0001. Kept below for history; do not add here.
+
 Phase D review (2026-11-16): the operator picked six items for Phase E (Steps 52–56). The rest stay parked.
 Phase E review (2026-11-16): the README keys note became Step 58; LIVE-2 runs the live suite.
 Phase H review (2026-11-17): the operator picked the four cheap Lows for Phase I (Steps 77–79; the §7 `add-cli` synopsis was fixed in the spec directly). The rest stay parked.
@@ -5331,5 +5335,7 @@ After Step 99 is committed. Proves the generated protocol plus the new default r
 Report back: pass/fail for 3 and 4, plus `orrery status`.
 
 ### Parked (Phase M)
+
+Migrated to neb BUG-0002 (2026-11-18). Kept for history; do not add here.
 
 - `crates/orrery-cli/src/commands.rs:1145` (and every `ConfigStore::new(dir.path(), None)` / `dispatch` test) — CLI tests resolve the global catalog through `dirs::config_dir()`, so any real `~/.config/orrery/agents/*.toml` leaks into `load_agents` and fails `agent_add_each_backend_and_list_json` (6 ≠ 3), `agent_show_and_remove` and `agent_add_with_embedded_secret_exits_1`. Seen during the Step 99 check; it passed with `XDG_CONFIG_HOME` pointed at an empty dir — tests should pass an explicit temp `xdg_override` (or the CLI context should carry one) so they never read the operator's catalog.

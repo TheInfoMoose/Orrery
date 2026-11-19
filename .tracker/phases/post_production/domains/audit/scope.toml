@@ -1,0 +1,18 @@
+[scope]
+id = "audit"
+target = "audit"
+tech_stack = []
+description = "Promoted from component 'audit' (audit)"
+bound_component = "audit"
+tracked_files = [
+    "audit/59-engine-checkpoint.md",
+    "audit/60-config-security-plan.md",
+    "audit/61-docker-llm.md",
+    "audit/62-mcp-stream.md",
+    "audit/63-tui.md",
+    "audit/64-cli-readme.md",
+]
+
+[items]
+bugs = []
+features = []

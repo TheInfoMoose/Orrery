@@ -1,0 +1,19 @@
+schema_version = 2
+
+[item]
+id = "TASK-0002"
+type = "task"
+title = "Replace direct chrono use in orrery-core with jiff"
+status = "pending"
+severity = "low"
+scope_ref = "orrery_core"
+created_at = "2026-11-19T01:58:11Z"
+updated_at = "2026-11-19T01:58:11Z"
+
+[effort]
+logged_time_minutes = 0
+iteration_count = 1
+
+[history]
+recurrence_count = 0
+previous_fixes = []

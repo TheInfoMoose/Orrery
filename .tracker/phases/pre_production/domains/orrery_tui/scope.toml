@@ -1,0 +1,43 @@
+[scope]
+id = "orrery_tui"
+target = "crates/orrery-tui"
+tech_stack = ["rust"]
+description = "Promoted from component 'orrery-tui' (crates/orrery-tui)"
+bound_component = "orrery_tui"
+tracked_files = [
+    "crates/orrery-tui/Cargo.toml",
+    "crates/orrery-tui/src/app.rs",
+    "crates/orrery-tui/src/bridge.rs",
+    "crates/orrery-tui/src/layout.rs",
+    "crates/orrery-tui/src/lib.rs",
+    "crates/orrery-tui/src/theme.rs",
+    "crates/orrery-tui/src/widgets.rs",
+]
+
+[[items.bugs]]
+id = "BUG-0003"
+title = "Keep the error source chain in TUI status messages"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T01:58:11Z"
+
+[[items.bugs]]
+id = "BUG-0011"
+title = "Reset slot_scroll when the stage header is selected (F63-7)"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T01:58:11Z"
+
+[[items.features]]
+id = "FEAT-0001"
+title = "Add catalog editing to the TUI"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T01:58:11Z"
+
+[[items.tasks]]
+id = "TASK-0004"
+title = "Remove unreachable!() from EngineController::handle (F63-10)"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T01:58:11Z"

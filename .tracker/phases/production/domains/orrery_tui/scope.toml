@@ -1,0 +1,19 @@
+[scope]
+id = "orrery_tui"
+target = "crates/orrery-tui"
+tech_stack = ["rust"]
+description = "Promoted from component 'orrery-tui' (crates/orrery-tui)"
+bound_component = "orrery_tui"
+tracked_files = [
+    "crates/orrery-tui/Cargo.toml",
+    "crates/orrery-tui/src/app.rs",
+    "crates/orrery-tui/src/bridge.rs",
+    "crates/orrery-tui/src/layout.rs",
+    "crates/orrery-tui/src/lib.rs",
+    "crates/orrery-tui/src/theme.rs",
+    "crates/orrery-tui/src/widgets.rs",
+]
+
+[items]
+bugs = []
+features = []

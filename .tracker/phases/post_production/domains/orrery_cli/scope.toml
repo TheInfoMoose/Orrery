@@ -1,0 +1,17 @@
+[scope]
+id = "orrery_cli"
+target = "crates/orrery-cli"
+tech_stack = ["rust"]
+description = "Promoted from component 'orrery-cli' (crates/orrery-cli)"
+bound_component = "orrery_cli"
+tracked_files = [
+    "crates/orrery-cli/Cargo.toml",
+    "crates/orrery-cli/src/args.rs",
+    "crates/orrery-cli/src/commands.rs",
+    "crates/orrery-cli/src/main.rs",
+    "crates/orrery-cli/tests/cli_smoke.rs",
+]
+
+[items]
+bugs = []
+features = []
