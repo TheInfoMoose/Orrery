@@ -1964,6 +1964,14 @@ pub fn merge_tool_args(
     serde_json::Value::Object(merged)
 }
 
+pub fn compose_role_rules(rules_markdown: &str, skills: &[(String, String)]) -> String {
+    let mut out = rules_markdown.to_string();
+    for (name, body) in skills {
+        out.push_str(&format!("\n\n# Skill: {name}\n\n{}", body.trim()));
+    }
+    out
+}
+
 pub fn referenced_mcp_servers(project: &ProjectConfig, roles: &[RoleConfig]) -> BTreeSet<String> {
     let mut servers = BTreeSet::new();
     for role in roles {
@@ -2002,7 +2010,12 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
     let mut role_rules = HashMap::with_capacity(roles.len());
     for role in &roles {
         let rules = store.load_role_rules(&role.role_id)?;
-        role_rules.insert(role.role_id.clone(), rules);
+        let skills = role
+            .skills
+            .iter()
+            .map(|name| Ok((name.clone(), store.load_skill(name)?)))
+            .collect::<Result<Vec<_>>>()?;
+        role_rules.insert(role.role_id.clone(), compose_role_rules(&rules, &skills));
     }
     let agents = store.load_agents()?;
     let servers = store.load_mcp_servers()?;
@@ -2163,7 +2176,7 @@ mod tests {
     use super::{
         Backends, DispatchKind, DriverSet, EngineContext, EngineEvent, RunOptions, RunOutcome,
         StageTurnRecord, WorkflowEngine, agents_pass_rule, build_engine, build_hook_role,
-        check_dispatch, merge_tool_args,
+        check_dispatch, compose_role_rules, merge_tool_args,
     };
     use crate::Error;
     use crate::checkpoint::{
@@ -6586,5 +6599,63 @@ mod tests {
             s0.system_prompt
                 .contains("Orrery then runs the gate tools and asks the operator.")
         );
+    }
+
+    #[test]
+    fn compose_role_rules_appends_skills() {
+        assert_eq!(
+            compose_role_rules(
+                "Rules.",
+                &[
+                    ("a".into(), "  Body A\n".into()),
+                    ("b".into(), "Body B".into())
+                ]
+            ),
+            "Rules.\n\n# Skill: a\n\nBody A\n\n# Skill: b\n\nBody B"
+        );
+        assert_eq!(compose_role_rules("Rules.", &[]), "Rules.");
+    }
+
+    #[tokio::test]
+    async fn build_engine_includes_role_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, backends, mock_driver, secrets) = init_project_with_agents(dir.path(), true);
+
+        let skills_dir = store.orrery_dir().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(skills_dir.join("house-style.md"), "Keep functions short.").unwrap();
+
+        let mut role = store
+            .load_roles()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .unwrap();
+        let rules = store.load_role_rules("coder").unwrap();
+        role.skills = vec!["house-style".into()];
+        store.save_role(&role, &rules).unwrap();
+
+        let engine = build_engine(&store, backends).await.unwrap();
+        assert!(
+            engine.ctx.role_rules["coder"]
+                .contains("# Skill: house-style\n\nKeep functions short.")
+        );
+
+        role.skills = vec!["missing".into()];
+        store.save_role(&role, &rules).unwrap();
+
+        let dyn_driver: Arc<dyn AgentDriver> = Arc::clone(&mock_driver) as Arc<dyn AgentDriver>;
+        let backends2 = Backends {
+            secrets: Arc::clone(&secrets) as Arc<dyn SecretStore>,
+            containers: Arc::new(MockContainerBackend::new()),
+            inference_control: Arc::new(MockInferenceControl::new()),
+            connector: Arc::new(MockMcpConnector::default()),
+            drivers: DriverSet {
+                chat: Arc::clone(&dyn_driver),
+                cli: dyn_driver,
+            },
+        };
+        let res = build_engine(&store, backends2).await;
+        assert!(matches!(res, Err(Error::Validation { .. })));
     }
 }

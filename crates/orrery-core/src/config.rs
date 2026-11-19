@@ -1853,6 +1853,43 @@ impl ConfigStore {
         })
     }
 
+    pub fn load_skill(&self, name: &str) -> Result<String> {
+        validate_config_file_id(name, "skill")?;
+
+        let project_path = self.orrery_dir().join("skills").join(format!("{name}.md"));
+        match fs::read_to_string(&project_path) {
+            Ok(content) => return Ok(content),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(Error::Io {
+                    path: project_path,
+                    source,
+                });
+            }
+        }
+
+        if let Some(global_dir) = self.global_dir() {
+            let global_path = global_dir.join("skills").join(format!("{name}.md"));
+            match fs::read_to_string(&global_path) {
+                Ok(content) => return Ok(content),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(Error::Io {
+                        path: global_path,
+                        source,
+                    });
+                }
+            }
+        }
+
+        Err(Error::Validation {
+            field: "skills".to_string(),
+            message: format!(
+                "skill '{name}' not found in .orrery/skills/ or the global skills directory"
+            ),
+        })
+    }
+
     pub fn save_role(&self, role: &RoleConfig, rules_markdown: &str) -> Result<()> {
         validate_config_file_id(&role.role_id, "role_id")?;
         role.validate()?;
@@ -4538,5 +4575,48 @@ max_context_tokens = 1024
             }
             other => panic!("expected duplicate skill Validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn load_skill_project_overrides_global() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let global_orrery = global.path().join("orrery");
+        fs::create_dir_all(global_orrery.join("skills")).unwrap();
+        fs::create_dir_all(project.path().join(".orrery").join("skills")).unwrap();
+
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+        assert_eq!(store.global_dir().unwrap(), global_orrery);
+
+        fs::write(global_orrery.join("skills/style.md"), "global style").unwrap();
+        fs::write(global_orrery.join("skills/only-global.md"), "g").unwrap();
+        fs::write(
+            project.path().join(".orrery/skills/style.md"),
+            "project style",
+        )
+        .unwrap();
+
+        assert_eq!(store.load_skill("style").unwrap(), "project style");
+        assert_eq!(store.load_skill("only-global").unwrap(), "g");
+    }
+
+    #[test]
+    fn load_skill_missing_or_bad_name() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+
+        match store.load_skill("nope") {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "skills");
+                assert!(message.contains("skill 'nope' not found"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        assert!(matches!(
+            store.load_skill("../x"),
+            Err(Error::PathTraversal { .. })
+        ));
     }
 }
