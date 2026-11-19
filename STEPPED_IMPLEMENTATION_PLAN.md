@@ -20,10 +20,9 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
-| 2 | **STEP 97** | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 96 |
-| 3 | **STEP 98** | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` | STEP 97 |
-| 4 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
-| 5 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 2 | **STEP 98** | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` | STEP 97 |
+| 3 | **STEP 99** | `/goal` | README roles, protocol and skills | `README.md` | STEP 98 |
+| 4 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
 
 ### Completed
 
@@ -127,6 +126,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 94** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Engine sends the contract in every system prompt | `crates/orrery-core/src/engine.rs` |
 | **STEP 95** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `RoleConfig.skills` + validation | `crates/orrery-core/src/config.rs` + one-line literal fixes in 10 files |
 | **STEP 96** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `load_skill`, `compose_role_rules`, skills in `build_engine` | `crates/orrery-core/src/config.rs`, `crates/orrery-core/src/engine.rs` |
+| **STEP 97** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | `role add --skill`, awaiting-operator message, parked comment | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 
 ---
 
