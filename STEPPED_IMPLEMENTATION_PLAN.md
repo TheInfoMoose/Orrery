@@ -25,17 +25,16 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 101** | `/goal` | TUI saves merge into the file on disk (BUG-0015) | `crates/orrery-tui/src/bridge.rs` | STEP 100 |
-| 4 | **STEP 102** | `/goal` | Gate-failure rule in the Agents protocol (BUG-0014) | `crates/orrery-core/src/llm.rs` | STEP 101 |
-| 5 | **STEP 103** | `/goal` | `role skills`, `role show` lists skills (TASK-0007) | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 102 |
-| 6 | **STEP 104** | `/goal` | `ProjectConfig::set_field`, `SETTABLE_KEYS` | `crates/orrery-core/src/config.rs` | STEP 103 |
-| 7 | **STEP 105** | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` | STEP 104 |
-| 8 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
-| 9 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
-| 10 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
-| 11 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
-| 12 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
-| 13 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
+| 3 | **STEP 102** | `/goal` | Gate-failure rule in the Agents protocol (BUG-0014) | `crates/orrery-core/src/llm.rs` | STEP 101 |
+| 4 | **STEP 103** | `/goal` | `role skills`, `role show` lists skills (TASK-0007) | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 102 |
+| 5 | **STEP 104** | `/goal` | `ProjectConfig::set_field`, `SETTABLE_KEYS` | `crates/orrery-core/src/config.rs` | STEP 103 |
+| 6 | **STEP 105** | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` | STEP 104 |
+| 7 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
+| 8 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
+| 9 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
+| 10 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
+| 11 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
+| 12 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
 
 ### Completed
 
@@ -143,6 +142,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 98** | **COMPLETED** (2026-11-18, validate-step PASS) | `/goal` | Default role rules describe behavior; parked `rustfmt::skip` | `crates/orrery-core/src/config.rs` |
 | **STEP 99** | **COMPLETED** (2026-11-18, validate-step PASS with empty `XDG_CONFIG_HOME`) | `/goal` | README roles, protocol and skills | `README.md` |
 | **STEP 100** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `init` refuses a configured project (BUG-0013) | `crates/orrery-core/src/config.rs` |
+| **STEP 101** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | TUI saves merge into the file on disk (BUG-0015) | `crates/orrery-tui/src/bridge.rs` |
 
 ---
 
