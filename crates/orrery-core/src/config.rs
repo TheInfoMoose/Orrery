@@ -1754,6 +1754,31 @@ fn resolve_safe_within_dir(base_dir: &Path, rel: &Path, field: &str) -> Result<P
     Ok(current)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogKind {
+    Agent,
+    Role,
+    Skill,
+    McpServer,
+    Inference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogSource {
+    Global,
+    Project,
+    ProjectOverridesGlobal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogEntry {
+    pub kind: CatalogKind,
+    pub id: String,
+    pub source: CatalogSource,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     project_root: PathBuf,
@@ -2294,6 +2319,122 @@ impl ConfigStore {
         }
 
         Ok(())
+    }
+
+    pub fn catalog_entries(&self) -> Result<Vec<CatalogEntry>> {
+        let global_dir = self.global_dir();
+        let project_orrery = self.orrery_dir();
+
+        let (global_agents, global_roles, global_skills, global_mcp, global_inf) =
+            if let Some(ref gdir) = global_dir {
+                let agents: Vec<String> = Self::read_agents_from_dir(&gdir.join("agents"))?
+                    .into_iter()
+                    .map(|a| a.agent_id)
+                    .collect();
+                let roles: Vec<String> = Self::read_roles_from_dir(&gdir.join("roles"))?
+                    .into_iter()
+                    .map(|r| r.role_id)
+                    .collect();
+                let skills = Self::skill_ids_in(&gdir.join("skills"))?;
+                let mcp: Vec<String> =
+                    Self::read_mcp_servers_file(gdir, &gdir.join("mcp").join("servers.toml"))?
+                        .into_iter()
+                        .map(|s| s.server_id)
+                        .collect();
+                let inf: Vec<String> =
+                    Self::read_inference_file(gdir, &gdir.join("inference.toml"))?
+                        .into_iter()
+                        .map(|i| i.inference_id)
+                        .collect();
+                (agents, roles, skills, mcp, inf)
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            };
+
+        let project_agents: Vec<String> =
+            Self::read_agents_from_dir(&project_orrery.join("agents"))?
+                .into_iter()
+                .map(|a| a.agent_id)
+                .collect();
+        let project_roles: Vec<String> = Self::read_roles_from_dir(&project_orrery.join("roles"))?
+            .into_iter()
+            .map(|r| r.role_id)
+            .collect();
+        let project_skills = Self::skill_ids_in(&project_orrery.join("skills"))?;
+        let project_mcp: Vec<String> = Self::read_mcp_servers_file(
+            &project_orrery,
+            &project_orrery.join("mcp").join("servers.toml"),
+        )?
+        .into_iter()
+        .map(|s| s.server_id)
+        .collect();
+        let mut project_inf: Vec<String> =
+            Self::read_inference_file(&project_orrery, &project_orrery.join("inference.toml"))?
+                .into_iter()
+                .map(|i| i.inference_id)
+                .collect();
+        if project_orrery.join("project.toml").exists() {
+            for inf in self.load_project()?.inference {
+                project_inf.push(inf.inference_id);
+            }
+        }
+
+        let mut entries = Vec::new();
+        for (kind, globals, projects) in [
+            (CatalogKind::Agent, global_agents, project_agents),
+            (CatalogKind::Role, global_roles, project_roles),
+            (CatalogKind::Skill, global_skills, project_skills),
+            (CatalogKind::McpServer, global_mcp, project_mcp),
+            (CatalogKind::Inference, global_inf, project_inf),
+        ] {
+            let mut by_id: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+            for id in globals {
+                by_id.entry(id).or_insert((false, false)).0 = true;
+            }
+            for id in projects {
+                by_id.entry(id).or_insert((false, false)).1 = true;
+            }
+            for (id, (in_global, in_project)) in by_id {
+                let source = match (in_global, in_project) {
+                    (true, true) => CatalogSource::ProjectOverridesGlobal,
+                    (true, false) => CatalogSource::Global,
+                    (false, true) => CatalogSource::Project,
+                    (false, false) => unreachable!(),
+                };
+                entries.push(CatalogEntry { kind, id, source });
+            }
+        }
+
+        entries.sort_by(|a, b| (a.kind, &a.id).cmp(&(b.kind, &b.id)));
+        Ok(entries)
+    }
+
+    fn skill_ids_in(dir: &Path) -> Result<Vec<String>> {
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(dir).map_err(|source| Error::Io {
+            path: dir.to_path_buf(),
+            source,
+        })?;
+        let mut ids = Vec::new();
+        for entry_res in entries {
+            let entry = entry_res.map_err(|source| Error::Io {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension() != Some(OsStr::new("md")) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(OsStr::to_str)
+                && validate_config_file_id(stem, "skill").is_ok()
+            {
+                ids.push(stem.to_string());
+            }
+        }
+        ids.sort();
+        Ok(ids)
     }
 
     fn ensure_file_within_project(&self, path: &Path) -> Result<()> {
@@ -4859,5 +5000,93 @@ max_context_tokens = 1024
             Err(Error::Validation { field, .. }) => assert_eq!(field, "limits.max_tool_calls"),
             other => panic!("expected Validation error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn catalog_entries_report_sources() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+        store.init_project("t").unwrap();
+
+        let global_orrery = global.path().join("orrery");
+        fs::create_dir_all(global_orrery.join("agents")).unwrap();
+        fs::create_dir_all(global_orrery.join("roles")).unwrap();
+        fs::create_dir_all(global_orrery.join("skills")).unwrap();
+
+        let agent_toml = |id: &str| {
+            format!(
+                "agent_id = \"{id}\"\ndisplay_name = \"{id}\"\n[backend]\ntype = \"LocalModel\"\ninference_id = \"inf\"\nmodel = \"m\"\ntemperature = 0.0\nmax_context_tokens = 1024\n"
+            )
+        };
+        fs::write(
+            global_orrery.join("agents/g-only.toml"),
+            agent_toml("g-only"),
+        )
+        .unwrap();
+        fs::write(global_orrery.join("agents/both.toml"), agent_toml("both")).unwrap();
+
+        let project_orrery = project.path().join(".orrery");
+        fs::copy(
+            project_orrery.join("roles/coder.toml"),
+            global_orrery.join("roles/coder.toml"),
+        )
+        .unwrap();
+        fs::copy(
+            project_orrery.join("roles/coder.md"),
+            global_orrery.join("roles/coder.md"),
+        )
+        .unwrap();
+
+        fs::write(global_orrery.join("skills/style.md"), "# Global style\n").unwrap();
+        fs::write(global_orrery.join("skills/notes.txt"), "ignore\n").unwrap();
+
+        fs::write(project_orrery.join("agents/both.toml"), agent_toml("both")).unwrap();
+        fs::create_dir_all(project_orrery.join("skills")).unwrap();
+        fs::write(project_orrery.join("skills/style.md"), "# Project style\n").unwrap();
+        fs::write(
+            project_orrery.join("skills/p-skill.md"),
+            "# Project skill\n",
+        )
+        .unwrap();
+
+        let entries = store.catalog_entries().unwrap();
+        let entry = |kind: CatalogKind, id: &str, source: CatalogSource| CatalogEntry {
+            kind,
+            id: id.to_string(),
+            source,
+        };
+
+        assert!(entries.contains(&entry(CatalogKind::Agent, "g-only", CatalogSource::Global)));
+        assert!(entries.contains(&entry(
+            CatalogKind::Agent,
+            "both",
+            CatalogSource::ProjectOverridesGlobal,
+        )));
+        assert!(entries.contains(&entry(
+            CatalogKind::Role,
+            "coder",
+            CatalogSource::ProjectOverridesGlobal,
+        )));
+        assert!(entries.contains(&entry(
+            CatalogKind::Role,
+            "validator",
+            CatalogSource::Project,
+        )));
+        assert!(entries.contains(&entry(
+            CatalogKind::Skill,
+            "style",
+            CatalogSource::ProjectOverridesGlobal,
+        )));
+        assert!(entries.contains(&entry(
+            CatalogKind::Skill,
+            "p-skill",
+            CatalogSource::Project,
+        )));
+        assert!(!entries.iter().any(|e| e.id == "notes"));
+
+        let mut sorted = entries.clone();
+        sorted.sort_by(|a, b| (a.kind, &a.id).cmp(&(b.kind, &b.id)));
+        assert_eq!(entries, sorted);
     }
 }
