@@ -332,6 +332,8 @@ pub enum RoleCmd {
         rules_file: PathBuf,
         #[arg(long = "allow-tool")]
         allow_tools: Vec<String>,
+        #[arg(long = "skill")]
+        skills: Vec<String>,
     },
     List {
         #[arg(long)]
@@ -387,7 +389,6 @@ pub enum GateCmd {
         #[arg(required = true, num_args = 1..)]
         tools: Vec<String>,
     },
-    // Args { tool: String, json: String }
     Args {
         tool: String,
         json: String,
@@ -581,6 +582,8 @@ mod tests {
                 "fs:read_file",
                 "--allow-tool",
                 "git:diff",
+                "--skill",
+                "house-style",
             ],
             &["orrery", "role", "list", "--json"],
             &["orrery", "role", "show", "reviewer"],

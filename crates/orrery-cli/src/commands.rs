@@ -559,6 +559,7 @@ fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Resu
             kind,
             rules_file,
             allow_tools,
+            skills,
         } => {
             let source_path = store.resolve_safe_path(&rules_file)?;
             let rules_markdown =
@@ -572,7 +573,7 @@ fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Resu
                 kind: RoleKind::from(kind),
                 rules_file: format!("{id}.md"),
                 allowed_mcp_tools: allow_tools,
-                skills: Vec::new(),
+                skills,
             };
             store.save_role(&role, &rules_markdown)?;
             write_stdout_line(ctx, &format!("Saved role '{}'", role.role_id))?;
@@ -841,7 +842,23 @@ async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) ->
 
     match outcome {
         RunOutcome::Completed { .. } | RunOutcome::NoPendingSteps => Ok(0),
-        RunOutcome::AwaitingOperator { .. } => Ok(3),
+        RunOutcome::AwaitingOperator {
+            step_number,
+            reason,
+        } => {
+            write_stdout_line(
+                ctx,
+                &format!(
+                    "Awaiting operator for step {step_number}: {}",
+                    engine.redact(&reason)
+                ),
+            )?;
+            write_stdout_line(
+                ctx,
+                "Run 'orrery approve' or 'orrery reject --feedback <TEXT>', then 'orrery resume'.",
+            )?;
+            Ok(3)
+        }
         RunOutcome::Interrupted => Ok(130),
     }
 }
@@ -2533,6 +2550,7 @@ mod tests {
                     kind: RoleKindArg::Validator,
                     rules_file: PathBuf::from("reviewer.md"),
                     allow_tools: vec!["fs:read_file".to_string(), "git:diff".to_string()],
+                    skills: Vec::new(),
                 },
             },
             dir.path(),
@@ -3801,5 +3819,124 @@ mod tests {
         let stderr = err.as_string();
         assert!(stderr.contains("[REDACTED]"), "stderr: {stderr}");
         assert!(!stderr.contains("sk-test-leak-123"), "stderr: {stderr}");
+    }
+
+    #[tokio::test]
+    async fn role_add_with_skills_saves_them() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("role-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let rules_body = "# Reviewer Rules\n\nVerify all gates pass.\n";
+        std::fs::write(dir.path().join("reviewer.md"), rules_body).expect("write reviewer.md");
+
+        let code = dispatch(
+            Command::Role {
+                command: RoleCmd::Add {
+                    id: "reviewer".to_string(),
+                    name: "Reviewer".to_string(),
+                    kind: RoleKindArg::Validator,
+                    rules_file: PathBuf::from("reviewer.md"),
+                    allow_tools: vec!["fs:read_file".to_string(), "git:diff".to_string()],
+                    skills: vec!["house-style".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role add");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let roles = store.load_roles().expect("load_roles");
+        let reviewer = roles
+            .iter()
+            .find(|r| r.role_id == "reviewer")
+            .expect("reviewer role");
+        assert_eq!(reviewer.skills, vec!["house-style".to_string()]);
+
+        let bad_res = dispatch(
+            Command::Role {
+                command: RoleCmd::Add {
+                    id: "bad-reviewer".to_string(),
+                    name: "Bad Reviewer".to_string(),
+                    kind: RoleKindArg::Validator,
+                    rules_file: PathBuf::from("reviewer.md"),
+                    allow_tools: Vec::new(),
+                    skills: vec!["../x".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await;
+        assert!(
+            matches!(bad_res, Err(Error::PathTraversal { .. })),
+            "got: {bad_res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn awaiting_operator_run_prints_reason_and_next_steps() {
+        let dir = TempDir::new().expect("tempdir");
+        let driver = Arc::new(MockAgentDriver::new());
+        driver.push("orch-1", Ok(escalate_report("ambiguous requirement")));
+        let secrets = Arc::new(InMemorySecretStore::new());
+        let (mut ctx, out, _err) =
+            setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
+
+        let code_esc = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run escalates");
+        assert_eq!(code_esc, 3);
+        let first_out = out.as_string();
+        assert!(
+            first_out.contains("Awaiting operator for step 1: "),
+            "got: {first_out}"
+        );
+        assert!(
+            first_out.contains(
+                "Run 'orrery approve' or 'orrery reject --feedback <TEXT>', then 'orrery resume'."
+            ),
+            "got: {first_out}"
+        );
+
+        out.clear();
+        let code_esc_again = dispatch(
+            Command::Run {
+                r#loop: false,
+                cycles: None,
+                step: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("run while still awaiting");
+        assert_eq!(code_esc_again, 3);
+        let second_out = out.as_string();
+        assert!(
+            second_out.contains("Awaiting operator for step 1: "),
+            "got: {second_out}"
+        );
     }
 }
