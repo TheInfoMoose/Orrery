@@ -11,7 +11,7 @@ use crossterm::terminal::{
 };
 use futures_util::StreamExt;
 use orrery_core::checkpoint::{CheckpointManager, OperatorDecision, StepStatus};
-use orrery_core::config::ConfigStore;
+use orrery_core::config::{ConfigStore, ProjectConfig};
 use orrery_core::engine::{Backends, EngineEvent, RunOptions, RunOutcome, build_engine};
 use orrery_core::plan::ImplementationPlan;
 use orrery_core::stream_log::{StreamEvent, StreamEventKind};
@@ -104,6 +104,28 @@ pub struct EngineController {
     engine_rx: mpsc::Receiver<EngineEvent>,
     stream_tx: mpsc::Sender<StreamEvent>,
     stream_rx: mpsc::Receiver<StreamEvent>,
+}
+
+pub fn merge_action_into(disk: &mut ProjectConfig, edited: &ProjectConfig, action: &AppAction) {
+    match action {
+        AppAction::SetMode(_) => {
+            disk.execution_mode = edited.execution_mode;
+        }
+        AppAction::SetCycles(_) => {
+            disk.cycle_count = edited.cycle_count;
+        }
+        AppAction::SetStageCount(_)
+        | AppAction::SetStageRole { .. }
+        | AppAction::AssignAgent { .. }
+        | AppAction::UnassignAgent { .. } => {
+            disk.stages = edited.stages.clone();
+        }
+        AppAction::IngestPlan(_) => {
+            disk.plan_path = edited.plan_path.clone();
+            disk.step_marker = edited.step_marker.clone();
+        }
+        _ => {}
+    }
 }
 
 impl EngineController {
@@ -333,6 +355,15 @@ impl EngineController {
         }));
     }
 
+    fn save_merged(&self, action: &AppAction, app: &mut App) -> Result<()> {
+        let mut disk = self.store.load_project()?;
+        merge_action_into(&mut disk, &app.config, action);
+        self.store.save_project(&disk)?;
+        app.config = disk;
+        app.refresh_warnings();
+        Ok(())
+    }
+
     pub async fn handle(&mut self, action: &AppAction, app: &mut App) -> Result<()> {
         match action {
             AppAction::SetMode(_)
@@ -341,7 +372,7 @@ impl EngineController {
             | AppAction::SetStageRole { .. }
             | AppAction::AssignAgent { .. }
             | AppAction::UnassignAgent { .. } => {
-                self.store.save_project(&app.config)?;
+                self.save_merged(action, app)?;
             }
             AppAction::IngestPlan(path) => {
                 let resolved = match self.store.resolve_safe_path(path) {
@@ -363,7 +394,7 @@ impl EngineController {
                 if app.config.step_marker.trim().is_empty() {
                     app.config.step_marker = "## Step ".to_string();
                 }
-                self.store.save_project(&app.config)?;
+                self.save_merged(action, app)?;
                 app.step_selected = 0;
                 app.step_scroll = 0;
                 app.status_message = Some(format!("Ingested {step_count} steps"));
@@ -2134,5 +2165,69 @@ mod tests {
             "leaked in stream: {:?}",
             app.stream
         );
+    }
+
+    #[test]
+    fn merge_action_into_copies_only_action_fields() {
+        let mut disk = ProjectConfig::default_template("d");
+        disk.gate_tools = vec!["srv:gate".into()];
+
+        let mut edited = disk.clone();
+        edited.execution_mode = ExecutionMode::Loop;
+        edited.cycle_count = 4;
+        edited.gate_tools = Vec::new();
+        edited.stages[1].agent_ids = vec!["a".into()];
+
+        merge_action_into(&mut disk, &edited, &AppAction::SetMode(ExecutionMode::Loop));
+        assert_eq!(disk.execution_mode, ExecutionMode::Loop);
+        assert_eq!(disk.cycle_count, 0);
+        assert_eq!(disk.gate_tools, vec!["srv:gate".to_string()]);
+        assert!(disk.stages[1].agent_ids.is_empty());
+
+        merge_action_into(&mut disk, &edited, &AppAction::SetCycles(4));
+        assert_eq!(disk.cycle_count, 4);
+
+        merge_action_into(
+            &mut disk,
+            &edited,
+            &AppAction::AssignAgent {
+                stage: 1,
+                agent_id: "a".into(),
+            },
+        );
+        assert_eq!(disk.stages[1].agent_ids, vec!["a".to_string()]);
+        assert_eq!(disk.gate_tools, vec!["srv:gate".to_string()]);
+
+        let snapshot = disk.clone();
+        merge_action_into(&mut disk, &edited, &AppAction::Quit);
+        assert_eq!(disk, snapshot);
+    }
+
+    #[tokio::test]
+    async fn tui_save_keeps_disk_changes() {
+        let (_tmp, store, mut app) = setup_project_dir(ValidationMode::Auto);
+        let verify_store = store.clone();
+        let driver = Arc::new(MockAgentDriver::new());
+        let mut controller = EngineController::new(
+            store,
+            Box::new(move || Ok(make_mock_backends(Arc::clone(&driver) as _))),
+        );
+
+        let mut cfg = verify_store.load_project().unwrap();
+        cfg.max_step_retries = 9;
+        cfg.limits.mcp_call_timeout_secs = 1800;
+        verify_store.save_project(&cfg).unwrap();
+
+        app.config.execution_mode = ExecutionMode::Loop;
+        controller
+            .handle(&AppAction::SetMode(ExecutionMode::Loop), &mut app)
+            .await
+            .unwrap();
+
+        let reloaded = verify_store.load_project().unwrap();
+        assert_eq!(reloaded.execution_mode, ExecutionMode::Loop);
+        assert_eq!(reloaded.max_step_retries, 9);
+        assert_eq!(reloaded.limits.mcp_call_timeout_secs, 1800);
+        assert_eq!(app.config.max_step_retries, 9);
     }
 }
