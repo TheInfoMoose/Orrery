@@ -25,13 +25,12 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 105** | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` | STEP 104 |
-| 4 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
-| 5 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
-| 6 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
-| 7 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
-| 8 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
-| 9 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
+| 3 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
+| 4 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
+| 5 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
+| 6 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
+| 7 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
+| 8 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
 
 ### Completed
 
@@ -143,6 +142,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 102** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | Gate-failure rule in the Agents protocol (BUG-0014) | `crates/orrery-core/src/llm.rs` |
 | **STEP 103** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `role skills`, `role show` lists skills (TASK-0007) | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 104** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `ProjectConfig::set_field`, `SETTABLE_KEYS` | `crates/orrery-core/src/config.rs` |
+| **STEP 105** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` |
 
 ---
 
