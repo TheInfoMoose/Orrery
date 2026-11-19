@@ -81,6 +81,10 @@ pub enum Command {
         #[command(subcommand)]
         command: HookCmd,
     },
+    Config {
+        #[command(subcommand)]
+        command: ConfigCmd,
+    },
     Run {
         #[arg(long = "loop")]
         r#loop: bool,
@@ -452,6 +456,18 @@ pub enum HookCmd {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ConfigCmd {
+    Set {
+        key: String,
+        value: String,
+    },
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +670,9 @@ mod tests {
                 "{\"dry_run\":false}",
             ],
             &["orrery", "hook", "clear", "start"],
+            &["orrery", "config", "set", "max_step_retries", "2"],
+            &["orrery", "config", "show"],
+            &["orrery", "config", "show", "--json"],
             &["orrery", "run", "--loop", "--cycles", "3", "--step", "1"],
             &["orrery", "approve"],
             &["orrery", "reject", "--feedback", "needs test coverage"],

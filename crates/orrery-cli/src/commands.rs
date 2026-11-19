@@ -20,7 +20,8 @@ use orrery_core::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{
-    AgentCmd, Command, GateCmd, HookCmd, InferenceCmd, McpCmd, RoleCmd, SecretCmd, WorkflowCmd,
+    AgentCmd, Command, ConfigCmd, GateCmd, HookCmd, InferenceCmd, McpCmd, RoleCmd, SecretCmd,
+    WorkflowCmd,
 };
 
 pub type ReadSecretFn = Box<dyn FnMut() -> Result<String>>;
@@ -119,6 +120,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
         Command::Mcp { command } => dispatch_mcp(command, project, ctx).await,
         Command::Gate { command } => dispatch_gate(command, project, ctx),
         Command::Hook { command } => dispatch_hook(command, project, ctx),
+        Command::Config { command } => dispatch_config(command, project, ctx),
         Command::Run {
             r#loop,
             cycles,
@@ -362,6 +364,48 @@ where
     mutate(&mut cfg)?;
     store.save_project(&cfg)?;
     Ok(cfg)
+}
+
+fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
+    match command {
+        ConfigCmd::Set { key, value } => {
+            edit_project(&store, |cfg| cfg.set_field(&key, &value))?;
+            write_stdout_line(ctx, &format!("Set {key} = {value}"))?;
+            Ok(0)
+        }
+        ConfigCmd::Show { json } => {
+            let cfg = store.load_project()?;
+            let catalog = store.catalog_entries()?;
+            if json {
+                let payload = serde_json::json!({
+                    "project": cfg,
+                    "catalog": catalog,
+                });
+                let rendered = serde_json::to_string_pretty(&payload)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                write_stdout_line(
+                    ctx,
+                    &format!(
+                        "project: {}",
+                        store.orrery_dir().join("project.toml").display()
+                    ),
+                )?;
+                let project_toml = toml::to_string_pretty(&cfg)?;
+                write_stdout_line(ctx, &project_toml)?;
+                write_stdout_line(ctx, "catalog:")?;
+                for entry in &catalog {
+                    let kind_val = serde_json::to_value(entry.kind)?;
+                    let source_val = serde_json::to_value(entry.source)?;
+                    let kind = kind_val.as_str().unwrap_or_default();
+                    let source = source_val.as_str().unwrap_or_default();
+                    write_stdout_line(ctx, &format!("  {kind} {} ({source})", entry.id))?;
+                }
+            }
+            Ok(0)
+        }
+    }
 }
 
 fn dispatch_agent(command: AgentCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
@@ -4121,6 +4165,138 @@ mod tests {
             out.as_string().contains("skills: [\"house-style\"]"),
             "got: {}",
             out.as_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn config_set_updates_project() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("config-set-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        out.clear();
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Set {
+                    key: "validation_mode".to_string(),
+                    value: "agents".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set validation_mode");
+        assert_eq!(code, 0);
+        assert!(
+            out.as_string().contains("Set validation_mode = agents"),
+            "got: {}",
+            out.as_string()
+        );
+
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Set {
+                    key: "limits.mcp_call_timeout_secs".to_string(),
+                    value: "1800".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set limits.mcp_call_timeout_secs");
+        assert_eq!(code, 0);
+
+        let store = ConfigStore::new(dir.path(), ctx.config_home.clone()).expect("store");
+        let cfg = store.load_project().expect("load_project");
+        assert_eq!(cfg.validation_mode, ValidationMode::Agents);
+        assert_eq!(cfg.limits.mcp_call_timeout_secs, 1800);
+
+        let bogus_res = dispatch(
+            Command::Config {
+                command: ConfigCmd::Set {
+                    key: "bogus".to_string(),
+                    value: "1".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await;
+        assert!(
+            matches!(bogus_res, Err(Error::Validation { .. })),
+            "got: {bogus_res:?}"
+        );
+
+        let cfg_after = store.load_project().expect("load_project after bogus");
+        assert_eq!(cfg_after.validation_mode, ValidationMode::Agents);
+    }
+
+    #[tokio::test]
+    async fn config_show_text_and_json() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("config-show-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        out.clear();
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Show { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("config show text");
+        assert_eq!(code, 0);
+        let text = out.as_string();
+        assert!(text.contains("project: "), "got: {text}");
+        assert!(text.contains("validation_mode = "), "got: {text}");
+        assert!(text.contains("catalog:"), "got: {text}");
+        assert!(text.contains("  role coder (project)"), "got: {text}");
+
+        out.clear();
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Show { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("config show json");
+        assert_eq!(code, 0);
+        let val: serde_json::Value = serde_json::from_str(&out.as_string()).expect("parse json");
+        assert!(val["project"]["project_name"].is_string(), "got: {val}");
+        let catalog = val["catalog"].as_array().expect("catalog array");
+        assert!(
+            catalog.contains(&serde_json::json!({
+                "kind": "role",
+                "id": "coder",
+                "source": "project"
+            })),
+            "got: {catalog:?}"
         );
     }
 }
