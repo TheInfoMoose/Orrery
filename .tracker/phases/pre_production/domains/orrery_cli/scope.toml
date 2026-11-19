@@ -29,6 +29,13 @@ status = "pending"
 severity = "low"
 created_at = "2026-11-19T01:58:11Z"
 
+[[items.bugs]]
+id = "BUG-0013"
+title = "Refuse orrery init on an already-initialized project"
+status = "pending"
+severity = "high"
+created_at = "2026-11-19T02:21:11Z"
+
 [[items.tasks]]
 id = "TASK-0005"
 title = "Document inference.toml in the README catalog layout (F64-6)"
@@ -42,3 +49,10 @@ title = "Add CLI tests for logs --follow, run --step / exit 130, reset without c
 status = "pending"
 severity = "low"
 created_at = "2026-11-19T01:58:11Z"
+
+[[items.tasks]]
+id = "TASK-0007"
+title = "Show a role's skills in orrery role show"
+status = "pending"
+severity = "low"
+created_at = "2026-11-19T02:21:11Z"
