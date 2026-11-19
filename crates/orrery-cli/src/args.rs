@@ -342,6 +342,10 @@ pub enum RoleCmd {
     Show {
         id: String,
     },
+    Skills {
+        id: String,
+        names: Vec<String>,
+    },
     Remove {
         id: String,
     },
@@ -587,6 +591,15 @@ mod tests {
             ],
             &["orrery", "role", "list", "--json"],
             &["orrery", "role", "show", "reviewer"],
+            &[
+                "orrery",
+                "role",
+                "skills",
+                "coder",
+                "house-style",
+                "repo-rules",
+            ],
+            &["orrery", "role", "skills", "coder"],
             &["orrery", "role", "remove", "reviewer"],
             &[
                 "orrery",

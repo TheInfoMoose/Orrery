@@ -616,7 +616,27 @@ fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Resu
                 ctx,
                 &format!("allowed_mcp_tools: {:?}", role.allowed_mcp_tools),
             )?;
+            write_stdout_line(ctx, &format!("skills: {:?}", role.skills))?;
             write_stdout_line(ctx, &rules)?;
+            Ok(0)
+        }
+        RoleCmd::Skills { id, names } => {
+            let roles = store.load_roles()?;
+            let mut role =
+                roles
+                    .into_iter()
+                    .find(|r| r.role_id == id)
+                    .ok_or_else(|| Error::Validation {
+                        field: "role_id".into(),
+                        message: format!("unknown role_id '{id}'"),
+                    })?;
+            let rules = store.load_role_rules(&id)?;
+            role.skills = names;
+            store.save_role(&role, &rules)?;
+            write_stdout_line(
+                ctx,
+                &format!("Set skills for role '{id}': {:?}", role.skills),
+            )?;
             Ok(0)
         }
         RoleCmd::Remove { id } => {
@@ -3949,6 +3969,158 @@ mod tests {
         assert!(
             second_out.contains("Awaiting operator for step 1: "),
             "got: {second_out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn role_skills_sets_and_clears() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("role-skills-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
+        let before_rules = store.load_role_rules("coder").expect("load_role_rules");
+
+        let code = dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: vec!["house-style".to_string(), "repo-rules".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role skills set");
+        assert_eq!(code, 0);
+
+        let coder = store
+            .load_roles()
+            .expect("load_roles")
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .expect("coder role");
+        assert_eq!(
+            coder.skills,
+            vec!["house-style".to_string(), "repo-rules".to_string()]
+        );
+        assert_eq!(
+            store.load_role_rules("coder").expect("load_role_rules"),
+            before_rules
+        );
+
+        let clear_code = dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: Vec::new(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role skills clear");
+        assert_eq!(clear_code, 0);
+
+        let coder_cleared = store
+            .load_roles()
+            .expect("load_roles")
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .expect("coder role");
+        assert!(coder_cleared.skills.is_empty());
+
+        let unknown_res = dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "nope".to_string(),
+                    names: Vec::new(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await;
+        assert!(
+            matches!(unknown_res, Err(Error::Validation { .. })),
+            "got: {unknown_res:?}"
+        );
+
+        let bad_res = dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: vec!["../x".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await;
+        assert!(
+            matches!(bad_res, Err(Error::PathTraversal { .. })),
+            "got: {bad_res:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn role_show_prints_skills() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("role-show-skills-proj".to_string()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: vec!["house-style".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role skills set");
+
+        out.clear();
+        let code = dispatch(
+            Command::Role {
+                command: RoleCmd::Show {
+                    id: "coder".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("role show");
+        assert_eq!(code, 0);
+        assert!(
+            out.as_string().contains("skills: [\"house-style\"]"),
+            "got: {}",
+            out.as_string()
         );
     }
 }
