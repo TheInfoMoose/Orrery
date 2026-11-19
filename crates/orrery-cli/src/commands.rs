@@ -32,6 +32,10 @@ pub struct CliContext {
     pub secrets: Arc<dyn SecretStore>,
     pub read_secret: ReadSecretFn,
     pub make_backends: MakeBackendsFn,
+    /// XDG config base for the global catalog (`<base>/orrery/`). `None` uses
+    /// `dirs::config_dir()`; tests set an empty dir so the operator's real
+    /// catalog never leaks in.
+    pub config_home: Option<PathBuf>,
 }
 
 pub fn render_error(err: &Error) -> String {
@@ -71,7 +75,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
         }
         Command::Init { path, name } => {
             let target = path.as_deref().unwrap_or(project);
-            let store = ConfigStore::new(target, None)?;
+            let store = ConfigStore::new(target, ctx.config_home.clone())?;
             let project_name = match name {
                 Some(n) => n,
                 None => store
@@ -94,7 +98,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             Ok(0)
         }
         Command::Ingest { md_file, marker } => {
-            let store = ConfigStore::new(project, None)?;
+            let store = ConfigStore::new(project, ctx.config_home.clone())?;
             let mut cfg = store.load_project()?;
             let step_marker = marker.unwrap_or_else(|| cfg.step_marker.clone());
             let resolved = store.resolve_safe_path(&md_file)?;
@@ -150,7 +154,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
 }
 
 fn dispatch_workflow(command: WorkflowCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         WorkflowCmd::Show { json } => {
             let cfg = store.load_project()?;
@@ -263,7 +267,7 @@ fn parse_tool_args(text: &str, field: &str) -> Result<serde_json::Map<String, se
 }
 
 fn dispatch_gate(command: GateCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         GateCmd::Set { tools } => {
             edit_project(&store, |cfg| {
@@ -313,7 +317,7 @@ fn dispatch_gate(command: GateCmd, project: &Path, ctx: &mut CliContext) -> Resu
 }
 
 fn dispatch_hook(command: HookCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         HookCmd::Set {
             event,
@@ -361,7 +365,7 @@ where
 }
 
 fn dispatch_agent(command: AgentCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         AgentCmd::AddLocalModel {
             id,
@@ -491,7 +495,7 @@ fn dispatch_agent(command: AgentCmd, project: &Path, ctx: &mut CliContext) -> Re
 }
 
 fn dispatch_inference(command: InferenceCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         InferenceCmd::Add {
             id,
@@ -551,7 +555,7 @@ fn dispatch_inference(command: InferenceCmd, project: &Path, ctx: &mut CliContex
 }
 
 fn dispatch_role(command: RoleCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         RoleCmd::Add {
             id,
@@ -660,7 +664,7 @@ async fn validate_connect_and_save_mcp(
 }
 
 async fn dispatch_mcp(command: McpCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     match command {
         McpCmd::AddStdio {
             id,
@@ -779,7 +783,7 @@ fn format_stream_event(ev: &StreamEvent) -> String {
 }
 
 async fn dispatch_run(opts: RunOptions, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let backends = (ctx.make_backends)(project)?;
     let engine = build_engine(&store, backends).await?;
     let mut stream_rx = engine.subscribe_stream();
@@ -868,7 +872,7 @@ fn dispatch_operator_decision(
     project: &Path,
     ctx: &mut CliContext,
 ) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
     let mut state = checkpoints.load_state()?.ok_or_else(|| Error::Validation {
         field: "checkpoint".into(),
@@ -893,7 +897,7 @@ fn dispatch_operator_decision(
 }
 
 fn dispatch_reset(step: usize, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
     let mut state = match checkpoints.load_state()? {
         Some(cp) => cp,
@@ -911,7 +915,7 @@ fn dispatch_reset(step: usize, project: &Path, ctx: &mut CliContext) -> Result<u
 }
 
 fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let cfg = store.load_project()?;
     let resolved = store.resolve_safe_path(&cfg.plan_path)?;
     if !resolved.is_file() {
@@ -1010,7 +1014,7 @@ async fn dispatch_logs(
     project: &Path,
     ctx: &mut CliContext,
 ) -> Result<u8> {
-    let store = ConfigStore::new(project, None)?;
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let log_dir = store.orrery_dir().join("logs");
     let limit = tail.unwrap_or(usize::MAX);
     let lines = tail_log(&log_dir, limit)?;
@@ -1099,8 +1103,15 @@ mod tests {
                     message: "unexpected backends call in Step 34 test".into(),
                 })
             }),
+            config_home: Some(test_config_home()),
         };
         (ctx, out, err)
+    }
+
+    /// Global-catalog base for tests: a per-process path that is never created,
+    /// so every load sees an empty global catalog instead of `~/.config/orrery`.
+    fn test_config_home() -> PathBuf {
+        std::env::temp_dir().join(format!("orrery-cli-test-xdg-{}", std::process::id()))
     }
 
     #[tokio::test]
@@ -1142,7 +1153,7 @@ mod tests {
             );
         }
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.project_name, "demo-app");
         assert_eq!(cfg.stages.len(), 3);
@@ -1166,7 +1177,8 @@ mod tests {
         .await
         .expect("init nested should succeed");
         assert_eq!(code2, 0);
-        let nested_store = ConfigStore::new(&sub_dir, None).expect("nested store");
+        let nested_store =
+            ConfigStore::new(&sub_dir, Some(test_config_home())).expect("nested store");
         let nested_cfg = nested_store.load_project().expect("load nested project");
         assert_eq!(nested_cfg.project_name, "nested-proj");
     }
@@ -1212,7 +1224,7 @@ mod tests {
         assert!(printed.contains("2: Build"), "got: {printed}");
         assert!(!printed.contains("Step 1: 1:"), "got: {printed}");
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.plan_path, PathBuf::from("roadmap.md"));
         assert_eq!(cfg.step_marker, "### Phase ");
@@ -1249,7 +1261,7 @@ mod tests {
         .expect_err("bad plan must error");
         assert_eq!(exit_code_for(&err), 1);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(
             cfg.plan_path,
@@ -1379,7 +1391,7 @@ mod tests {
         .expect("grow stages");
         assert_eq!(code_grow, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.stages.len(), 5);
         assert_eq!(cfg.stages[3].role_id, "coder");
@@ -1457,7 +1469,7 @@ mod tests {
         .await
         .expect("assign b");
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.stages[2].role_id, "coder");
         assert_eq!(
@@ -1525,7 +1537,7 @@ mod tests {
         .expect_err("orchestrator on stage 2 must fail");
         assert_eq!(exit_code_for(&err), 1);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.stages[2].role_id, "validator");
     }
@@ -1560,7 +1572,7 @@ mod tests {
         .expect("set loop mode");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.execution_mode, ExecutionMode::Loop);
         assert_eq!(cfg.cycle_count, 4);
@@ -1612,7 +1624,7 @@ mod tests {
         .expect("gate set");
         assert_eq!(code_set, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(
             cfg.gate_tools,
@@ -1666,7 +1678,7 @@ mod tests {
         .expect("hook set");
         assert_eq!(code_set, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(
             cfg.hooks.on_step_start,
@@ -1728,7 +1740,7 @@ mod tests {
         .expect("hook set with args");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(
             cfg.hooks.on_step_pass.expect("on_step_pass").args,
@@ -1774,7 +1786,7 @@ mod tests {
             other => panic!("expected Error::Validation, got {other:?}"),
         }
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert!(cfg.hooks.on_step_pass.is_none());
 
@@ -1859,7 +1871,7 @@ mod tests {
         .expect("gate args set");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let cfg = store.load_project().expect("load_project");
         assert_eq!(cfg.gate_args["fs:test"]["profile"], "ci");
 
@@ -2167,7 +2179,7 @@ mod tests {
         .expect_err("embedded secret must fail");
         assert_eq!(exit_code_for(&err), 1);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert!(store.load_agents().expect("load_agents").is_empty());
     }
 
@@ -2241,7 +2253,7 @@ mod tests {
         .expect("agent remove");
         assert_eq!(rm_code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert!(store.load_agents().expect("load_agents").is_empty());
 
         let missing_err = dispatch(
@@ -2294,7 +2306,7 @@ mod tests {
         .expect("inference add defaults");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let list = store.load_inference().expect("load_inference");
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].inference_id, "ext-model");
@@ -2364,7 +2376,7 @@ mod tests {
         .await
         .expect("inference add compose");
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let raw_project = store.load_project().expect("load_project");
         assert_eq!(raw_project.inference.len(), 2);
         assert_eq!(
@@ -2440,7 +2452,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.as_string().is_empty(), "got: {}", out.as_string());
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert!(store.load_inference().expect("load_inference").is_empty());
     }
 
@@ -2519,7 +2531,7 @@ mod tests {
         .expect("inference remove");
         assert_eq!(rm_code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert!(store.load_inference().expect("load_inference").is_empty());
     }
 
@@ -2560,7 +2572,7 @@ mod tests {
         .expect("role add");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let loaded_rules = store.load_role_rules("reviewer").expect("load_role_rules");
         assert_eq!(loaded_rules, rules_body);
 
@@ -2737,7 +2749,7 @@ mod tests {
         )
         .await
         .expect("mcp remove");
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert_eq!(store.load_mcp_servers().expect("load_mcp_servers").len(), 1);
     }
 
@@ -2787,7 +2799,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(out.as_string().is_empty(), "got: {}", out.as_string());
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         assert!(
             store
                 .load_mcp_servers()
@@ -3125,7 +3137,7 @@ mod tests {
             "got: {printed}"
         );
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
         let state = checkpoints
             .load_state()
@@ -3165,7 +3177,7 @@ mod tests {
         .expect("run --loop --cycles 2");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
         let state = checkpoints
             .load_state()
@@ -3210,7 +3222,7 @@ mod tests {
             .expect("resume");
         assert_eq!(resume_code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
         let state = checkpoints
             .load_state()
@@ -3354,7 +3366,7 @@ mod tests {
             .expect("reset --step 1");
         assert_eq!(reset_code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
         let state = checkpoints
             .load_state()
@@ -3722,7 +3734,7 @@ mod tests {
         let (mut ctx, out, _err) =
             setup_runnable_project(dir.path(), "## Step 1: First\nb1\n", driver, secrets).await;
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         store
             .save_mcp_server(&McpServerConfig {
                 server_id: "unused".to_string(),
@@ -3775,7 +3787,7 @@ mod tests {
         )
         .await;
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         store
             .save_agent(&AgentConfig {
                 agent_id: "cloud-orch".to_string(),
@@ -3858,7 +3870,7 @@ mod tests {
         .expect("role add");
         assert_eq!(code, 0);
 
-        let store = ConfigStore::new(dir.path(), None).expect("store");
+        let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
         let roles = store.load_roles().expect("load_roles");
         let reviewer = roles
             .iter()

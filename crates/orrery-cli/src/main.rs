@@ -67,6 +67,7 @@ async fn main() -> ExitCode {
         secrets,
         read_secret: Box::new(read_secret_input),
         make_backends: Box::new(Backends::real),
+        config_home: None,
     };
 
     match dispatch(command, &project, &mut ctx).await {
