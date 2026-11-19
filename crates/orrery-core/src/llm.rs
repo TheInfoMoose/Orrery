@@ -138,14 +138,18 @@ pub fn protocol_contract(
                     .to_string(),
             );
             lines.push(
-                "2. The latest Validator report is `Denied` → `Dispatch` back to the Implementer stage, with the validator's feedback in `instructions`."
+                "2. \"# Notes from Orrery\" says a gate failed → `Dispatch` back to the Implementer stage, with the gate output from the note in `instructions`."
                     .to_string(),
             );
             lines.push(
-                "3. The latest Validator stage reported `Confirmed` from every validator agent, and no Implementer stage ran after it → `StepPassed`."
+                "3. The latest Validator report is `Denied` → `Dispatch` back to the Implementer stage, with the validator's feedback in `instructions`."
                     .to_string(),
             );
-            lines.push("4. Otherwise → `Dispatch` to the next stage in order.".to_string());
+            lines.push(
+                "4. The latest Validator stage reported `Confirmed` from every validator agent, and no Implementer stage ran after it → `StepPassed`."
+                    .to_string(),
+            );
+            lines.push("5. Otherwise → `Dispatch` to the next stage in order.".to_string());
         }
     }
 
@@ -3731,5 +3735,24 @@ mod tests {
         let empty_rules_prompt =
             build_agent_system_prompt(&role, "   ", &backend, 1, 3, ValidationMode::Agents);
         assert!(!empty_rules_prompt.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn contract_agents_mode_routes_gate_failure() {
+        let text = protocol_contract(RoleKind::Orchestrator, 0, 3, ValidationMode::Agents);
+        assert!(text.contains(
+            "2. \"# Notes from Orrery\" says a gate failed → `Dispatch` back to the Implementer stage"
+        ));
+        assert!(text.contains("3. The latest Validator report is `Denied`"));
+        assert!(text.contains("4. The latest Validator stage reported `Confirmed`"));
+        assert!(text.contains("5. Otherwise → `Dispatch` to the next stage in order."));
+
+        let gate_text = protocol_contract(
+            RoleKind::Orchestrator,
+            0,
+            3,
+            ValidationMode::GateAndOperator,
+        );
+        assert!(!gate_text.contains("says a gate failed"));
     }
 }
