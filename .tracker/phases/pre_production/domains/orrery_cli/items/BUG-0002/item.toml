@@ -2,16 +2,21 @@
 id = "BUG-0002"
 type = "bug"
 title = "Isolate CLI tests from the operator's global agent catalog"
-status = "pending"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_cli"
 created_at = "2026-11-19T01:58:11Z"
-updated_at = "2026-11-19T01:58:11Z"
+updated_at = "2026-11-19T02:14:24Z"
 
 [effort]
 logged_time_minutes = 0
 iteration_count = 1
+last_timer_session = "BUG-0002@2026-11-19T02:14:24Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-19"
+commit = "99b0a88"
+summary = "CLI tests use an empty per-process config_home instead of the real global catalog"

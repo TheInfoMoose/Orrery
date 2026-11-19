@@ -18,7 +18,7 @@ features = []
 [[items.bugs]]
 id = "BUG-0002"
 title = "Isolate CLI tests from the operator's global agent catalog"
-status = "pending"
+status = "closed"
 severity = "medium"
 created_at = "2026-11-19T01:58:11Z"
 
