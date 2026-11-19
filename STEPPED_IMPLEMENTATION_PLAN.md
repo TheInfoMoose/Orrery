@@ -25,12 +25,11 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
-| 4 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
-| 5 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
-| 6 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
-| 7 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
-| 8 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
+| 3 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
+| 4 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
+| 5 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
+| 6 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
+| 7 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
 
 ### Completed
 
@@ -143,6 +142,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 103** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `role skills`, `role show` lists skills (TASK-0007) | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 104** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `ProjectConfig::set_field`, `SETTABLE_KEYS` | `crates/orrery-core/src/config.rs` |
 | **STEP 105** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` |
+| **STEP 106** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/Cargo.toml`, `Cargo.lock` |
 
 ---
 
@@ -5605,12 +5605,14 @@ STEP 106: orrery config set <KEY> <VALUE> edits project.toml through set_field, 
 ALLOWED_FILES:
   - crates/orrery-cli/src/args.rs
   - crates/orrery-cli/src/commands.rs
+  - crates/orrery-cli/Cargo.toml (add `toml.workspace = true` only)
+  - Cargo.lock (only the change Cargo makes for that dependency)
 READ_ONLY_REFS:
   - ORRERY_TECHNICAL_SPECIFICATION.md:1563-1567 (§9.19.7; binding)
   - crates/orrery-cli/src/args.rs:37-110 (`Command`), the `every_spec_row_parses` test
   - crates/orrery-cli/src/commands.rs:114-150 (`dispatch` match), 357-365 (`edit_project`), 1091 (`test_ctx`)
 FORBIDDEN_SCOPE:
-  - Any file not listed in ALLOWED_FILES. `orrery-core` is not touched.
+  - Any file not listed in ALLOWED_FILES. `orrery-core` is not touched. No temp files or directories at runtime.
 
 [PRE_GATE]
 S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.7 ' $S && grep -q 'pub fn catalog_entries(' crates/orrery-core/src/config.rs && ! grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
@@ -5618,13 +5620,14 @@ S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.7 ' $S && grep -q 'pu
 [MUTATION_SPEC]
 1. args.rs: `Command::Config { #[command(subcommand)] command: ConfigCmd }` (after `Hook`), and `pub enum ConfigCmd { Set { key: String, value: String }, Show { #[arg(long)] json: bool } }` with the same derives as `GateCmd`.
 2. args.rs `every_spec_row_parses`: rows `&["orrery", "config", "set", "max_step_retries", "2"]`, `&["orrery", "config", "show"]`, `&["orrery", "config", "show", "--json"]`.
-3. commands.rs: `dispatch` routes `Command::Config { command }` to a new `fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> Result<u8>` that builds `ConfigStore::new(project, ctx.config_home.clone())?` and implements §9.19.7. Text `show`: `kind`/`source` strings come from `serde_json::to_value(...)` of the enum (a `Value::String`), not a hand-written match.
+3. commands.rs: `dispatch` routes `Command::Config { command }` to a new `fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> Result<u8>` that builds `ConfigStore::new(project, ctx.config_home.clone())?` and implements §9.19.7. Text `show`: `kind`/`source` strings come from `serde_json::to_value(...)` of the enum (a `Value::String`), not a hand-written match. Text `show` prints `toml::to_string_pretty(&cfg)?` of the loaded config (`Error::TomlSer` converts via `?`); no scratch directory, no `save_project` round-trip.
 4. Tests in commands.rs `mod tests`:
    - `config_set_updates_project`: `init`; `ConfigCmd::Set { key: "validation_mode", value: "agents" }` → 0 and stdout contains `Set validation_mode = agents`; `"limits.mcp_call_timeout_secs"`/`"1800"` → 0; the loaded project has `validation_mode == Agents` and `limits.mcp_call_timeout_secs == 1800`. `"bogus"`/`"1"` → `Err(Error::Validation { .. })`, and the loaded project still has `validation_mode == Agents`.
    - `config_show_text_and_json`: `init`; `Show { json: false }` → stdout contains `project: `, `validation_mode = `, `catalog:` and `  role coder (project)`. `out.clear()`; `Show { json: true }` → stdout parses as a `serde_json::Value` with `["project"]["project_name"]` a string and `["catalog"]` an array containing `{"kind": "role", "id": "coder", "source": "project"}`.
 
+5. crates/orrery-cli/Cargo.toml `[dependencies]`: add `toml.workspace = true` (alphabetical, after `serde_json`). Run `cargo check -p orrery-cli` once without `--locked` so Cargo.lock records it; no other lock changes.
 [POST_GATE]
-cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && grep -q 'fn dispatch_config(' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(config_set_updates_project|config_show_text_and_json): test$')" -eq 2
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && grep -q 'fn dispatch_config(' crates/orrery-cli/src/commands.rs && grep -q 'toml::to_string_pretty(&cfg)' crates/orrery-cli/src/commands.rs && ! grep -q 'fn format_project_toml' crates/orrery-cli/src/commands.rs && grep -q '^toml.workspace = true' crates/orrery-cli/Cargo.toml && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(config_set_updates_project|config_show_text_and_json): test$')" -eq 2
 
 [HALT_INVARIANT]
 Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
