@@ -1,0 +1,17 @@
+[item]
+id = "BUG-0015"
+type = "bug"
+title = "Stop TUI saves from overwriting project.toml changed on disk"
+status = "pending"
+severity = "high"
+scope_ref = "orrery_tui"
+created_at = "2026-11-19T03:26:46Z"
+updated_at = "2026-11-19T03:26:46Z"
+
+[effort]
+logged_time_minutes = 0
+iteration_count = 1
+
+[history]
+recurrence_count = 0
+previous_fixes = []
