@@ -1748,6 +1748,16 @@ impl ConfigStore {
 
     pub fn init_project(&self, name: impl Into<String>) -> Result<ProjectConfig> {
         let project_name = name.into();
+        let existing = self.orrery_dir().join("project.toml");
+        if existing.exists() {
+            return Err(Error::Validation {
+                field: "init".to_string(),
+                message: format!(
+                    "{} already exists; orrery init never overwrites a configured project. Move .orrery/ aside to start over.",
+                    existing.display()
+                ),
+            });
+        }
         let project_cfg = ProjectConfig::default_template(project_name);
         project_cfg.validate_staging()?;
 
@@ -4656,5 +4666,32 @@ max_context_tokens = 1024
                 other => panic!("unexpected default role_id: {other}"),
             }
         }
+    }
+
+    #[test]
+    fn init_project_refuses_existing_project() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+
+        store.init_project("t").unwrap();
+
+        let mut cfg = store.load_project().unwrap();
+        cfg.max_step_retries = 7;
+        store.save_project(&cfg).unwrap();
+
+        let coder_md = project.path().join(".orrery/roles/coder.md");
+        fs::write(&coder_md, "custom rules\n").unwrap();
+
+        match store.init_project("t") {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "init");
+                assert!(message.contains("never overwrites a configured project"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        assert_eq!(store.load_project().unwrap().max_step_retries, 7);
+        assert_eq!(fs::read_to_string(&coder_md).unwrap(), "custom rules\n");
     }
 }
