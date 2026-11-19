@@ -70,6 +70,8 @@ orrery logs --tail 50
 orrery status
 ```
 
+When a step waits for an operator, `orrery run` and `orrery resume` print the reason and the next commands, and exit with code 3.
+
 ## TUI keys
 
 Launch the TUI with `orrery` (or `orrery <PATH>`).
@@ -100,12 +102,14 @@ In the `Ingest` modal, `Tab` / `BackTab` switches between the plan path input an
 ```text
 ~/.config/orrery/                 # Global catalog (optional). Project files override by id.
 ├── roles/<role_id>.toml + .md
+├── skills/<name>.md
 ├── agents/<agent_id>.toml
 └── mcp/servers.toml
 
 <project_root>/.orrery/
 ├── project.toml
 ├── roles/<role_id>.toml + .md
+├── skills/<name>.md
 ├── agents/<agent_id>.toml
 ├── mcp/servers.toml
 ├── checkpoints/
@@ -116,7 +120,7 @@ In the `Ingest` modal, `Tab` / `BackTab` switches between the plan path input an
 ```
 
 - `project.toml`: Workflow stages, `plan_path`, `step_marker`, `execution_mode` (`Run` or `Loop`), `validation_mode` (`Auto`, `Agents`, or `GateAndOperator`), `gate_tools` (with optional `[gate_args]`), `[hooks]` (each with optional `args`), `[[inference]]`, and optional `[limits]`.
-- `roles/<role_id>.toml` + `.md`: Role kind (`Orchestrator`, `Implementer`, or `Validator`), allowed MCP tools (`<server>:<tool>` or `<server>:*`), and Markdown system-prompt rules.
+- `roles/<role_id>.toml` + `.md`: Role kind (`Orchestrator`, `Implementer`, or `Validator`), allowed MCP tools (`<server>:<tool>` or `<server>:*`), Markdown system-prompt rules, and optional `skills` (skill names).
 - `agents/<agent_id>.toml`: Agent backend definition (`LocalModel`, `AgentCli`, or `CloudApi`).
 - `mcp/servers.toml`: Configured `Stdio` and `StreamableHttp` MCP servers and their `write_tools` path-argument definitions.
 - `checkpoints/`: Atomic workflow checkpoint (`workflow_state.toml`) and per-round stamped agent reports.
@@ -142,6 +146,23 @@ orrery gate args neb:gate_run '{"profile":"ci"}'
 ```
 
 `orrery gate args <tool> '{}'` removes a gate's args; `gate set` drops args for tools no longer listed; `gate clear` clears them.
+
+### Roles, protocol and skills
+
+Every agent's system prompt starts with an "Orrery protocol" section that Orrery generates from its report checks (allowed statuses for the role, required fields, and for the orchestrator the dispatch and pass rules), so rules files never repeat it. The rules file (`roles/<role_id>.md`) holds the role's scope and behavior; `orrery init` writes starting rules for the orchestrator, coder and validator. A skill is a markdown file `skills/<name>.md` (project, or the global catalog; project wins); a role lists skills by name, and each is appended to its rules under `# Skill: <name>`. A missing skill fails the run before any agent starts.
+
+```toml
+role_id = "reviewer"
+display_name = "Reviewer"
+kind = "Validator"
+rules_file = "reviewer.md"
+allowed_mcp_tools = []
+skills = ["house-style"]
+```
+
+```bash
+orrery role add --id reviewer --name Reviewer --kind validator --rules-file reviewer.md --skill house-style
+```
 
 ## Security
 
