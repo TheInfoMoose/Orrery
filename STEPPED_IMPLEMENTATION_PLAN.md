@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92) and Phase M role protocol and skills (93–99). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92), Phase M role protocol and skills (93–99) and Phase N config safety and global profiles (100–110). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (99). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (110). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -25,6 +25,18 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 3 | **STEP 100** | `/goal` | `init` refuses a configured project (BUG-0013) | `crates/orrery-core/src/config.rs` | STEP 99 |
+| 4 | **STEP 101** | `/goal` | TUI saves merge into the file on disk (BUG-0015) | `crates/orrery-tui/src/bridge.rs` | STEP 100 |
+| 5 | **STEP 102** | `/goal` | Gate-failure rule in the Agents protocol (BUG-0014) | `crates/orrery-core/src/llm.rs` | STEP 101 |
+| 6 | **STEP 103** | `/goal` | `role skills`, `role show` lists skills (TASK-0007) | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 102 |
+| 7 | **STEP 104** | `/goal` | `ProjectConfig::set_field`, `SETTABLE_KEYS` | `crates/orrery-core/src/config.rs` | STEP 103 |
+| 8 | **STEP 105** | `/goal` | `ConfigStore::catalog_entries` with sources | `crates/orrery-core/src/config.rs` | STEP 104 |
+| 9 | **STEP 106** | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 105 |
+| 10 | **STEP 107** | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` | STEP 106 |
+| 11 | **STEP 108** | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` | STEP 107 |
+| 12 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
+| 13 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
+| 14 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
 
 ### Completed
 
@@ -5341,3 +5353,473 @@ Report back: pass/fail for 3 and 4, plus `orrery status`.
 Migrated to neb BUG-0002 (2026-11-18). Kept for history; do not add here.
 
 - `crates/orrery-cli/src/commands.rs:1145` (and every `ConfigStore::new(dir.path(), None)` / `dispatch` test) — CLI tests resolve the global catalog through `dirs::config_dir()`, so any real `~/.config/orrery/agents/*.toml` leaks into `load_agents` and fails `agent_add_each_backend_and_list_json` (6 ≠ 3), `agent_show_and_remove` and `agent_add_with_embedded_secret_exits_1`. Seen during the Step 99 check; it passed with `XDG_CONFIG_HOME` pointed at an empty dir — tests should pass an explicit temp `xdg_override` (or the CLI context should carry one) so they never read the operator's catalog.
+
+---
+
+## Phase N — config safety, global profiles and the gate-failure rule (Steps 100–110, User Step LOOP-1)
+
+**Phase goal (frozen until the phase ends):** a project's configuration is never silently overwritten, every project setting has a CLI, and a machine-wide setup can be written into a new project in one command: `init` refuses a configured project (BUG-0013); TUI saves merge into the file on disk (BUG-0015); the Agents-mode protocol routes a failed gate back to the implementer (BUG-0014); `role skills`, `config set` and `config show` (with each catalog entry's source) cover what was hand-edited (TASK-0007); `init --profile` applies a global profile saved with `profile save`. Loop behavior itself doesn't change. Done when User Step LOOP-1 passes. Design: spec §9.19 (`ORRERY_TECHNICAL_SPECIFICATION.md:1519-1590`).
+
+Written 2026-11-18 against `014aeb1`. Facts checked while planning:
+- `init_project` (`config.rs:1749`) writes `project.toml` and all three default roles with no existence check. A trial refusal broke no existing test (no test re-inits the same directory).
+- The TUI loads `ProjectConfig` once (`bridge.rs:633`) and six actions save that whole copy (`bridge.rs:338-344`, `366`).
+- Orrery notes reach the orchestrator once (`engine.rs:601`, `std::mem::take`), so a "gate failed" note is always new on the turn it appears. The orchestrator test at `llm.rs:3680` asserts no rule number, so renumbering breaks nothing.
+- No CLI today for `validation_mode`, `max_step_retries`, `max_concurrent_agents`, `[limits]`, or an existing role's `skills` (the orrery-setup skill hand-edits all of them).
+- CLI tests use `test_config_home()` (`commands.rs`, BUG-0002), a per-process path shared by every test. Tests that write a profile must use their own `config_home` under their `TempDir`, or they leak into other tests.
+
+### STEP 100: init Refuses a Configured Project
+
+* **Recommended Command:** `/goal`
+
+Advances: BUG-0013.
+
+```text
+[STEP_ID]
+STEP 100: ConfigStore::init_project returns a Validation error, before writing anything, when .orrery/project.toml already exists
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1522-1523 (§9.19.1; binding)
+  - crates/orrery-core/src/config.rs:1749-1766 (`init_project`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No `--force`, no new CLI flag. The rest of `init_project` is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.1 ' $S && ! grep -q 'never overwrites a configured project' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs `init_project`: as its first statement after `let project_name = name.into();`, add:
+   `let existing = self.orrery_dir().join("project.toml");`
+   `if existing.exists() { return Err(Error::Validation { field: "init".to_string(), message: format!("{} already exists; orrery init never overwrites a configured project. Move .orrery/ aside to start over.", existing.display()) }); }`
+2. Test in config.rs `mod tests`, `init_project_refuses_existing_project`: `TempDir` project and `TempDir` global; `ConfigStore::new(project, Some(global))`; `init_project("t")` ok. Load the project, set `max_step_retries = 7`, `save_project`; write `.orrery/roles/coder.md` = `"custom rules\n"`. Second `init_project("t")` → `Err(Error::Validation { field, message })` with `field == "init"` and `message.contains("never overwrites a configured project")`. Then `load_project().max_step_retries == 7` and `.orrery/roles/coder.md` reads `"custom rules\n"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'never overwrites a configured project' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::init_project_refuses_existing_project: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 101: TUI Saves Merge into the File on Disk
+
+* **Recommended Command:** `/goal`
+
+Advances: BUG-0015.
+
+```text
+[STEP_ID]
+STEP 101: the TUI reloads project.toml before each config save and writes back only the fields the action changed (merge_action_into), so CLI and hand edits survive
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1525-1532 (§9.19.2; binding)
+  - crates/orrery-tui/src/bridge.rs:336-372 (`EngineController::handle`), 871-911 (`setup_project_dir`), 1314 (`config_edit_persists`)
+  - crates/orrery-tui/src/app.rs:101-115 (`AppAction`), 188 (`pub fn refresh_warnings`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `app.rs` is not touched: the App still edits `app.config` first and emits the action. The failed-ingest paths that restore `step_marker` from disk stay as they are.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.2 ' $S && grep -q 'never overwrites a configured project' crates/orrery-core/src/config.rs && ! grep -q 'fn merge_action_into(' crates/orrery-tui/src/bridge.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. bridge.rs, a free function above `impl EngineController`: `pub fn merge_action_into(disk: &mut ProjectConfig, edited: &ProjectConfig, action: &AppAction)` with one `match action`:
+   - `AppAction::SetMode(_)` → `disk.execution_mode = edited.execution_mode;`
+   - `AppAction::SetCycles(_)` → `disk.cycle_count = edited.cycle_count;`
+   - `AppAction::SetStageCount(_) | AppAction::SetStageRole { .. } | AppAction::AssignAgent { .. } | AppAction::UnassignAgent { .. }` → `disk.stages = edited.stages.clone();`
+   - `AppAction::IngestPlan(_)` → `disk.plan_path = edited.plan_path.clone(); disk.step_marker = edited.step_marker.clone();`
+   - `_ => {}`
+2. `EngineController::handle`: in the six-action arm and in the successful `IngestPlan` path, replace `self.store.save_project(&app.config)?;` with:
+   `let mut disk = self.store.load_project()?;`
+   `merge_action_into(&mut disk, &app.config, action);`
+   `self.store.save_project(&disk)?;`
+   `app.config = disk;`
+   `app.refresh_warnings();`
+   (A private helper `fn save_merged(&self, action: &AppAction, app: &mut App) -> Result<()>` holding these five lines is a free choice.)
+3. Tests in bridge.rs `mod tests`:
+   - `merge_action_into_copies_only_action_fields`: `disk = ProjectConfig::default_template("d")`, `disk.gate_tools = vec!["srv:gate".into()]`; `edited = disk.clone()` with `execution_mode = ExecutionMode::Loop`, `cycle_count = 4`, `gate_tools = Vec::new()`, `stages[1].agent_ids = vec!["a".into()]`. `merge_action_into(&mut disk, &edited, &AppAction::SetMode(ExecutionMode::Loop))` → `disk.execution_mode == Loop`, `disk.cycle_count == 0`, `disk.gate_tools == ["srv:gate"]`, `disk.stages[1].agent_ids.is_empty()`. Then `SetCycles(4)` → `cycle_count == 4`. Then `AssignAgent { stage: 1, agent_id: "a".into() }` → `disk.stages[1].agent_ids == ["a"]`, `gate_tools` still `["srv:gate"]`. Then `AppAction::Quit` → `disk` unchanged.
+   - `tui_save_keeps_disk_changes`: `let (_tmp, store, mut app) = setup_project_dir(ValidationMode::Auto);` build an `EngineController` as `config_edit_persists` does. Simulate a CLI edit: `let mut cfg = store.load_project().unwrap(); cfg.max_step_retries = 9; cfg.limits.mcp_call_timeout_secs = 1800; store.save_project(&cfg).unwrap();`. In the TUI: `app.config.execution_mode = ExecutionMode::Loop;` then `controller.handle(&AppAction::SetMode(ExecutionMode::Loop), &mut app).await.unwrap()`. Reloaded from disk: `execution_mode == Loop`, `max_step_retries == 9`, `limits.mcp_call_timeout_secs == 1800`; and `app.config.max_step_retries == 9`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn merge_action_into(' crates/orrery-tui/src/bridge.rs && test "$(grep -c 'save_project(&app.config)' crates/orrery-tui/src/bridge.rs)" -le 2 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::(merge_action_into_copies_only_action_fields|tui_save_keeps_disk_changes): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+The `-le 2` allows the two existing `save_project(&app.config)` calls inside test helpers (`bridge.rs:899`, `2081`); production code has none after this step.
+
+### STEP 102: Gate-Failure Rule in the Agents Protocol
+
+* **Recommended Command:** `/goal`
+
+Advances: BUG-0014.
+
+```text
+[STEP_ID]
+STEP 102: the Agents-mode orchestrator contract gets rule 2, "a gate failed → Dispatch back to the Implementer with the gate output", and the later rules renumber to 3–5
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/llm.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1534-1541 (§9.19.3; binding)
+  - crates/orrery-core/src/llm.rs:135-149 (the non-GateAndOperator rule lines), 3680-3700 (contract tests)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The GateAndOperator rules and every other contract line are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.3 ' $S && grep -q 'pub fn merge_action_into(' crates/orrery-tui/src/bridge.rs && ! grep -q 'says a gate failed' crates/orrery-core/src/llm.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. llm.rs `protocol_contract`, the `else` branch (any mode other than GateAndOperator): after the rule-1 push, push
+   `"2. \"# Notes from Orrery\" says a gate failed → `Dispatch` back to the Implementer stage, with the gate output from the note in `instructions`."`
+   and renumber the existing three rules: `Denied` becomes `3.`, `Confirmed` becomes `4.`, `Otherwise` becomes `5.`. Their text after the number is unchanged.
+2. Test in llm.rs `mod tests`, `contract_agents_mode_routes_gate_failure`: `protocol_contract(RoleKind::Orchestrator, 0, 3, ValidationMode::Agents)` contains `"2. \"# Notes from Orrery\" says a gate failed → `Dispatch` back to the Implementer stage"`, `"3. The latest Validator report is `Denied`"`, `"4. The latest Validator stage reported `Confirmed`"` and `"5. Otherwise → `Dispatch` to the next stage in order."`; the GateAndOperator contract does not contain `"says a gate failed"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'says a gate failed' crates/orrery-core/src/llm.rs && grep -q '5. Otherwise' crates/orrery-core/src/llm.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^llm::tests::contract_agents_mode_routes_gate_failure: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 103: CLI role skills and role show Lists Skills
+
+* **Recommended Command:** `/goal`
+
+Advances: TASK-0007.
+
+```text
+[STEP_ID]
+STEP 103: orrery role skills <ID> [NAME]... sets an existing role's skills, and orrery role show prints a skills: line
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1543-1545 (§9.19.4; binding)
+  - crates/orrery-cli/src/args.rs:323-348 (`RoleCmd`), the `every_spec_row_parses` test
+  - crates/orrery-cli/src/commands.rs:559-625 (`dispatch_role`, `RoleCmd::Show`), the `role_add_reads_rules_file` test
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `role add` is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.4 ' $S && grep -q 'says a gate failed' crates/orrery-core/src/llm.rs && ! grep -q 'Set skills for role' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs `RoleCmd`: new variant after `Show`: `Skills { id: String, names: Vec<String> },` (both positional; `names` may be empty).
+2. args.rs `every_spec_row_parses`: add rows `&["orrery", "role", "skills", "coder", "house-style", "repo-rules"]` and `&["orrery", "role", "skills", "coder"]`.
+3. commands.rs `dispatch_role`, new arm `RoleCmd::Skills { id, names }`: find the role in `store.load_roles()?` (none → `Error::Validation { field: "role_id".into(), message: format!("unknown role_id '{id}'") }`), `let rules = store.load_role_rules(&id)?;`, set `role.skills = names;`, `store.save_role(&role, &rules)?;`, then `write_stdout_line(ctx, &format!("Set skills for role '{id}': {:?}", role.skills))?;` and `Ok(0)`.
+4. commands.rs `RoleCmd::Show`: right after the `allowed_mcp_tools:` line, `write_stdout_line(ctx, &format!("skills: {:?}", role.skills))?;`.
+5. Tests in commands.rs `mod tests`:
+   - `role_skills_sets_and_clears`: `init` a project (as `role_add_reads_rules_file` does). `RoleCmd::Skills { id: "coder", names: ["house-style", "repo-rules"] }` → code 0; the loaded `coder` role has `skills == ["house-style", "repo-rules"]` and `load_role_rules("coder")` is unchanged from before. Then `names: []` → `skills` is empty. Then `id: "nope"` → `Err(Error::Validation { .. })`. Then `names: ["../x"]` → `Err(Error::PathTraversal { .. })`.
+   - `role_show_prints_skills`: after setting `coder` skills to `["house-style"]`, `out.clear()`, `RoleCmd::Show { id: "coder" }` → stdout contains `skills: ["house-style"]`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'Set skills for role' crates/orrery-cli/src/commands.rs && grep -q '"skills: {:?}"' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(role_skills_sets_and_clears|role_show_prints_skills): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 104: Settable Project Fields
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 104: ProjectConfig::set_field(key, value) sets validation_mode, max_step_retries, max_concurrent_agents and the six limits.* fields from strings, listed in SETTABLE_KEYS
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1547-1554 (§9.19.5; binding)
+  - crates/orrery-core/src/config.rs:159-179 (`RuntimeLimits`), 229-249 (`ProjectConfig`), 303 (`validate_staging`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No CLI yet (Step 106). `execution_mode`, `cycle_count`, `plan_path` and `step_marker` are not settable here.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.5 ' $S && grep -q 'Set skills for role' crates/orrery-cli/src/commands.rs && ! grep -q 'pub fn set_field(' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs, above `impl ProjectConfig`: `pub const SETTABLE_KEYS: [&str; 9] = [...]` with exactly the nine keys of §9.19.5, in that order.
+2. config.rs `impl ProjectConfig`: `pub fn set_field(&mut self, key: &str, value: &str) -> Result<()>` per §9.19.5: one `match key`; `validation_mode` matches the six accepted spellings; each integer key uses `value.parse::<T>()` for its field's type (`usize` or `u64`) and maps a parse error to the §9.19.5 message; the unknown-key message joins `SETTABLE_KEYS` with `", "`. The function ends with `self.validate_staging()`.
+3. Tests in config.rs `mod tests`:
+   - `set_field_known_keys`: on `ProjectConfig::default_template("t")`: `set_field("validation_mode", "agents")` → `Agents`; `"GateAndOperator"` → `GateAndOperator`; `"auto"` → `Auto`; `set_field("max_step_retries", "2")` → 2; `set_field("max_concurrent_agents", "1")` → 1; `set_field("limits.mcp_call_timeout_secs", "1800")` → 1800; and each of the other five `limits.*` keys with a valid value (`max_tool_calls` 40, `model_idle_timeout_secs` 120, `live_stream_ring_capacity` 500, `live_stream_max_file_bytes` 1048576, `live_stream_max_files` 2) lands in its field. `SETTABLE_KEYS.len() == 9`.
+   - `set_field_rejects_bad_input`: `set_field("validation_mode", "sometimes")` → `Validation { field: "validation_mode", .. }`; `set_field("max_step_retries", "-1")` → `Validation { field: "max_step_retries", message }` with `message.contains("non-negative integer")`; `set_field("execution_mode", "loop")` → `Validation { field: "config", message }` with `message.contains("unknown key 'execution_mode'")` and `message.contains("limits.max_tool_calls")`; `set_field("max_concurrent_agents", "0")` → `Validation { field: "max_concurrent_agents", .. }` (from `validate_staging`); `set_field("limits.max_tool_calls", "0")` → `Validation { field: "limits.max_tool_calls", .. }`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn set_field(' crates/orrery-core/src/config.rs && grep -q 'pub const SETTABLE_KEYS' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(set_field_known_keys|set_field_rejects_bad_input): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 105: Catalog Sources
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 105: ConfigStore::catalog_entries lists every agent, role, skill, MCP server and inference id with its source (Global, Project or ProjectOverridesGlobal)
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1556-1561 (§9.19.6; binding)
+  - crates/orrery-core/src/config.rs:1726 (`global_dir`), 1796 (`load_roles`), 1858 (`load_skill`), 1959 (`load_agents`), 2016 (`load_mcp_servers`), 2088 (`load_inference`), 2318-2410 (`read_*` helpers), 1611 (`validate_config_file_id`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. The existing `load_*` functions are unchanged. No CLI yet (Step 106).
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.6 ' $S && grep -q 'pub fn set_field(' crates/orrery-core/src/config.rs && ! grep -q 'pub fn catalog_entries(' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs: `CatalogKind`, `CatalogSource` and `CatalogEntry` exactly as §9.19.6 (derives and serde attributes as written; variant order as written).
+2. config.rs `impl ConfigStore`: `pub fn catalog_entries(&self) -> Result<Vec<CatalogEntry>>` per §9.19.6. Read the global and project sides separately with the existing helpers (`read_roles_from_dir`, `read_agents_from_dir`, `read_mcp_servers_file`, `read_inference_file`; project inference also includes `load_project()?.inference` when `project.toml` exists). For skills, a private helper `fn skill_ids_in(dir: &Path) -> Result<Vec<String>>` lists `*.md` stems that pass `validate_config_file_id`, and returns empty when `dir` doesn't exist. Sort the result by `(kind, id)`.
+3. Test in config.rs `mod tests`, `catalog_entries_report_sources`: `TempDir` project and global; `ConfigStore::new(project, Some(global))` and `init_project("t")` (writes the three default roles in the project). Global: write `<global>/orrery/agents/g-only.toml` and `<global>/orrery/agents/both.toml` (valid `LocalModel` agents with `inference_id = "inf"`; copy the shape another config.rs test uses), `<global>/orrery/roles/coder.toml` + `coder.md` (a copy of the default coder), `<global>/orrery/skills/style.md`, and `<global>/orrery/skills/notes.txt`. Project: `.orrery/agents/both.toml`, `.orrery/skills/style.md` and `.orrery/skills/p-skill.md`. Expect, among the entries: `(Agent, "g-only", Global)`, `(Agent, "both", ProjectOverridesGlobal)`, `(Role, "coder", ProjectOverridesGlobal)`, `(Role, "validator", Project)`, `(Skill, "style", ProjectOverridesGlobal)`, `(Skill, "p-skill", Project)`; no entry has id `"notes"`; and the list equals itself sorted by `(kind, id)`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn catalog_entries(' crates/orrery-core/src/config.rs && grep -q 'pub enum CatalogSource' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::catalog_entries_report_sources: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 106: CLI config set and config show
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 106: orrery config set <KEY> <VALUE> edits project.toml through set_field, and orrery config show [--json] prints the project config and the catalog with sources
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1563-1567 (§9.19.7; binding)
+  - crates/orrery-cli/src/args.rs:37-110 (`Command`), the `every_spec_row_parses` test
+  - crates/orrery-cli/src/commands.rs:114-150 (`dispatch` match), 357-365 (`edit_project`), 1091 (`test_ctx`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `orrery-core` is not touched.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.7 ' $S && grep -q 'pub fn catalog_entries(' crates/orrery-core/src/config.rs && ! grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs: `Command::Config { #[command(subcommand)] command: ConfigCmd }` (after `Hook`), and `pub enum ConfigCmd { Set { key: String, value: String }, Show { #[arg(long)] json: bool } }` with the same derives as `GateCmd`.
+2. args.rs `every_spec_row_parses`: rows `&["orrery", "config", "set", "max_step_retries", "2"]`, `&["orrery", "config", "show"]`, `&["orrery", "config", "show", "--json"]`.
+3. commands.rs: `dispatch` routes `Command::Config { command }` to a new `fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> Result<u8>` that builds `ConfigStore::new(project, ctx.config_home.clone())?` and implements §9.19.7. Text `show`: `kind`/`source` strings come from `serde_json::to_value(...)` of the enum (a `Value::String`), not a hand-written match.
+4. Tests in commands.rs `mod tests`:
+   - `config_set_updates_project`: `init`; `ConfigCmd::Set { key: "validation_mode", value: "agents" }` → 0 and stdout contains `Set validation_mode = agents`; `"limits.mcp_call_timeout_secs"`/`"1800"` → 0; the loaded project has `validation_mode == Agents` and `limits.mcp_call_timeout_secs == 1800`. `"bogus"`/`"1"` → `Err(Error::Validation { .. })`, and the loaded project still has `validation_mode == Agents`.
+   - `config_show_text_and_json`: `init`; `Show { json: false }` → stdout contains `project: `, `validation_mode = `, `catalog:` and `  role coder (project)`. `out.clear()`; `Show { json: true }` → stdout parses as a `serde_json::Value` with `["project"]["project_name"]` a string and `["catalog"]` an array containing `{"kind": "role", "id": "coder", "source": "project"}`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && grep -q 'fn dispatch_config(' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(config_set_updates_project|config_show_text_and_json): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 107: Global Profiles
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 107: ProjectProfile (from_project, apply) and ConfigStore::load_profile / save_profile / list_profiles over <global_dir>/profiles/<name>.toml
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1569-1576 (§9.19.8; binding)
+  - crates/orrery-core/src/config.rs:38-100 (`StageConfig`, `HooksConfig`), 159 (`RuntimeLimits`), 229-249 (`ProjectConfig`), 1544 (`atomic_write`), 1611 (`validate_config_file_id`), 1726 (`global_dir`), 1858 (`load_skill`, the not-found error shape)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `init_project` is unchanged (Step 108). No CLI yet (Step 109).
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.8 ' $S && grep -q 'ConfigCmd::Show' crates/orrery-cli/src/commands.rs && ! grep -q 'pub struct ProjectProfile' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs: `pub struct ProjectProfile` exactly as §9.19.8 (derives, `deny_unknown_fields`, field order, per-field serde attributes, all fields `pub`).
+2. config.rs `impl ProjectProfile`: `pub fn from_project(cfg: &ProjectConfig, roles: &[RoleConfig]) -> Self` and `pub fn apply(&self, cfg: &mut ProjectConfig)` per §9.19.8.
+3. config.rs `impl ConfigStore`: `pub fn load_profile(&self, name: &str) -> Result<ProjectProfile>`, `pub fn save_profile(&self, name: &str, profile: &ProjectProfile) -> Result<PathBuf>`, `pub fn list_profiles(&self) -> Result<Vec<String>>` per §9.19.8, with the error fields and messages as written.
+4. Tests in config.rs `mod tests`:
+   - `profile_round_trip_and_apply`: `cfg = ProjectConfig::default_template("src")` with `validation_mode = Agents`, `max_step_retries = 2`, `max_concurrent_agents = 1`, `gate_tools = ["hybrid:step_check"]`, `stages[1].agent_ids = ["agy-impl"]`, `limits.mcp_call_timeout_secs = 1800`, and `hooks.on_step_start = Some(HookConfig { tool: "hybrid:step_start".into(), on_failure: HookFailure::Halt, args: serde_json::Map::new() })`; roles = the default roles with `coder.skills = ["repo-rules"]`. `p = ProjectProfile::from_project(&cfg, &roles)`; `p.role_skills == {"coder": ["repo-rules"]}`. Save with `save_profile("cloud", &p)` into a `TempDir` global; the returned path ends with `profiles/cloud.toml`; `load_profile("cloud") == p`. `target = ProjectConfig::default_template("dst")`; `p.apply(&mut target)`; `target.project_name == "dst"`, `target.plan_path` unchanged, and `validation_mode`, `max_step_retries`, `gate_tools`, `stages`, `hooks`, `limits` equal `cfg`'s. `ProjectProfile::default().apply(&mut x)` leaves `x` equal to a fresh template.
+   - `profile_load_errors_and_list`: empty global `TempDir`: `list_profiles() == []`; `load_profile("nope")` → `Validation { field: "profile", message }` with `message.contains("profile 'nope' not found")`; `load_profile("../x")` → `PathTraversal { .. }`. Write `profiles/b.toml` = `max_step_retries = 1\n`, `profiles/a.toml` = `"validation_mode = \"Agents\"\n"`, `profiles/notes.md`; `list_profiles() == ["a", "b"]`. Write `profiles/bad.toml` = `"project_name = \"x\"\n"` → `load_profile("bad")` is `Err(Error::TomlDe { .. })` (deny_unknown_fields).
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub struct ProjectProfile' crates/orrery-core/src/config.rs && grep -q 'pub fn load_profile(' crates/orrery-core/src/config.rs && grep -q 'pub fn save_profile(' crates/orrery-core/src/config.rs && grep -q 'pub fn list_profiles(' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(profile_round_trip_and_apply|profile_load_errors_and_list): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 108: init with a Profile
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 108: ConfigStore::init_project_with_profile applies a profile's settings and role skills to a new project, validating everything before writing; init_project wraps it with None
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1578-1581 (§9.19.9; binding)
+  - crates/orrery-core/src/config.rs:1749 (`init_project`, with Step 100's check), `default_roles_with_rules`, `RoleConfig::validate`
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `init_project`'s signature and its callers are unchanged. Skill files are not checked at init.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.9 ' $S && grep -q 'pub fn list_profiles(' crates/orrery-core/src/config.rs && ! grep -q 'pub fn init_project_with_profile(' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs `impl ConfigStore`: `pub fn init_project_with_profile(&self, name: impl Into<String>, profile: Option<&ProjectProfile>) -> Result<ProjectConfig>` doing exactly the §9.19.9 order. Default role ids come from `default_roles_with_rules()`.
+2. `init_project(&self, name)` body becomes `self.init_project_with_profile(name, None)`.
+3. Tests in config.rs `mod tests`:
+   - `init_with_profile_applies_settings_and_skills`: profile with `validation_mode: Some(Agents)`, `max_step_retries: Some(2)`, `gate_tools: Some(vec!["hybrid:step_check".into()])`, `role_skills: {"orchestrator": ["hybrid-orchestrator", "repo-rules"], "coder": ["repo-rules"]}`. `init_project_with_profile("p", Some(&profile))` → the loaded project has those three values and `project_name == "p"`; loaded `orchestrator.skills == ["hybrid-orchestrator", "repo-rules"]`, `coder.skills == ["repo-rules"]`, `validator.skills` empty; `load_role_rules("coder")` equals the default coder rules text.
+   - `init_with_bad_profile_writes_nothing`: (a) `role_skills: {"reviewer": ["x"]}` → `Validation { field: "role_skills", message }` with `message.contains("unknown default role 'reviewer'")`; (b) `max_concurrent_agents: Some(0)` → `Validation { field: "max_concurrent_agents", .. }`; (c) `role_skills: {"coder": ["../x"]}` → `PathTraversal { .. }`. After each, `.orrery/` does not exist in that project dir (use a fresh `TempDir` per case).
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn init_project_with_profile(' crates/orrery-core/src/config.rs && grep -q 'self.init_project_with_profile(name, None)' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(init_with_profile_applies_settings_and_skills|init_with_bad_profile_writes_nothing): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 109: Profile CLI
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 109: orrery init --profile <P>, orrery profile save <NAME> and orrery profile list [--json]
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1583-1586 (§9.19.10; binding)
+  - crates/orrery-cli/src/args.rs:42-46 (`Command::Init`), the `every_spec_row_parses` test
+  - crates/orrery-cli/src/commands.rs:76-99 (`Command::Init` dispatch), 1091 (`test_ctx`), the `test_config_home` helper
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `orrery-core` is not touched. Tests never write a profile under `test_config_home()`.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.10 ' $S && grep -q 'pub fn init_project_with_profile(' crates/orrery-core/src/config.rs && ! grep -q 'Applied profile' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs `Command::Init`: add `#[arg(long)] profile: Option<String>,` after `name`. New `Command::Profile { #[command(subcommand)] command: ProfileCmd }` (after `Config`) and `pub enum ProfileCmd { Save { name: String }, List { #[arg(long)] json: bool } }` with the same derives as `GateCmd`.
+2. args.rs `every_spec_row_parses`: rows `&["orrery", "init", "--profile", "cloud-cli"]`, `&["orrery", "profile", "save", "cloud-cli"]`, `&["orrery", "profile", "list", "--json"]`. Existing `Command::Init { .. }` literals in tests gain `profile: None`.
+3. commands.rs `Command::Init` arm: per §9.19.10. Without `--profile` it calls `init_project` exactly as today.
+4. commands.rs: `dispatch` routes `Command::Profile { command }` to a new `fn dispatch_profile(command: ProfileCmd, project: &Path, ctx: &mut CliContext) -> Result<u8>` implementing `save` and `list` per §9.19.10.
+5. Tests in commands.rs `mod tests`, each setting `ctx.config_home = Some(<its TempDir>.path().join("xdg"))` right after `test_ctx()`:
+   - `profile_save_then_init_with_profile`: project A: `init`, then `ConfigCmd::Set` `validation_mode` → `agents` and `max_step_retries` → `2`, then `RoleCmd::Skills { id: "coder", names: ["repo-rules"] }`; `ProfileCmd::Save { name: "cloud" }` → 0, stdout contains `Saved profile 'cloud' to ` and `profiles/cloud.toml` exists under the xdg dir. Project B (another `TempDir`, same `ctx`): `Command::Init { path: None, name: Some("b"), profile: Some("cloud") }` → 0, stdout contains `Applied profile 'cloud'`; B's project has `validation_mode == Agents`, `max_step_retries == 2`, `project_name == "b"`, and B's `coder.skills == ["repo-rules"]`. `Init` with `profile: Some("missing")` in a third dir → `Err(Error::Validation { .. })` and that dir has no `.orrery/`.
+   - `profile_list_json`: save profiles `b` and `a` from an initialized project; `ProfileCmd::List { json: true }` → stdout parses as `["a", "b"]`; `out.clear()`; `List { json: false }` → stdout is `"a\nb\n"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'Applied profile' crates/orrery-cli/src/commands.rs && grep -q 'fn dispatch_profile(' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(profile_save_then_init_with_profile|profile_list_json): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 110: README Config, Profiles and Gate Routing
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 110: the README documents config set/show, role skills, global profiles, the init refusal, TUI merge-on-save and gate-failure routing
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1519-1590 (§9.19; binding)
+  - README.md: the project layout tree, the "Hook and gate arguments" and "Roles, protocol and skills" sections, the quickstart
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. State only what §9.19 specifies; no claims about untested behavior.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.19.11 ' $S && grep -q 'Applied profile' crates/orrery-cli/src/commands.rs && ! grep -q '^### Global profiles' README.md && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. Layout tree, under `~/.config/orrery/`: add `├── profiles/<name>.toml` after `skills/<name>.md`.
+2. Quickstart, right after the `orrery init` line: one sentence that `orrery init` refuses a directory that already has `.orrery/project.toml` (exit 1); move `.orrery/` aside to start over.
+3. "Roles, protocol and skills" section: add a `bash` line `orrery role skills coder repo-rules` with one sentence (sets an existing role's skills; no names clears them; `role show` lists them); and one sentence that in Agents mode a failed gate goes back to the Implementer with the gate output.
+4. New `### Project settings` section after it: one sentence each for `orrery config set <KEY> <VALUE>` (the nine `SETTABLE_KEYS`, listed in one inline-code list) and `orrery config show [--json]` (the project config plus every catalog entry marked `global`, `project` or `project_overrides_global`), and a `bash` block with `orrery config set validation_mode agents` and `orrery config set limits.mcp_call_timeout_secs 1800`.
+5. New `### Global profiles` section after that: what a profile holds (§9.19.8 fields, and never `project_name`, `plan_path` or `inference`), where it lives, and a `bash` block: `orrery profile save cloud-cli`, `orrery profile list`, `orrery init --name NewRepo --profile cloud-cli`. One sentence: MCP servers named by a profile's gate or hooks must be in the global `mcp/servers.toml` (or added to the new project) for the run to start.
+6. TUI keys section: one sentence that TUI config changes reload `project.toml` and write back only the changed setting, so CLI or hand edits made while the TUI is open are kept.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && grep -q '^### Global profiles' README.md && grep -q '^### Project settings' README.md && grep -q 'profiles/<name>.toml' README.md && grep -q 'orrery role skills coder repo-rules' README.md && grep -q 'orrery init --name NewRepo --profile cloud-cli' README.md && grep -q 'project_overrides_global' README.md
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### User Step: LOOP-1
+
+After Step 110 is committed. Proves the Phase N goal on a throwaway repo with the real binary. Uses only local, no-agent commands plus one `run` with this repo's cloud-cli agents. If you'd rather not spend agent time, skip 5 and report it as skipped.
+
+1. Reinstall Orrery:
+
+   ```bash
+   cargo install --path /srv/devshare/Orrery/crates/orrery-cli --locked
+   ```
+
+2. Save this repo's setup as a profile, then build a fresh project from it:
+
+   ```bash
+   cd /srv/devshare/Orrery && orrery profile save cloud-cli && orrery profile list
+   ```
+
+   ```bash
+   mkdir -p ~/scratch/orrery-loop1 && cd ~/scratch/orrery-loop1 && git init && orrery init --name loop1 --profile cloud-cli
+   ```
+
+   ```bash
+   orrery config show
+   ```
+
+   Expect: `validation_mode = "Agents"`, `max_step_retries = 2`, `gate_tools = ["hybrid:step_check"]`, the three stage assignments, `[hooks.on_step_start]` and `mcp_call_timeout_secs = 1800`; the catalog shows the three agents as `(global)`; `orrery role show orchestrator` lists `skills: ["hybrid-orchestrator", "repo-rules"]`.
+
+3. Init refusal:
+
+   ```bash
+   orrery config set max_step_retries 5 && orrery init --name loop1; echo "exit $?" && orrery config show | grep max_step_retries
+   ```
+
+   Expect: `exit 1`, and `max_step_retries = 5` is still there.
+
+4. TUI keeps CLI edits: open `orrery` (the TUI) in `~/scratch/orrery-loop1`. In another shell there, run:
+
+   ```bash
+   orrery config set limits.mcp_call_timeout_secs 900 && orrery config set max_step_retries 4
+   ```
+
+   In the TUI, toggle the mode to Loop and back to Run, then quit. Then:
+
+   ```bash
+   orrery config show | grep -E 'execution_mode|mcp_call_timeout_secs|max_step_retries|gate_tools'
+   ```
+
+   Expect: `execution_mode = "Run"`, `mcp_call_timeout_secs = 900`, `max_step_retries = 4`, and `gate_tools = ["hybrid:step_check"]`.
+
+5. Run ↔ Loop on one project (optional; uses agents): in this repo, with a pending step that's safe to run, `orrery run --step <POSITION>`, then `orrery workflow mode loop --cycles 1 && orrery run`, then `orrery workflow mode run`. Expect: no `project.toml` change other than `execution_mode` / `cycle_count` (`git diff .orrery/project.toml`).
+
+Report back: pass/fail for 2–5, and the `orrery config show` output from step 2.

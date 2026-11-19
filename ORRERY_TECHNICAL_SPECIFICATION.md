@@ -1515,3 +1515,76 @@ NEB-1 showed a local model (Qwen3.8-27B) follows Orrery's report protocol only w
 #### 9.18.7 README and acceptance (Step 99, User Step LIVE-3)
 - README documents the generated protocol section, role rules, skills (`.orrery/skills/<name>.md`, `--skill`) and the awaiting-operator message.
 - Acceptance (User Step LIVE-3): a fresh `orrery init` project with no hand-edited rules passes a one-step plan on the local Qwen3.8-27B, and a role with a skill shows `# Skill: <name>` in its prompt.
+
+### 9.19 Phase N: config safety, global profiles and the gate-failure rule (Steps 100–110, User Step LOOP-1)
+A practical run of the cloud-cli profile (2026-11-18, Perigee and ST_Rust_Age) showed three ways a project's configuration gets clobbered or can't be expressed: `orrery init` overwrites a configured project (BUG-0013), the TUI writes its startup copy of `project.toml` back on every mode or stage change (BUG-0015), and several settings exist only as hand edits. It also showed the Agents-mode protocol has no rule for a failed gate (BUG-0014). Switching between `run` and Loop needs no engine change; it needs the config to survive the switch. Global profiles let a machine-wide setup (stages, assignments, gate, hooks, limits, modes, role skills) be written into a new project in one command.
+
+#### 9.19.1 `init` refuses a configured project (Step 100) (overrides §9.2 `init_project`)
+- `ConfigStore::init_project` checks first, before creating any directory or file: if `<orrery_dir>/project.toml` exists → `Error::Validation { field: "init", message: "<path> already exists; orrery init never overwrites a configured project. Move .orrery/ aside to start over." }` (`<path>` = that file's `display()`). The CLI maps it to exit 1 as usual. There is no `--force`.
+
+#### 9.19.2 TUI saves merge into the file on disk (Step 101) (overrides §6 config persistence)
+- bridge.rs: `pub fn merge_action_into(disk: &mut ProjectConfig, edited: &ProjectConfig, action: &AppAction)`. Pure. Copies from `edited` into `disk` only what the action changed:
+  - `SetMode(_)` → `execution_mode`
+  - `SetCycles(_)` → `cycle_count`
+  - `SetStageCount(_)`, `SetStageRole { .. }`, `AssignAgent { .. }`, `UnassignAgent { .. }` → `stages` (the whole list; the TUI owns the stage table while it is edited)
+  - `IngestPlan(_)` → `plan_path` and `step_marker`
+  - any other action → nothing.
+- `EngineController::handle`, for those six config actions and for a successful `IngestPlan`, replaces `self.store.save_project(&app.config)?` with: `let mut disk = self.store.load_project()?; merge_action_into(&mut disk, &app.config, action); self.store.save_project(&disk)?; app.config = disk; app.refresh_warnings();`. Every other field on disk (gate, hooks, limits, validation mode, retries, inference) survives, and the TUI picks up the disk values.
+
+#### 9.19.3 Gate-failure rule in the Agents protocol (Step 102) (overrides §9.18.1 item 10)
+- `protocol_contract`, Orchestrator, any mode other than `GateAndOperator`, rules become:
+  1. `` 1. The latest Implementer report is `Blocked` → `Escalate`, with its feedback. ``
+  2. `` 2. "# Notes from Orrery" says a gate failed → `Dispatch` back to the Implementer stage, with the gate output from the note in `instructions`. ``
+  3. `` 3. The latest Validator report is `Denied` → `Dispatch` back to the Implementer stage, with the validator's feedback in `instructions`. ``
+  4. `` 4. The latest Validator stage reported `Confirmed` from every validator agent, and no Implementer stage ran after it → `StepPassed`. ``
+  5. `` 5. Otherwise → `Dispatch` to the next stage in order. ``
+- Notes reach the orchestrator once, on the turn right after the failure (`engine.rs` takes them with `std::mem::take`), so rule 2 never matches a stale failure. The `GateAndOperator` rules are unchanged.
+
+#### 9.19.4 Role skills from the CLI (Step 103) (adds to §7, §9.18.5)
+- `orrery role skills <ID> [NAME]...` sets an existing role's `skills` to exactly the names given (none → empty list). It loads the role from `load_roles()` (unknown → `Error::Validation { field: "role_id", message: "unknown role_id '<ID>'" }`), keeps `load_role_rules(<ID>)` as the rules, and calls `save_role` (which validates names and writes the project copy, so a global-only role gains a project override). Prints `Set skills for role '<ID>': <skills:?>`.
+- `orrery role show <ID>` prints `skills: <skills:?>` right after the `allowed_mcp_tools:` line (TASK-0007).
+
+#### 9.19.5 Settable project fields (Step 104) (adds to §9.2 `ProjectConfig`)
+- config.rs: `pub const SETTABLE_KEYS: [&str; 9] = ["validation_mode", "max_step_retries", "max_concurrent_agents", "limits.max_tool_calls", "limits.model_idle_timeout_secs", "limits.mcp_call_timeout_secs", "limits.live_stream_ring_capacity", "limits.live_stream_max_file_bytes", "limits.live_stream_max_files"];`
+- `impl ProjectConfig { pub fn set_field(&mut self, key: &str, value: &str) -> Result<()> }`:
+  - `validation_mode` accepts `auto`/`Auto`, `agents`/`Agents`, `gate-and-operator`/`GateAndOperator`; anything else → `Error::Validation { field: "validation_mode", message: "expected auto, agents or gate-and-operator, got '<value>'" }`.
+  - Every other key parses `value` as the field's integer type; a parse failure → `Error::Validation { field: <key>, message: "expected a non-negative integer, got '<value>'" }`.
+  - Unknown key → `Error::Validation { field: "config", message: "unknown key '<key>'; settable keys: <SETTABLE_KEYS joined with ", ">" }`.
+  - After setting, returns `self.validate_staging()` (range checks for `limits.*` and `max_concurrent_agents` live there).
+- `execution_mode` and `cycle_count` stay on `orrery workflow mode`; `plan_path` and `step_marker` stay on `orrery ingest`.
+
+#### 9.19.6 Catalog sources (Step 105) (adds to §9.2 `ConfigStore`)
+- config.rs, all `#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)] #[serde(rename_all = "snake_case")]`:
+  - `pub enum CatalogKind { Agent, Role, Skill, McpServer, Inference }`
+  - `pub enum CatalogSource { Global, Project, ProjectOverridesGlobal }`
+- `#[derive(Debug, Clone, PartialEq, Eq, Serialize)] pub struct CatalogEntry { pub kind: CatalogKind, pub id: String, pub source: CatalogSource }`
+- `ConfigStore::catalog_entries(&self) -> Result<Vec<CatalogEntry>>`: collects ids per kind from the global dir (`agents/`, `roles/`, `skills/*.md`, `mcp/servers.toml`, `inference.toml`) and from the project (`.orrery/agents/`, `.orrery/roles/`, `.orrery/skills/*.md`, `.orrery/mcp/servers.toml`, `.orrery/inference.toml` and `project.toml` `[[inference]]`). An id only in the global dir → `Global`; only in the project → `Project`; in both → `ProjectOverridesGlobal`. A skill id is a `*.md` file stem that passes `validate_config_file_id`; other files are skipped; a missing directory or file contributes nothing. Sorted by `(kind, id)`.
+
+#### 9.19.7 `orrery config` (Step 106) (adds to §7)
+- `orrery config set <KEY> <VALUE>` → `edit_project(&store, |cfg| cfg.set_field(&key, &value))`, then prints `Set <KEY> = <VALUE>`. Nothing is saved on error.
+- `orrery config show [--json]`:
+  - text: `project: <orrery_dir>/project.toml`, then `toml::to_string_pretty(&cfg)` of the loaded project, then `catalog:`, then one line per entry: `  <kind> <id> (<source>)`, with `kind` and `source` in their snake_case serde names.
+  - `--json`: one object `{"project": <ProjectConfig>, "catalog": [<CatalogEntry>...]}`.
+
+#### 9.19.8 Global profiles (Step 107) (adds to §5.2 layout, §9.2)
+- A profile is `<global_dir>/profiles/<name>.toml`. There are no project-level profiles.
+- config.rs: `#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ProjectProfile` with, in order, each `#[serde(default, skip_serializing_if = "Option::is_none")]`: `step_marker: Option<String>`, `execution_mode: Option<ExecutionMode>`, `cycle_count: Option<usize>`, `max_concurrent_agents: Option<usize>`, `max_step_retries: Option<usize>`, `validation_mode: Option<ValidationMode>`, `gate_tools: Option<Vec<String>>`, `gate_args: Option<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>`, `stages: Option<Vec<StageConfig>>`, `hooks: Option<HooksConfig>`, `limits: Option<RuntimeLimits>`; then `#[serde(default, skip_serializing_if = "BTreeMap::is_empty")] role_skills: BTreeMap<String, Vec<String>>`. All fields `pub`. A profile never carries `project_name`, `plan_path` or `inference`.
+- `ProjectProfile::from_project(cfg: &ProjectConfig, roles: &[RoleConfig]) -> Self`: every `Option` field `Some(<cfg's value>.clone())`; `role_skills` = each role with non-empty `skills`, `role_id → skills`.
+- `ProjectProfile::apply(&self, cfg: &mut ProjectConfig)`: each `Some` field overwrites `cfg`'s; `role_skills` is not touched here (§9.19.9).
+- `ConfigStore::load_profile(&self, name: &str) -> Result<ProjectProfile>`: `validate_config_file_id(name, "profile")?`; no global dir → `Error::Validation { field: "profile", message: "no global config directory; profiles live in <config>/orrery/profiles/" }`; file missing → `Error::Validation { field: "profile", message: "profile '<name>' not found in <profiles dir display>" }`; parse error → `Error::TomlDe`.
+- `ConfigStore::save_profile(&self, name: &str, profile: &ProjectProfile) -> Result<PathBuf>`: same name check and no-global-dir error; creates `<global_dir>/profiles/`, writes `toml::to_string_pretty(profile)` with `atomic_write` (replacing an existing file), returns the path.
+- `ConfigStore::list_profiles(&self) -> Result<Vec<String>>`: sorted `*.toml` stems in `<global_dir>/profiles/` that pass `validate_config_file_id`; no dir → empty.
+
+#### 9.19.9 `init` with a profile (Step 108) (overrides §9.19.1 entry point)
+- `ConfigStore::init_project_with_profile(&self, name: impl Into<String>, profile: Option<&ProjectProfile>) -> Result<ProjectConfig>`; `init_project(name)` becomes `self.init_project_with_profile(name, None)`.
+- Order, so a bad profile writes nothing: the §9.19.1 check; `cfg = ProjectConfig::default_template(name)`; `profile.apply(&mut cfg)`; every `role_skills` key must be a default role id (`orchestrator`, `coder`, `validator`), else `Error::Validation { field: "role_skills", message: "profile sets skills for unknown default role '<id>'" }`; `cfg.validate_staging()?`; build the default roles with their profile skills and call `role.validate()?` on each; then create the directories, save the roles and save the project.
+- Skills named by a profile are resolved at `build_engine` time (§9.18.4), not at init.
+
+#### 9.19.10 Profile CLI (Step 109) (adds to §7)
+- `orrery init [PATH] [--name <N>] [--profile <P>]`: with `--profile`, `store.load_profile(&p)?` then `init_project_with_profile(name, Some(&profile))`, and after the existing `Initialized project ...` line print `Applied profile '<P>'`.
+- `orrery profile save <NAME>`: `ProjectProfile::from_project(&store.load_project()?, &store.load_roles()?)`, `save_profile`, print `Saved profile '<NAME>' to <path>`.
+- `orrery profile list [--json]`: one name per line, or a JSON array of names.
+
+#### 9.19.11 README and acceptance (Step 110, User Step LOOP-1)
+- README documents `config set` / `config show`, `role skills`, profiles (`profiles/<name>.toml`, `init --profile`, `profile save`, `profile list`), the `init` refusal, the TUI merge behavior and gate-failure routing.
+- Acceptance (User Step LOOP-1): a project made with `init --profile` from a saved profile matches the source project's settings; a second `init` exits 1 and changes nothing; a TUI mode toggle after a CLI `gate set` keeps the gate; `run --step` and `workflow mode loop` + `run` alternate on one project with no config edits.

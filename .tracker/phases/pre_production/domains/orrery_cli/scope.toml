@@ -29,7 +29,7 @@ created_at = "2026-11-19T01:58:11Z"
 [[items.bugs]]
 id = "BUG-0013"
 title = "Refuse orrery init on an already-initialized project"
-status = "pending"
+status = "open"
 severity = "high"
 created_at = "2026-11-19T02:21:11Z"
 
@@ -57,6 +57,27 @@ created_at = "2026-11-19T01:58:11Z"
 [[items.tasks]]
 id = "TASK-0007"
 title = "Show a role's skills in orrery role show"
-status = "pending"
+status = "open"
 severity = "low"
 created_at = "2026-11-19T02:21:11Z"
+
+[[items.tasks]]
+id = "TASK-0011"
+title = "role skills, role show lists skills (TASK-0007)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-19T04:39:27Z"
+
+[[items.tasks]]
+id = "TASK-0014"
+title = "CLI config set / config show"
+status = "open"
+severity = "medium"
+created_at = "2026-11-19T04:39:27Z"
+
+[[items.tasks]]
+id = "TASK-0017"
+title = "CLI init --profile, profile save / list"
+status = "open"
+severity = "medium"
+created_at = "2026-11-19T04:39:27Z"
