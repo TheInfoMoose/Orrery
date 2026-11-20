@@ -742,11 +742,13 @@ pub struct ProjectProfile {
     pub role_skills: BTreeMap<String, Vec<String>>,
 }
 
+const DEFAULT_ROLE_IDS: [&str; 3] = ["orchestrator", "coder", "validator"];
+
 impl ProjectProfile {
     pub fn from_project(cfg: &ProjectConfig, roles: &[RoleConfig]) -> Self {
         let role_skills = roles
             .iter()
-            .filter(|r| !r.skills.is_empty())
+            .filter(|r| !r.skills.is_empty() && DEFAULT_ROLE_IDS.contains(&r.role_id.as_str()))
             .map(|r| (r.role_id.clone(), r.skills.clone()))
             .collect();
         Self {
@@ -2003,7 +2005,7 @@ impl ConfigStore {
         if let Some(profile) = profile {
             profile.apply(&mut project_cfg);
             for id in profile.role_skills.keys() {
-                if !defaults.iter().any(|(r, _)| &r.role_id == id) {
+                if !DEFAULT_ROLE_IDS.contains(&id.as_str()) {
                     return Err(Error::Validation {
                         field: "role_skills".to_string(),
                         message: format!("profile sets skills for unknown default role '{id}'"),
@@ -5576,5 +5578,40 @@ max_context_tokens = 1024
         .unwrap()
         .clone();
         validate_tool_args(&args, "hooks.on_step_start.args").unwrap();
+    }
+
+    #[test]
+    fn profile_skips_custom_role_skills() {
+        let cfg = ProjectConfig::default_template("src");
+        let mut roles: Vec<RoleConfig> = default_roles_with_rules()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        roles
+            .iter_mut()
+            .find(|r| r.role_id == "coder")
+            .unwrap()
+            .skills = vec!["repo-rules".to_string()];
+        roles.push(RoleConfig {
+            role_id: "reviewer".to_string(),
+            display_name: "Reviewer".to_string(),
+            kind: RoleKind::Validator,
+            rules_file: "roles/reviewer.md".to_string(),
+            allowed_mcp_tools: vec![],
+            skills: vec!["house-style".to_string()],
+        });
+
+        let profile = ProjectProfile::from_project(&cfg, &roles);
+        assert_eq!(
+            profile.role_skills,
+            BTreeMap::from([("coder".to_string(), vec!["repo-rules".to_string()])])
+        );
+
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+        store
+            .init_project_with_profile("p", Some(&profile))
+            .unwrap();
     }
 }
