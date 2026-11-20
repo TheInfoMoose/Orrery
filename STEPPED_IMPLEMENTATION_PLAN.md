@@ -25,17 +25,16 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 113** | `/goal` | `phase.toml` queue, `apply_queue`, `load_run_plan` (FEAT-0004) | `crates/orrery-core/src/phase.rs`, `lib.rs` | STEP 112 |
-| 4 | **STEP 114** | `/boost` | Checkpoints by step ID, completed seeding, `mark_passed` (BUG-0018, FEAT-0002) | `crates/orrery-core/src/checkpoint.rs` | STEP 113 |
-| 5 | **STEP 115** | `/boost` | User steps pause the engine (FEAT-0004) | `crates/orrery-core/src/engine.rs` | STEP 114 |
-| 6 | **STEP 116** | `/goal` | Engine `--step` by ID, `step_id`/`item_id` hook args (BUG-0001) | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/args.rs` | STEP 115 |
-| 7 | **STEP 117** | `/goal` | CLI `reset`/`mark` by ID, queue-aware `status`/`ingest` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 116 |
-| 8 | **STEP 118** | `/goal` | TUI loads the run plan, seeds completed steps | `crates/orrery-tui/src/bridge.rs` | STEP 117 |
-| 9 | **STEP 119** | `/goal` | Secret patterns in hook and gate args (BUG-0016) | `crates/orrery-core/src/config.rs` | STEP 118 |
-| 10 | **STEP 120** | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` | STEP 119 |
-| 11 | **STEP 121** | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` | STEP 120 |
-| 12 | **STEP 122** | `/goal` | README phase queue, step IDs, `mark` | `README.md` | STEP 121 |
-| 13 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
+| 3 | **STEP 114** | `/boost` | Checkpoints by step ID, completed seeding, `mark_passed` (BUG-0018, FEAT-0002) | `crates/orrery-core/src/checkpoint.rs` | STEP 113 |
+| 4 | **STEP 115** | `/boost` | User steps pause the engine (FEAT-0004) | `crates/orrery-core/src/engine.rs` | STEP 114 |
+| 5 | **STEP 116** | `/goal` | Engine `--step` by ID, `step_id`/`item_id` hook args (BUG-0001) | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/args.rs` | STEP 115 |
+| 6 | **STEP 117** | `/goal` | CLI `reset`/`mark` by ID, queue-aware `status`/`ingest` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 116 |
+| 7 | **STEP 118** | `/goal` | TUI loads the run plan, seeds completed steps | `crates/orrery-tui/src/bridge.rs` | STEP 117 |
+| 8 | **STEP 119** | `/goal` | Secret patterns in hook and gate args (BUG-0016) | `crates/orrery-core/src/config.rs` | STEP 118 |
+| 9 | **STEP 120** | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` | STEP 119 |
+| 10 | **STEP 121** | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` | STEP 120 |
+| 11 | **STEP 122** | `/goal` | README phase queue, step IDs, `mark` | `README.md` | STEP 121 |
+| 12 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
 
 ### Completed
 
@@ -156,6 +155,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **[USER] LOOP-1** | **COMPLETED** (2026-11-19, steps 2–4 pass; step 5 skipped) | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo |
 | **STEP 111** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | Plan step IDs (BUG-0001) | `crates/orrery-core/src/plan.rs`, `llm.rs`, `tests/live_docker.rs`, `tests/live_llm.rs` |
 | **STEP 112** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | Completed table → `completed_ids` (BUG-0018) | `crates/orrery-core/src/plan.rs` |
+| **STEP 113** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `phase.toml` queue, `apply_queue`, `load_run_plan` (FEAT-0004) | `crates/orrery-core/src/phase.rs`, `lib.rs` |
 
 ---
 

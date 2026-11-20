@@ -194,7 +194,7 @@ created_at = "2026-11-20T01:36:53Z"
 [[items.tasks]]
 id = "TASK-0021"
 title = "phase.toml queue, apply_queue, load_run_plan (FEAT-0004)"
-status = "open"
+status = "closed"
 severity = "medium"
 created_at = "2026-11-20T01:36:53Z"
 
