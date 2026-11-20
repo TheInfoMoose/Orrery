@@ -1588,3 +1588,87 @@ A practical run of the cloud-cli profile (2026-11-18, Perigee and ST_Rust_Age) s
 #### 9.19.11 README and acceptance (Step 110, User Step LOOP-1)
 - README documents `config set` / `config show`, `role skills`, profiles (`profiles/<name>.toml`, `init --profile`, `profile save`, `profile list`), the `init` refusal, the TUI merge behavior and gate-failure routing.
 - Acceptance (User Step LOOP-1): a project made with `init --profile` from a saved profile matches the source project's settings; a second `init` exits 1 and changes nothing; a TUI mode toggle after a CLI `gate set` keeps the gate; `run --step` and `workflow mode loop` + `run` alternate on one project with no config edits.
+
+### 9.20 Phase O: phase queue, step IDs and completed steps (Steps 111–122, User Step LOOP-2)
+A practical run on Perigee (2026-11-19) showed Orrery offering STEP 1A first in a repo whose early phases were finished long ago: every step starts `Pending` (`checkpoint.rs:301`) and the plan parser has no idea what's done (BUG-0018). Steps are numbered by position, so `1A` is "step 1" to hooks and `--step` (BUG-0001). Orrery doesn't make plans. It runs what it is given: a plan file holds every phase's Argon blocks, and a per-project `.orrery/phase.toml` says which items this phase runs and in what order, including operator ("user") items that pause the run. The operator can also record a host-validated pass (FEAT-0002).
+
+#### 9.20.1 Step IDs (Step 111) (overrides §9.2 `PlanStep`, `ImplementationPlan::parse`)
+- plan.rs: `#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub enum StepKind { #[default] Agent, User }`.
+- `PlanStep` gains, after `number` and in this order: `pub id: String`, `pub kind: StepKind`, `pub item_id: Option<String>`. `number` is always the 1-based position (`index + 1`).
+- `pub fn parse_step_id(title: &str) -> Option<&str>`: the leading run of one or more ASCII digits followed by zero or more ASCII uppercase letters, when that run is followed by end of string, `:`, `.` or a space; otherwise `None`. Replaces `parse_title_number`.
+- `pub fn is_step_id(s: &str) -> bool`: the whole of `s` is one or more ASCII digits followed by zero or more ASCII uppercase letters.
+- `parse`: if any title has an ID, every title must have one, else `Error::PlanParse { line: <marker line>, message: "step heading without an ID (e.g. '12:' or '12A:') in a plan that uses IDs" }`; a repeated ID → `Error::PlanParse { line: <marker line>, message: "duplicate step ID '<id>' (first used on line <n>)" }`. Gaps and letters are allowed (the old "expected step N, found M" check is gone). If no title has an ID, `id` = `number.to_string()`. Every parsed step has `kind: StepKind::Agent`, `item_id: None`.
+- `ImplementationPlan::step_by_id(&self, id: &str) -> Option<&PlanStep>`; `ImplementationPlan::resolve_step(&self, arg: &str) -> Option<&PlanStep>` = `step_by_id(arg)`, else, if `arg` parses as `usize`, `step(n)` (position).
+
+#### 9.20.2 Completed table (Step 112) (adds to §9.2 `ImplementationPlan`)
+- `ImplementationPlan` gains `pub completed_ids: BTreeSet<String>` (after `steps`), filled by `parse`.
+- Label = `step_marker` with leading `#` characters and surrounding whitespace removed (`"### STEP "` → `"STEP"`); an empty label → no completed IDs.
+- Outside code fences, a line starting with `#` is a heading. A heading whose text (leading `#`s and whitespace removed) equals `Completed` (ASCII case-insensitive) opens the completed section; any other heading closes it.
+- In the section, a line whose trimmed start is `|` is a table row. Its first cell (text between the first and second `|`) has every `*` and `` ` `` removed and is trimmed; if it starts with the label followed by at least one space, and the rest (trimmed) passes `is_step_id`, that ID goes into `completed_ids`. Every other row (header, separator, `[USER] …`, `[CLAUDE] …`) is ignored. The status column is never read. Both `| **STEP 102** | **COMPLETED** … |` and `| STEP 1A | ✅ \`b9f8909\` … |` count.
+- IDs that match no step are kept (harmless). The table sits in the preamble, so editing it never changes a step hash.
+
+#### 9.20.3 Phase queue (Step 113) (new module `phase.rs`)
+- `pub const PHASE_FILE: &str = "phase.toml";` (lives in the project's `.orrery/`; never written by Orrery).
+- `#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct PhaseQueue { #[serde(default, skip_serializing_if = "String::is_empty")] pub phase: String, #[serde(default)] pub queue: Vec<QueueEntry> }`
+- `#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct QueueEntry` with four fields, each `#[serde(default, skip_serializing_if = "Option::is_none")] pub … : Option<String>`, in order: `step` (a plan step ID), `user` (an operator item ID), `item` (a tracker ID such as `TASK-0019`), `title` (user entries only).
+- `PhaseQueue::validate(&self) -> Result<()>`, field `phase.queue[<i>]` unless noted:
+  - empty `queue` → `Error::Validation { field: "phase.queue", message: "phase.toml has no [[queue]] entries" }`;
+  - not exactly one of `step` / `user` → message `each entry needs exactly one of step or user`;
+  - `step` failing `is_step_id` → `step '<s>' is not a step ID (e.g. 12 or 12A)`;
+  - `user` empty or with a character outside ASCII letters, digits, `-`, `_` → `user '<u>' must use only letters, digits, - and _`;
+  - `item` empty or containing whitespace → `item must be a non-empty ID without whitespace`;
+  - `title` on a `step` entry → `title is only for user entries`;
+  - the same ID twice across all `step` and `user` values → `duplicate queue ID '<id>'`.
+- `PhaseQueue::load(orrery_dir: &Path) -> Result<Option<PhaseQueue>>`: `<orrery_dir>/phase.toml`; missing → `Ok(None)`; read error → `Error::Io`; parse error → `Error::TomlDe`; then `validate()?`.
+- `pub fn apply_queue(plan: &ImplementationPlan, queue: &PhaseQueue) -> Result<ImplementationPlan>`: one step per entry, in queue order:
+  - `step` → a clone of `plan.step_by_id(id)` with `item_id = entry.item`; missing → `Error::Validation { field: "phase.queue[<i>]", message: "step '<id>' is not in the plan" }`;
+  - `user` → `PlanStep { id: user, kind: StepKind::User, title: "<user>: <title or user>", body: <title or "">, item_id: entry.item, sha256_hex: sha256_hex("user\n<user>\n<body>") }`;
+  - then `index = i`, `number = i + 1` for every step. `source_path`, `step_marker`, `preamble` and `completed_ids` are copied from `plan`.
+- `pub fn load_run_plan(plan_path: &Path, step_marker: &str, orrery_dir: &Path) -> Result<ImplementationPlan>`: `ImplementationPlan::from_file`, then `apply_queue` when `PhaseQueue::load` returns `Some`. Every place that loads the plan for running, status, reset, mark, ingest or the TUI uses it (Steps 116–118). With no `phase.toml`, behavior is today's: the whole plan in file order.
+
+#### 9.20.4 Checkpoints by step ID (Step 114) (overrides §9.2 `WorkflowCheckpoint::new`, `reconcile`)
+- `WorkflowCheckpoint` gains `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub step_ids: Vec<String>` (after `step_hashes`) and, last, `#[serde(default, skip_serializing_if = "Vec::is_empty")] pub operator_passes: Vec<OperatorPass>`. `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct OperatorPass { pub step_id: String, pub note: String, pub recorded_at: jiff::Timestamp }`. Checkpoints written before Phase O load unchanged (`step_ids` empty).
+- `new(plan)`: `step_ids` from the plan; a step's status is `Passed` when `plan.completed_ids` contains its ID, else `Pending`.
+- `reconcile(plan)`:
+  - **Legacy** (`step_ids` empty): today's positional algorithm unchanged, then `step_ids` = the plan's IDs, then seeding (below).
+  - **By ID** (`step_ids` set). Both errors start with `step edited`, which existing CLI and TUI tests match:
+    1. If the current step (`current_step_index`) is `InProgress` or `AwaitingOperator`, the plan must have the same ID at the same position with the same hash, else `Error::Engine { step_number: current_step_index + 1, message: "step edited: step <id> is in progress; finish it or run `orrery reset --step <id>` before changing the plan or phase.toml" }`.
+    2. For each plan step in order: if its ID was in the checkpoint, keep that status; a changed hash on a `Passed` step whose ID is not in `plan.completed_ids` → `Error::Engine { step_number: <new position>, message: "step edited: step <id> changed after it passed; run `orrery reset --step <id>`" }`; any other changed hash is accepted and its new position goes in `changed_steps`. An ID not in the checkpoint is `Pending` and counts in `appended`.
+    3. IDs in the checkpoint but not the plan count in `removed`; their state is dropped whatever it was (step 1 already protects the active step).
+    4. `current_step_index` = the new position of the old current ID, or 0 if it's gone.
+    5. `Unchanged` when the ID list is the same, in the same order, and `changed_steps` is empty; else `Updated`.
+  - **Seeding** (both modes, last): every `Pending` step whose ID is in `plan.completed_ids` becomes `Passed`. Seeding alone doesn't change the outcome.
+- `pub fn mark_passed(&mut self, index: usize, note: impl Into<String>) -> Result<()>`: `index >= len` → `Error::Engine { step_number: index + 1, message: "step <index+1> is out of range 1..=<len>" }`. Sets the status `Passed` (from any status); if `index == current_step_index`, also `round = 0`, `active_stage_index = None`, `retry_count = 0`, `phase = Idle`, `awaiting_reason = None`, `operator_decision = None`. Pushes `OperatorPass { step_id: <step_ids[index], or (index+1).to_string() if absent>, note, recorded_at: Timestamp::now() }`, keeping at most `MAX_HOOK_RESULTS` (oldest dropped).
+
+#### 9.20.5 User steps in the engine (Step 115) (adds to §9.5 run loop)
+- `AwaitingContext::UserStep`. In the run loop, right after `state.current_step_index = step_idx;`, a step with `kind == StepKind::User` goes to `run_user_step(&mut state, step_idx, opts.wait_for_operator)` (wrapped in `race_cancel!` like the other awaits): `Ok(Some(outcome))` returns it; `Ok(None)` continues the loop.
+- `async fn run_user_step(&self, state: &mut WorkflowCheckpoint, step_idx: usize, wait_for_operator: bool) -> Result<Option<RunOutcome>>`: builds an empty `StepRunState` for the step. If the step is `AwaitingOperator` and `state.operator_decision` holds a decision, it applies it with `AwaitingContext::UserStep`; otherwise it calls `enter_awaiting_operator` with reason `"user step <title>"` and `AwaitingContext::UserStep`. On `PassStep`: status `Passed`, `awaiting_reason = None`, save, emit `StepStatusChanged { Passed }`, return `Ok(None)`. On `HaltRun(o)`: `Ok(Some(o))`. On `ContinueOrchestrator`: `Error::Engine { step_number, message: "user step got an orchestrator decision" }`.
+- User steps run no hooks, no gate and no agents: `enter_awaiting_operator` runs the halt hook only for `StepKind::Agent` steps. They don't count in `steps_passed_this_run`, so approving one never ends a Run-mode run by itself; the run carries on to the next queue item.
+- `apply_operator_decision`: `(UserStep, Approve)` → `PassStep`. `(UserStep, Reject { feedback })` → status stays `AwaitingOperator`, `phase = AwaitingOperator`, `awaiting_reason = "user step rejected: <feedback>"`, save, emit `RunFinished(AwaitingOperator { step_number, reason })`, return `HaltRun` with that outcome.
+
+#### 9.20.6 Step IDs in the engine and `run --step` (Step 116) (overrides §9.5 `RunOptions`, hook and gate call context)
+- `RunOptions.start_step: Option<String>`. `pick_next_step_index` resolves it with `plan.resolve_step`; not found → `Error::Engine { step_number: <arg as usize, else 0>, message: "step '<arg>' not found in the plan" }`; not `Pending` → `Error::Engine { step_number: <its number>, message: "step <id> is not Pending" }`.
+- The reserved `orrery` object for hooks and gates gains `"step_id": step.id`, and `"item_id"` when `step.item_id` is `Some`. Existing keys are unchanged.
+- `build_engine` loads the plan with `load_run_plan(&plan_path, &project.step_marker, &store.orrery_dir())`.
+- CLI: `orrery run --step <ID>` takes a string (ID, else position).
+
+#### 9.20.7 CLI: IDs, queue, `mark` (Step 117) (adds to §7)
+- `orrery reset --step <ID>` and `orrery mark --step <ID> [--note <TEXT>]`. Both load the checkpoint, or `WorkflowCheckpoint::new(&plan)` when there isn't one, and resolve the ID against the checkpoint's `step_ids` first (so a reset works even when reconcile would refuse), then by position; not found → `Error::Validation { field: "step", message: "step '<arg>' not found" }`. `reset` calls `reset_from(<position>)` and prints `Reset steps from step <id> to Pending`. `mark` calls `mark_passed(<index>, note)` and prints `Marked step <id> Passed`.
+- `status`, `reset`, `mark` and `ingest` load the plan with `load_run_plan`. `status` with no checkpoint uses `WorkflowCheckpoint::new(&plan).step_statuses` (completed steps show `Passed`). Text lines are `[<Status>] <title>`, with `[USER] ` before the title for user steps. JSON steps gain `"id"` and `"kind"` (`"agent"` / `"user"`), plus `"item_id"` when set.
+- `ingest` prints one line per step of the run plan: the title, or `[USER] <title>` for user steps.
+
+#### 9.20.8 TUI (Step 118) (overrides §6 plan loading)
+- bridge.rs loads the plan with `load_run_plan` (startup and ingest). When there's no checkpoint, or reconcile fails, the task list statuses come from `WorkflowCheckpoint::new(&plan).step_statuses` rather than all `Pending`.
+
+#### 9.20.9 Secrets in hook and gate args (Step 119) (adds to §9.17 `validate_tool_args`)
+- `validate_tool_args` also scans every string in `args`, recursively through objects and arrays, with field `<field>.<key>` (`[<i>]` for array items). A pattern from `EMBEDDED_SECRET_PATTERNS` counts only where it starts a token, at the start of the string or after a character that isn't ASCII alphanumeric, so `--task-id` passes and `sk-abc` doesn't. A hit → `Error::Security { message: "field '<field>' appears to contain an embedded secret matching '<pattern>'" }`. Other fields keep today's plain substring check.
+
+#### 9.20.10 Profiles keep default-role skills only (Step 120) (overrides §9.19.8 `from_project`)
+- `ProjectProfile::from_project` records `role_skills` only for the three default role IDs (`orchestrator`, `coder`, `validator`), so every saved profile can be applied by `init --profile` (§9.19.9).
+
+#### 9.20.11 Effective limits in `config show` (Step 121) (overrides §9.19.7 `config show`)
+- Text: after the project TOML, print `limits (effective):` and then `toml::to_string_pretty(&cfg.limits)`. JSON: the object gains `"limits": <RuntimeLimits>`. `limits` is still left out of `project.toml` when it's at its defaults.
+
+#### 9.20.12 README and acceptance (Step 122, User Step LOOP-2)
+- README documents `phase.toml` (format, queue order, user items, `item`), step IDs (`--step 1A`, the `step_id` and `item_id` hook args), the Completed table rule, `orrery mark`, and the token-start secret check for args.
+- Acceptance (User Step LOOP-2), on a scratch repo with a lettered plan: a Completed row's step starts `Passed`; with `phase.toml` set, `status` and `ingest` list only the queue, in order; the run pauses at the user item, and `approve` passes it and continues; `mark --step <ID>` passes a step; `reset --step <ID>` works by ID.

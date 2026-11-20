@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92), Phase M role protocol and skills (93–99) and Phase N config safety and global profiles (100–110). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92), Phase M role protocol and skills (93–99) Phase N config safety and global profiles (100–110) and Phase O phase queue, step IDs and completed steps (111–122). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (110). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (122). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -17,7 +17,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 **Tracking (2026-11-18):** side findings become **pending neb items** (`neb status <ID> pending`) in this repo's `.tracker/`, not entries in a Parked list. The operator reviews `neb list --status pending` once at phase end. Every Up Next step has a neb task (`source_ref` = step ID); commits start with `[<TASK-ID>](<scope>)`.
 
-**Orrery (2026-11-18):** steps can also run through Orrery (`.orrery/`, Agents mode, `orrery run --step <position>`): the `hybrid:step_start` hook does `neb start` + `validate-step.sh start`, `agy-impl` executes the Argon block, `claude-val` reads the diff, and the `hybrid:step_check` gate runs `validate-step.sh check` on the host. Failures go back to the implementer automatically, up to 2 retries. Claude still reads the diff, commits and moves the row. See the `orrery-setup` skill.
+**Orrery (2026-11-18):** steps can also run through Orrery (`.orrery/`, Agents mode, `orrery run --step <ID>`): the `hybrid:step_start` hook does `neb start` + `validate-step.sh start`, `agy-impl` executes the Argon block, `claude-val` reads the diff, and the `hybrid:step_check` gate runs `validate-step.sh check` on the host. Failures go back to the implementer automatically, up to 2 retries. Claude still reads the diff, commits and moves the row. See the `orrery-setup` skill.
 
 ### Up Next
 
@@ -25,6 +25,19 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 3 | **STEP 111** | `/goal` | Plan step IDs (BUG-0001) | `crates/orrery-core/src/plan.rs`, `llm.rs`, `tests/live_docker.rs`, `tests/live_llm.rs` | — |
+| 4 | **STEP 112** | `/goal` | Completed table → `completed_ids` (BUG-0018) | `crates/orrery-core/src/plan.rs` | STEP 111 |
+| 5 | **STEP 113** | `/goal` | `phase.toml` queue, `apply_queue`, `load_run_plan` (FEAT-0004) | `crates/orrery-core/src/phase.rs`, `lib.rs` | STEP 112 |
+| 6 | **STEP 114** | `/boost` | Checkpoints by step ID, completed seeding, `mark_passed` (BUG-0018, FEAT-0002) | `crates/orrery-core/src/checkpoint.rs` | STEP 113 |
+| 7 | **STEP 115** | `/boost` | User steps pause the engine (FEAT-0004) | `crates/orrery-core/src/engine.rs` | STEP 114 |
+| 8 | **STEP 116** | `/goal` | Engine `--step` by ID, `step_id`/`item_id` hook args (BUG-0001) | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/args.rs` | STEP 115 |
+| 9 | **STEP 117** | `/goal` | CLI `reset`/`mark` by ID, queue-aware `status`/`ingest` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 116 |
+| 10 | **STEP 118** | `/goal` | TUI loads the run plan, seeds completed steps | `crates/orrery-tui/src/bridge.rs` | STEP 117 |
+| 11 | **STEP 119** | `/goal` | Secret patterns in hook and gate args (BUG-0016) | `crates/orrery-core/src/config.rs` | STEP 118 |
+| 12 | **STEP 120** | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` | STEP 119 |
+| 13 | **STEP 121** | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` | STEP 120 |
+| 14 | **STEP 122** | `/goal` | README phase queue, step IDs, `mark` | `README.md` | STEP 121 |
+| 15 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
 
 ### Completed
 
@@ -5826,3 +5839,523 @@ After Step 110 is committed. Proves the Phase N goal on a throwaway repo with th
 5. Run ↔ Loop on one project (optional; uses agents): in this repo, with a pending step that's safe to run, `orrery run --step <POSITION>`, then `orrery workflow mode loop --cycles 1 && orrery run`, then `orrery workflow mode run`. Expect: no `project.toml` change other than `execution_mode` / `cycle_count` (`git diff .orrery/project.toml`).
 
 Report back: pass/fail for 2–5, and the `orrery config show` output from step 2.
+
+## Phase O — phase queue, step IDs and completed steps (Steps 111–122, User Step LOOP-2)
+
+**Phase goal (frozen until the phase ends):** Orrery runs exactly what it's given, in order, and never re-runs finished work. A plan's step IDs (`1A`, `102`) are carried through parsing, checkpoints, hooks and `--step` (BUG-0001). Steps listed in the plan's Completed table start `Passed` (BUG-0018). An optional `.orrery/phase.toml` names this phase's queue (plan steps plus operator "user" items that pause the run) (FEAT-0004). `orrery mark` records a host-validated pass (FEAT-0002). Also: secret patterns are rejected in hook and gate args (BUG-0016), saved profiles always apply (BUG-0017), and `config show` prints the effective limits (FEAT-0003). Done when User Step LOOP-2 passes. Design: spec §9.20 (`ORRERY_TECHNICAL_SPECIFICATION.md:1592-1674`).
+
+Written 2026-11-19 against `7072d20`. Facts checked while planning:
+- `WorkflowCheckpoint::new` (`checkpoint.rs:299`) sets every step `Pending`. `status` with no checkpoint (`commands.rs:1072`) and the TUI (`bridge.rs:652-658`) do the same. Nothing reads the Completed table.
+- Orrery's Completed rows look like `| **STEP 102** | **COMPLETED** … |`; Perigee's look like `| STEP 1A | ✅ \`b9f8909\` … |`. Both tables are in the preamble, before the first step heading, so they never touch a step hash.
+- `parse_title_number` (`plan.rs:67`) makes `1A` unnumbered, and one plain `12:` heading among lettered ones fails ingest. `number` is used as the position everywhere (`pick_next_step_index` `engine.rs:1543`, report dirs `step_{:03}` `checkpoint.rs:452`, `reset_from` `checkpoint.rs:390`).
+- `PlanStep` struct literals outside plan.rs: `llm.rs:1357`, `tests/live_docker.rs:152`, `tests/live_llm.rs:68` and `:151`. `RunOptions.start_step` users: `commands.rs:150` (passes the `Option` through) and engine tests `engine.rs:3117`, `5216`, `5236`, `5252`.
+- The hybrid gate reads the step ID from `orrery.step_title` (`~/.local/bin/orrery-hybrid-gate`), so adding `step_id` breaks nothing.
+- "step edited" is matched by `bridge.rs:2039` and `commands.rs:3857`, so the new reconcile errors keep that prefix.
+- No `project.toml` in `/srv/devshare` sets hook or gate args today, so the new args secret check rejects nothing that exists. `"sk-"` would match inside `task-`, which is why the args check matches only at a token start.
+
+### STEP 111: Plan Step IDs
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 111: PlanStep carries the plan's step ID (1A, 102), its kind (Agent/User) and an optional tracker item; numbering is positional, gaps and letters parse, duplicates and mixed headings fail, and resolve_step finds a step by ID then position
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/plan.rs
+  - crates/orrery-core/src/llm.rs (only the `sample_step` literal at 1357)
+  - crates/orrery-core/tests/live_docker.rs (only the `PlanStep` literal at 152)
+  - crates/orrery-core/tests/live_llm.rs (only the `PlanStep` literals at 68 and 151)
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1595-1602 (§9.20.1; binding)
+  - crates/orrery-core/src/plan.rs:7-22 (`PlanStep`, `ImplementationPlan`), 67-78 (`parse_title_number`), 143-187 (numbering in `parse`), 217-219 (`step`), 301-319 (numbering tests), 371-383 (`acceptance_fixture_counts_plan_steps`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. No Completed table yet (Step 112). Nothing reads `id`, `kind` or `item_id` yet. `number` stays the 1-based position.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.1 ' $S && ! grep -q 'pub fn parse_step_id(' crates/orrery-core/src/plan.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. plan.rs: `#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub enum StepKind { #[default] Agent, User }`. `PlanStep` gains, after `number`, in order: `pub id: String`, `pub kind: StepKind`, `pub item_id: Option<String>`.
+2. plan.rs: replace `parse_title_number` with `pub fn parse_step_id(title: &str) -> Option<&str>` and add `pub fn is_step_id(s: &str) -> bool`, both per §9.20.1.
+3. plan.rs `ImplementationPlan::parse`: replace the numbering block (143-174) per §9.20.1. Collect `parse_step_id` for every title. If any is `Some`: a `None` → the "step heading without an ID" `PlanParse` at that marker line; a repeat → the "duplicate step ID" `PlanParse` at the repeat's marker line, naming the first line. If all are `None`: `id = (index + 1).to_string()`. `number = index + 1` always; `kind: StepKind::Agent`; `item_id: None`.
+4. plan.rs: `pub fn step_by_id(&self, id: &str) -> Option<&PlanStep>` and `pub fn resolve_step(&self, arg: &str) -> Option<&PlanStep>` per §9.20.1. `step(number)` is unchanged.
+5. The four struct literals outside plan.rs gain `id: "<their number>".to_string(), kind: StepKind::Agent, item_id: None` (import `StepKind` where needed).
+6. Tests in plan.rs `mod tests`:
+   - Delete `numbering_gap_rejected`. Add `ids_allow_gaps_and_letters`: `"## S 1: a\n## S 3: b\n## S 3A: c\n"` → ids `["1", "3", "3A"]`, numbers `[1, 2, 3]`, all `kind == StepKind::Agent`, all `item_id == None`.
+   - `mixed_numbered_and_unnumbered_rejected` keeps its input and still expects `PlanParse { line: 2, .. }`.
+   - Add `duplicate_id_rejected`: `"## S 1: a\n## S 2: b\n## S 1: c\n"` → `PlanParse { line: 3, message }` with `message.contains("duplicate step ID '1'")` and `message.contains("line 1")`.
+   - `unnumbered_titles_use_index` also asserts ids `"1"` and `"2"`.
+   - Add `resolve_step_prefers_id_then_position`: on `"## S 2: a\n## S 1: b\n"`, `resolve_step("1")` has title `"1: b"`, `resolve_step("9")` is `None`, `step_by_id("2")` has title `"2: a"`. On `"## S 1A: a\n## S 1B: b\n"`, `resolve_step("2")` has title `"1B: b"` and `resolve_step("1C")` is `None`.
+   - `acceptance_fixture_counts_plan_steps` also asserts every step has `id == number.to_string()`. Leave its count and range as they are.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn parse_step_id(' crates/orrery-core/src/plan.rs && grep -q 'pub fn resolve_step(' crates/orrery-core/src/plan.rs && ! grep -q 'fn parse_title_number' crates/orrery-core/src/plan.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^plan::tests::(ids_allow_gaps_and_letters|duplicate_id_rejected|resolve_step_prefers_id_then_position): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 112: Completed Table
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 112: ImplementationPlan::parse fills completed_ids from the plan's Completed roadmap table (rows whose first cell is "<marker label> <ID>", bold or plain), outside code fences
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/plan.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1603-1609 (§9.20.2; binding)
+  - crates/orrery-core/src/plan.rs (`parse`, its fence tracking, `is_step_id` from Step 111)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Nothing reads `completed_ids` yet (Step 114). Step hashes and step bodies are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.2 ' $S && grep -q 'pub fn parse_step_id(' crates/orrery-core/src/plan.rs && ! grep -q 'pub completed_ids:' crates/orrery-core/src/plan.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. plan.rs `ImplementationPlan`: `pub completed_ids: BTreeSet<String>` after `steps`.
+2. plan.rs `parse`: during the existing line loop, using the same fence state (a line inside a fence is never a heading or a row), track the completed section and collect IDs exactly per §9.20.2. Put the row-cell logic in a private `fn completed_row_id<'a>(line: &'a str, label: &str) -> Option<&'a str>` or an owned-`String` equivalent. The label is computed once from `step_marker`.
+3. Tests in plan.rs `mod tests`:
+   - `completed_table_ids`: marker `"### STEP "`, input (one string, `\n` line ends):
+     `# P` / `### Up Next` / `| # | Step |` / `| 1 | **STEP 3** |` / `### Completed` / `| Step | Status |` / `| :--- | :---: |` / `| **STEP 1** | **COMPLETED** |` / `| STEP 2A | done abc1234 |` / `| [USER] CI-1 | done |` / `| \`STEP 9\` | x |` / `| STEP x1 | bad id |` / `### Notes` / `| STEP 3 | not done |` / `### STEP 1: a` / `body` / a ``` fence holding `### Completed` and `| STEP 3 | fenced |` and its closing ``` / `### STEP 2A: b` / `### STEP 3: c`.
+     → `completed_ids == {"1", "2A", "9"}`; the three steps still parse with ids `["1", "2A", "3"]`.
+   - `completed_table_absent_is_empty`: `SAMPLE_PLAN` with marker `"## S "` → `completed_ids` is empty.
+   - `acceptance_fixture_counts_plan_steps` also asserts `completed_ids` contains `"1"` and `"110"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub completed_ids:' crates/orrery-core/src/plan.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^plan::tests::(completed_table_ids|completed_table_absent_is_empty): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 113: Phase Queue
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 113: new orrery-core module phase.rs: PhaseQueue / QueueEntry read from .orrery/phase.toml, validated, and apply_queue builds the run plan (queued plan steps plus synthetic user steps, renumbered); load_run_plan wraps it
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/phase.rs (new)
+  - crates/orrery-core/src/lib.rs (only `pub mod phase;`, in alphabetical order)
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1610-1628 (§9.20.3; binding)
+  - crates/orrery-core/src/plan.rs (`PlanStep`, `StepKind`, `is_step_id`, `step_by_id`, `sha256_hex`, `from_file`)
+  - crates/orrery-core/src/lib.rs (`Error::Validation`, `Error::TomlDe`, `Error::Io`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Nothing calls `load_run_plan` yet (Steps 116-118). Orrery never writes phase.toml.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.3 ' $S && grep -q 'pub completed_ids:' crates/orrery-core/src/plan.rs && test ! -e crates/orrery-core/src/phase.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. phase.rs: `PHASE_FILE`, `PhaseQueue` and `QueueEntry` exactly as §9.20.3 (derives, `deny_unknown_fields`, field order, serde attributes, all fields `pub`).
+2. phase.rs: `PhaseQueue::validate` with the seven checks and messages of §9.20.3, in that order per entry (the empty-queue check first). `PhaseQueue::load(orrery_dir: &Path) -> Result<Option<PhaseQueue>>` per §9.20.3.
+3. phase.rs: `pub fn apply_queue(plan: &ImplementationPlan, queue: &PhaseQueue) -> Result<ImplementationPlan>` and `pub fn load_run_plan(plan_path: &Path, step_marker: &str, orrery_dir: &Path) -> Result<ImplementationPlan>` per §9.20.3.
+4. lib.rs: `pub mod phase;` between `pub mod mcp;` and `pub mod plan;`.
+5. Tests in phase.rs `#[cfg(test)] mod tests`:
+   - `queue_selects_and_orders_steps`: plan `"## S 1: a\nA\n## S 2: b\nB\n## S 2A: c\nC\n## S 3: d\nD\n"` (marker `"## S "`); queue `[{step "3", item "TASK-1"}, {user "LOOP-1", title "Check"}, {step "1"}]` → ids `["3", "LOOP-1", "1"]`, numbers `[1, 2, 3]`, indexes `[0, 1, 2]`, kinds `[Agent, User, Agent]`, item_ids `[Some("TASK-1"), None, None]`; the user step's title is `"LOOP-1: Check"` and body `"Check"`; step `"3"`'s `sha256_hex` and body equal the plan's step 3; `step_marker` is copied. A user entry without `title` gets title `"U: U"` and body `""`.
+   - `queue_rejects_bad_entries`: each case `validate()` → `Error::Validation` with the §9.20.3 message: empty queue (field `"phase.queue"`); both `step` and `user`; neither; `step "x1"`; `user "a b"`; `item "T 1"`; `title` on a step entry; `step "1"` twice (`"duplicate queue ID '1'"`). Separately, `apply_queue` with `step "9"` → `Validation { field: "phase.queue[0]", message }` with `message.contains("step '9' is not in the plan")`.
+   - `load_run_plan_reads_phase_file`: `TempDir` with `plan.md` (the plan above) and an `.orrery/` dir. No `phase.toml` → 4 steps, ids `["1", "2", "2A", "3"]`. Write `.orrery/phase.toml` = `phase = "O"\n[[queue]]\nstep = "2A"\n[[queue]]\nuser = "U1"\ntitle = "Check"\n` → ids `["2A", "U1"]`. Write `phase.toml` = `[[queue]]\nstep = "1"\nbogus = 1\n` → `Err(Error::TomlDe { .. })`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q '^pub mod phase;' crates/orrery-core/src/lib.rs && grep -q 'pub fn load_run_plan(' crates/orrery-core/src/phase.rs && grep -q 'pub fn apply_queue(' crates/orrery-core/src/phase.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^phase::tests::(queue_selects_and_orders_steps|queue_rejects_bad_entries|load_run_plan_reads_phase_file): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 114: Checkpoints by Step ID
+
+* **Recommended Command:** `/boost`
+
+```text
+[STEP_ID]
+STEP 114: WorkflowCheckpoint records step IDs, seeds Passed from the plan's completed_ids, reconciles by ID (reorder, insert, remove) with a guard on the active step, keeps the positional path for old checkpoints, and gains mark_passed with an operator-pass record
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/checkpoint.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1629-1642 (§9.20.4; binding)
+  - crates/orrery-core/src/checkpoint.rs:266-287 (`WorkflowCheckpoint`), 299-317 (`new`), 319-388 (`reconcile`), 390-413 (`reset_from`), 415-421 (`push_hook_result`, `MAX_HOOK_RESULTS`), 915-921 (`three_step_plan`), 1083-1228 (reconcile tests)
+  - crates/orrery-core/src/plan.rs (`PlanStep::id`, `ImplementationPlan::completed_ids`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `ReconcileOutcome` keeps its variants and fields (engine.rs destructures it). Report paths stay `step_{number:03}`. `reset_from` is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.4 ' $S && grep -q 'pub fn load_run_plan(' crates/orrery-core/src/phase.rs && ! grep -q 'pub fn mark_passed(' crates/orrery-core/src/checkpoint.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. checkpoint.rs: `OperatorPass` exactly as §9.20.4. `WorkflowCheckpoint` gains `step_ids` (after `step_hashes`) and `operator_passes` (last), both with the §9.20.4 serde attributes.
+2. `new(plan)`: fill `step_ids` and seed statuses from `plan.completed_ids` per §9.20.4.
+3. `reconcile(plan)`: keep today's body as a private `fn reconcile_positional(&mut self, plan) -> Result<ReconcileOutcome>`, used when `step_ids` is empty, after which `step_ids` is set from the plan. Add `fn reconcile_by_id(&mut self, plan) -> Result<ReconcileOutcome>` implementing §9.20.4 steps 1-5, with both error messages starting `step edited:` exactly as written. Seeding runs last in both paths. `plan_sha256` is updated in both paths as today.
+4. `pub fn mark_passed(&mut self, index: usize, note: impl Into<String>) -> Result<()>` per §9.20.4.
+5. Existing tests: `reconcile_removed_pending_ok_removed_passed_err` calls `cp.step_ids.clear()` right after each `WorkflowCheckpoint::new`, so it keeps testing the legacy positional path. Every other existing test is unchanged and passes.
+6. New tests in checkpoint.rs `mod tests` (plans via `ImplementationPlan::parse(.., "## S ")`; a Completed section is `"### Completed\n| S 1 | done |\n"` before the first step, since the marker label is `S`):
+   - `new_checkpoint_seeds_completed`: plan with that Completed section and steps `1`, `2` → statuses `[Passed, Pending]`, `step_ids == ["1", "2"]`.
+   - `reconcile_by_id_reorders_and_appends`: from `"## S 1: a\n## S 2: b\n## S 3: c\n"`, mark index 0 `Passed`; reconcile with `"## S 3: c\n## S 1: a\n## S 4: d\n"` → `Updated { appended: 1, removed: 1, .. }`, `step_ids == ["3", "1", "4"]`, statuses `[Pending, Passed, Pending]`, hashes equal the new plan's.
+   - `reconcile_by_id_guards_active_step`: same first plan, index 1 `InProgress` and `current_step_index = 1`; reconcile with `"## S 2: b\n## S 1: a\n## S 3: c\n"` (step 2 moved) → `Error::Engine { step_number: 2, message }` with `message.starts_with("step edited:")` and `message.contains("orrery reset --step 2")`; state unchanged afterwards (`step_ids` still `["1", "2", "3"]`).
+   - `reconcile_by_id_accepts_completed_edit`: index 0 `Passed`; reconcile with the step-1 body edited and a Completed section listing `S 1` → `Ok`, status still `Passed`, hash updated. Without the Completed section the same edit → `Error::Engine { step_number: 1, message }` with `message.starts_with("step edited:")`.
+   - `legacy_checkpoint_reconciles_positionally`: `toml::from_str` a checkpoint string with no `step_ids` key (serialize a fresh one, then remove its `step_ids` line) → loads with `step_ids` empty; reconcile against the same plan → `Unchanged` and `step_ids` filled.
+   - `mark_passed_records_operator_pass`: index 1 `AwaitingOperator`, `current_step_index = 1`, `phase = AwaitingOperator`, `awaiting_reason = Some(..)`, `round = 3` → `mark_passed(1, "validated on host")` → status `Passed`, `phase == Idle`, `awaiting_reason == None`, `round == 0`, `operator_passes == [OperatorPass { step_id: "2", note: "validated on host", .. }]`; `mark_passed(9, "")` → `Error::Engine { step_number: 10, .. }`; a TOML round trip keeps `operator_passes`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'pub fn mark_passed(' crates/orrery-core/src/checkpoint.rs && grep -q 'fn reconcile_by_id(' crates/orrery-core/src/checkpoint.rs && grep -q 'pub struct OperatorPass' crates/orrery-core/src/checkpoint.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^checkpoint::tests::(new_checkpoint_seeds_completed|reconcile_by_id_reorders_and_appends|reconcile_by_id_guards_active_step|reconcile_by_id_accepts_completed_edit|legacy_checkpoint_reconciles_positionally|mark_passed_records_operator_pass): test$')" -eq 6
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 115: User Steps in the Engine
+
+* **Recommended Command:** `/boost`
+
+```text
+[STEP_ID]
+STEP 115: the engine pauses at a user step (AwaitingOperator, no agents, hooks or gate); approve passes it and the run continues to the next item, reject keeps it paused and ends the run
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1643-1648 (§9.20.5; binding)
+  - crates/orrery-core/src/engine.rs:223-228 (`AwaitingContext`), 291-299 (`StepRunState`), 309-319 (`race_cancel!`), 410-428 (step pick in the run loop), 1109-1159 (`enter_awaiting_operator`), 1161-1220 (`apply_operator_decision`), 1222-1290 (`complete_step_pass`), 2201 (`test_context`), 2314 (`attach_mock_driver`), 2394 (`script_passing_step`), 5198-5260 (`start_step_must_be_pending`, a pattern to copy)
+  - crates/orrery-core/src/phase.rs (`apply_queue`, `PhaseQueue`, `QueueEntry`), crates/orrery-core/src/plan.rs (`StepKind`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `RunOptions`, hook arguments and `build_engine` are unchanged (Step 116). Agent-step behavior is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.5 ' $S && grep -q 'pub fn mark_passed(' crates/orrery-core/src/checkpoint.rs && ! grep -q 'fn run_user_step(' crates/orrery-core/src/engine.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. engine.rs: `AwaitingContext::UserStep`.
+2. engine.rs run loop: right after `state.current_step_index = step_idx;`, the user-step branch of §9.20.5, wrapped in `race_cancel!(self, cancel, state, step_idx, step, ...)`.
+3. engine.rs: `async fn run_user_step(&self, state: &mut WorkflowCheckpoint, step_idx: usize, wait_for_operator: bool) -> Result<Option<RunOutcome>>` per §9.20.5 (reason text `format!("user step {}", step.title)`).
+4. engine.rs `enter_awaiting_operator`: run the halt hook only when the step's `kind == StepKind::Agent` (and, as today, only when it wasn't already `AwaitingOperator`).
+5. engine.rs `apply_operator_decision`: the two `UserStep` arms of §9.20.5.
+6. Tests in engine.rs `mod tests` (build the context with `test_context` and the three-stage setup of `start_step_must_be_pending`, then `ctx.plan = apply_queue(&ctx.plan, &PhaseQueue { phase: String::new(), queue: vec![QueueEntry { user: Some("U1".into()), title: Some("Check".into()), ..Default::default() }, QueueEntry { step: Some("1".into()), ..Default::default() }] }).unwrap();` before `WorkflowEngine::new`; script one passing step):
+   - `user_step_pauses_then_approve_passes`: first `run(RunOptions::default())` → `RunOutcome::AwaitingOperator { step_number: 1, reason }` with `reason == "user step U1: Check"`; `mock.invocations()` is empty; saved statuses `[AwaitingOperator, Pending]`. Set `operator_decision = Some(OperatorDecision::Approve)` in the saved checkpoint and save it. Second `run(RunOptions::default())` → `RunOutcome::Completed { steps_passed: 1 }`; saved statuses `[Passed, Passed]`.
+   - `user_step_reject_halts`: after the first pause, save `operator_decision = Some(OperatorDecision::Reject { feedback: "not yet".into() })`; the next run → `RunOutcome::AwaitingOperator { step_number: 1, reason: "user step rejected: not yet".into() }`; statuses `[AwaitingOperator, Pending]`; `mock.invocations()` still empty.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn run_user_step(' crates/orrery-core/src/engine.rs && grep -q 'AwaitingContext::UserStep' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(user_step_pauses_then_approve_passes|user_step_reject_halts): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 116: Step IDs in the Engine and run --step
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 116: RunOptions.start_step is a string resolved by ID then position, hooks and gates get orrery.step_id (and item_id when set), build_engine loads the run plan through load_run_plan, and orrery run --step takes an ID
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/engine.rs
+  - crates/orrery-cli/src/args.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1649-1654 (§9.20.6; binding)
+  - crates/orrery-core/src/engine.rs:70-76 (`RunOptions`), 1317-1324 (hook `orrery` object), 1412-1419 (gate `orrery` object), 1543-1588 (`pick_next_step_index`), 2007-2026 (`build_engine` plan load), 3906 (`hook_args_contain_orrery_object`), 5198-5260 (`start_step_must_be_pending`)
+  - crates/orrery-cli/src/args.rs:94-101 (`Command::Run`), 493 (`every_spec_row_parses`); crates/orrery-cli/src/commands.rs:150 (passes `step` into `start_step`; compiles unchanged once both are `Option<String>`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `reset`, `status`, `ingest` and `mark` are Step 117; the TUI is Step 118. Existing `orrery` keys keep their names and values.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.6 ' $S && grep -q 'fn run_user_step(' crates/orrery-core/src/engine.rs && ! grep -q '"step_id": step.id' crates/orrery-core/src/engine.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. engine.rs `RunOptions.start_step: Option<String>`; `pick_next_step_index` takes `Option<String>` and resolves per §9.20.6 with both error shapes as written.
+2. engine.rs: both `orrery` JSON objects (hook and gate) gain `"step_id": step.id`; when `step.item_id` is `Some(item)`, insert `"item_id": item` into that object.
+3. engine.rs `build_engine`: `let plan = crate::phase::load_run_plan(&plan_path, &project.step_marker, &store.orrery_dir())?;`.
+4. args.rs `Command::Run`: `step: Option<String>`. `every_spec_row_parses` gains `&["orrery", "run", "--step", "1A"]`.
+5. Tests:
+   - `start_step_must_be_pending` uses `Some("2".into())` and `Some("99".into())`; its expectations are unchanged (`step_number` 2 and 99). The test at 3117 uses `Some("1".into())`.
+   - `hook_args_contain_orrery_object` also asserts `orrery.step_id == "1"` and that `item_id` is absent.
+   - New `start_step_accepts_lettered_id` in engine.rs: `ctx.plan = ImplementationPlan::parse("## Step 1A: a\nbody\n## Step 1B: b\nbody\n", "## Step ").unwrap();` before `WorkflowEngine::new`; `run(RunOptions { start_step: Some("1B".into()), ..Default::default() })` with one scripted passing step → `Completed { steps_passed: 1 }`, statuses `[Pending, Passed]`; `start_step: Some("1C".into())` → `Error::Engine { step_number: 0, message }` with `message.contains("step '1C' not found")`.
+   - New `hook_args_include_item_id` in engine.rs: copy `hook_args_contain_orrery_object`'s setup, set `ctx.plan.steps[0].item_id = Some("TASK-0001".into())`; the hook call's `orrery.item_id == "TASK-0001"`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && test "$(grep -c '"step_id": step.id' crates/orrery-core/src/engine.rs)" -ge 2 && grep -q 'load_run_plan(' crates/orrery-core/src/engine.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^engine::tests::(start_step_accepts_lettered_id|hook_args_include_item_id): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 117: CLI Step IDs, Queue and mark
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 117: orrery reset --step and the new orrery mark --step take step IDs; status, reset, mark and ingest load the run plan (phase.toml queue, Completed seeding); status and ingest show IDs and user steps
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/args.rs
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1655-1659 (§9.20.7; binding)
+  - crates/orrery-cli/src/args.rs:107-110 (`Command::Reset`), 493 (`every_spec_row_parses`)
+  - crates/orrery-cli/src/commands.rs:114-127 (`Command::Ingest`), 976-1003 (`dispatch_operator_decision`), 1005-1021 (`dispatch_reset`), 1023-1110 (`dispatch_status`), 1151 (`mod tests`, `test_ctx`)
+  - crates/orrery-core/src/phase.rs (`load_run_plan`), crates/orrery-core/src/checkpoint.rs (`mark_passed`, `step_ids`, `new`), crates/orrery-core/src/plan.rs (`StepKind`, `resolve_step`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `orrery-core` and the TUI are not touched. `approve` / `reject` are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.7 ' $S && grep -q '"step_id": step.id' crates/orrery-core/src/engine.rs && ! grep -q 'Marked step' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. args.rs: `Command::Reset { #[arg(long)] step: String }`; new `Command::Mark { #[arg(long)] step: String, #[arg(long, default_value = "")] note: String }` right after `Reset`. `every_spec_row_parses` gains `&["orrery", "reset", "--step", "2A"]` and `&["orrery", "mark", "--step", "1A", "--note", "validated on host"]`.
+2. commands.rs: a private `fn load_cli_plan(store: &ConfigStore, cfg: &ProjectConfig) -> Result<ImplementationPlan>` (resolve `cfg.plan_path`, then `load_run_plan(&resolved, &cfg.step_marker, &store.orrery_dir())`). `dispatch_status`, `dispatch_reset` and the new `dispatch_mark` use it; `Command::Ingest` calls `load_run_plan` with its own `resolved` and `step_marker`.
+3. commands.rs: a private `fn resolve_checkpoint_step(state: &WorkflowCheckpoint, arg: &str) -> Result<usize>` returning a 0-based index: the position of `arg` in `state.step_ids`, else `arg` as a 1-based position within `1..=state.step_statuses.len()`, else the §9.20.7 `Validation` error.
+4. commands.rs `dispatch_reset(step: String, ..)` and new `dispatch_mark(step: String, note: String, ..)`: load the checkpoint, or `WorkflowCheckpoint::new(&plan)` when there isn't one, resolve with `resolve_checkpoint_step`, then `reset_from(index + 1)` / `mark_passed(index, note)`, save, and print the §9.20.7 lines using the step's ID (`state.step_ids[index]`, or the position when `step_ids` is empty).
+5. commands.rs `dispatch_status` and `Command::Ingest`: output per §9.20.7. With no checkpoint, status uses `WorkflowCheckpoint::new(&plan).step_statuses`.
+6. Existing tests: `Command::Reset` literals use `step: "<n>".to_string()`; nothing else changes.
+7. New tests in commands.rs `mod tests` (each `init`s a `TempDir`, writes its own plan file there and `ingest`s it with `marker: Some("### STEP ".into())`):
+   - `status_seeds_completed_steps`: plan `"### Completed\n| STEP 1A | done |\n### STEP 1A: a\nA\n### STEP 1B: b\nB\n"`; `status --json` with no checkpoint → steps `[{"id": "1A", "kind": "agent", "status": "Passed"}, {"id": "1B", "kind": "agent", "status": "Pending"}]` (compare those three keys).
+   - `mark_and_reset_take_step_ids`: same plan without the Completed section; `Mark { step: "1B", note: "host ok" }` → 0, stdout contains `Marked step 1B Passed`, the saved checkpoint's statuses are `[Pending, Passed]` and `operator_passes[0].note == "host ok"`; `Reset { step: "1A" }` → 0, stdout contains `Reset steps from step 1A to Pending`, statuses `[Pending, Pending]`; `Mark { step: "9Z", .. }` → `Err(Error::Validation { field, .. })` with `field == "step"`.
+   - `ingest_and_status_follow_phase_queue`: plan with `1A`, `1B`, `2`; write `.orrery/phase.toml` = `[[queue]]\nstep = "2"\nitem = "TASK-0001"\n[[queue]]\nuser = "U1"\ntitle = "Check"\n[[queue]]\nstep = "1A"\n`; `ingest` stdout lines are exactly `2: …`, `[USER] U1: Check`, `1A: …` (the plan's titles); `status --json` steps have ids `["2", "U1", "1A"]`, kinds `["agent", "user", "agent"]`, and the first has `"item_id": "TASK-0001"`; text `status` contains `[Pending] [USER] U1: Check`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'Marked step' crates/orrery-cli/src/commands.rs && grep -q 'fn resolve_checkpoint_step(' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::(status_seeds_completed_steps|mark_and_reset_take_step_ids|ingest_and_status_follow_phase_queue): test$')" -eq 3
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 118: TUI Loads the Run Plan
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 118: the TUI loads the plan through load_run_plan (phase.toml queue) and, with no checkpoint or a failed reconcile, seeds the task list from WorkflowCheckpoint::new so completed steps show Passed
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-tui/src/bridge.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1660-1662 (§9.20.8; binding)
+  - crates/orrery-tui/src/bridge.rs:378-400 (ingest plan load), 632-661 (`load_step_statuses`), 663-686 (`load_initial_app`), 800 (`mod tests`)
+  - crates/orrery-core/src/phase.rs (`load_run_plan`), crates/orrery-core/src/checkpoint.rs (`WorkflowCheckpoint::new`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. app.rs, widgets.rs and the keymap are not touched. A failed reconcile still sets `status_message` as today.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.8 ' $S && grep -q 'Marked step' crates/orrery-cli/src/commands.rs && ! grep -q 'load_run_plan' crates/orrery-tui/src/bridge.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. bridge.rs: the two non-test `ImplementationPlan::from_file` calls (ingest at 385, `load_initial_app` at 673) become `orrery_core::phase::load_run_plan(<path>, &app.config.step_marker, &<store>.orrery_dir())`.
+2. bridge.rs `load_step_statuses`: the three `vec![StepStatus::Pending; plan.steps.len()]` fallbacks become `WorkflowCheckpoint::new(plan).step_statuses`.
+3. Tests in bridge.rs `mod tests`:
+   - `initial_statuses_seed_completed_steps`: a `TempDir` project (`init_project`), plan file `"### Completed\n| STEP 1 | done |\n### STEP 1: a\nA\n### STEP 2: b\nB\n"`, `plan_path` and `step_marker = "### STEP "` saved, no checkpoint → `load_initial_app(..)` gives `step_statuses == [Passed, Pending]`.
+   - `tui_plan_follows_phase_queue`: same project plus `.orrery/phase.toml` = `[[queue]]\nstep = "2"\n[[queue]]\nuser = "U1"\n` → `app.plan` step ids `["2", "U1"]` and `step_statuses == [Pending, Pending]`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && test "$(grep -c 'load_run_plan(' crates/orrery-tui/src/bridge.rs)" -ge 2 && test "$(cargo test -p orrery-tui --lib --locked -- --list 2>/dev/null | grep -cE '^bridge::tests::(initial_statuses_seed_completed_steps|tui_plan_follows_phase_queue): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 119: Secrets in Hook and Gate Args
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 119: validate_tool_args rejects embedded secret patterns in any string of a hook's or gate's configured args, matching only at a token start so ordinary words like --task-id pass
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1663-1665 (§9.20.9; binding)
+  - crates/orrery-core/src/config.rs:21 (`EMBEDDED_SECRET_PATTERNS`), 60-80 (`HookConfig::validate`), 1551-1568 (`validate_tool_args`), 1695-1706 (`check_no_embedded_secret`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `check_no_embedded_secret` and its callers are unchanged. Object keys are not scanned.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.9 ' $S && grep -q 'load_run_plan' crates/orrery-tui/src/bridge.rs && ! grep -q 'fn check_args_no_embedded_secret(' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs: private `fn secret_token_match(value: &str) -> Option<&'static str>`: the first pattern in `EMBEDDED_SECRET_PATTERNS` that occurs in `value` at byte index 0 or right after a byte that isn't ASCII alphanumeric.
+2. config.rs: private `fn check_args_no_embedded_secret(field: &str, value: &serde_json::Value) -> Result<()>`: strings use `secret_token_match` (a hit → the §9.20.9 `Error::Security`); arrays recurse with `<field>[<i>]`; objects recurse with `<field>.<key>`; other values pass.
+3. config.rs `validate_tool_args`: after the existing checks, call `check_args_no_embedded_secret(&format!("{field}.{key}"), value)?` for each entry.
+4. Tests in config.rs `mod tests`:
+   - `tool_args_reject_embedded_secrets`: `validate_tool_args` on `{"token": "sk-abc123"}` (field `"hooks.on_step_start.args"`) → `Error::Security { message }` with `message.contains("hooks.on_step_start.args.token")` and `message.contains("'sk-'")`; `{"headers": {"auth": "Bearer abc"}}` → Security naming `headers.auth`; `{"list": ["ok", "ghp_123"]}` → Security naming `list[1]`. A `HookConfig { tool: "neb:git_commit_documented".into(), on_failure: HookFailure::Halt, args: {"summary": "xoxb-1"} }.validate("hooks.on_step_pass.tool")` → `Error::Security`.
+   - `tool_args_allow_secret_lookalikes`: `{"script": "validate-task-step.sh", "flag": "--disk-check", "note": "risk-free", "n": 3, "dry_run": false}` → `Ok(())`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn check_args_no_embedded_secret(' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::(tool_args_reject_embedded_secrets|tool_args_allow_secret_lookalikes): test$')" -eq 2
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 120: Profiles Keep Default-Role Skills Only
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 120: ProjectProfile::from_project records role_skills only for the default roles (orchestrator, coder, validator), so every saved profile applies with init --profile
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/config.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1666-1668 (§9.20.10; binding), 1578-1581 (§9.19.9)
+  - crates/orrery-core/src/config.rs:746 (`from_project`), `init_project_with_profile`, 2839 (`default_roles_with_rules`), 5282 (`profile_round_trip_and_apply`)
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `init_project_with_profile` and its unknown-role error are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.10 ' $S && grep -q 'fn check_args_no_embedded_secret(' crates/orrery-core/src/config.rs && ! grep -q 'DEFAULT_ROLE_IDS' crates/orrery-core/src/config.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. config.rs: `const DEFAULT_ROLE_IDS: [&str; 3] = ["orchestrator", "coder", "validator"];`. `init_project_with_profile`'s unknown-role check uses it instead of scanning `default_roles_with_rules()` (same error, same message).
+2. config.rs `from_project`: the `role_skills` filter also requires `DEFAULT_ROLE_IDS.contains(&r.role_id.as_str())`.
+3. Test in config.rs `mod tests`, `profile_skips_custom_role_skills`: default roles with `coder.skills = ["repo-rules"]` plus `RoleConfig { role_id: "reviewer", display_name: "Reviewer", kind: RoleKind::Validator, rules_file: "roles/reviewer.md", allowed_mcp_tools: vec![], skills: vec!["house-style"] }` → `from_project` gives `role_skills == {"coder": ["repo-rules"]}`; `init_project_with_profile("p", Some(&profile))` in a fresh `TempDir` → `Ok`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'DEFAULT_ROLE_IDS' crates/orrery-core/src/config.rs && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^config::tests::profile_skips_custom_role_skills: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 121: Effective Limits in config show
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 121: orrery config show prints the effective [limits] (text: a "limits (effective):" block; JSON: a "limits" key) even when project.toml leaves them out at their defaults
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/commands.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1669-1671 (§9.20.11; binding), 1563-1567 (§9.19.7)
+  - crates/orrery-cli/src/commands.rs:383 (`dispatch_config`), `config_show_text_and_json`
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `ProjectConfig` serialization is unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.11 ' $S && grep -q 'DEFAULT_ROLE_IDS' crates/orrery-core/src/config.rs && ! grep -q 'limits (effective):' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. commands.rs `dispatch_config`, text `show`: after printing the project TOML and before `catalog:`, print `limits (effective):` and then `toml::to_string_pretty(&cfg.limits)?`.
+2. commands.rs `dispatch_config`, JSON `show`: the payload gains `"limits": cfg.limits`.
+3. Test in commands.rs `mod tests`, `config_show_prints_effective_limits`: `init`; text `show` stdout contains `limits (effective):` and `mcp_call_timeout_secs = `; JSON `show` has `["limits"]["mcp_call_timeout_secs"]` as a number.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'limits (effective):' crates/orrery-cli/src/commands.rs && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::config_show_prints_effective_limits: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 122: README Phase Queue, Step IDs and mark
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 122: README documents phase.toml, step IDs, the Completed table rule, orrery mark, the step_id/item_id hook args, the args secret check and the effective limits in config show
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1592-1674 (§9.20; binding)
+  - README.md (Quickstart, "Project layout", "Hook and gate arguments", "Project settings", "Security")
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. Placeholder names and paths only.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.20.12 ' $S && grep -q 'limits (effective):' crates/orrery-cli/src/commands.rs && ! grep -q '^### Phase queue' README.md && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. "Project layout" tree, project `.orrery/` block: add `├── phase.toml` with the comment `# optional: this phase's run queue`.
+2. New `### Phase queue` section after "Project settings": what `phase.toml` holds (the §9.20.3 fields), that the queue order is the run order and every other plan step is ignored, that a `user` entry pauses the run until `orrery approve` (or `reject`), that `item` reaches hooks as `orrery.item_id`, and that with no `phase.toml` the whole plan runs in file order. A `toml` block with this example, exactly:
+   phase = "O"
+   [[queue]]
+   step = "12A"
+   item = "TASK-0042"
+   [[queue]]
+   user = "VM-1"
+   title = "Boot test on the VM"
+   [[queue]]
+   step = "12B"
+3. Same section: one paragraph on step IDs (`12`, `12A`; gaps and letters allowed; `--step` takes an ID and falls back to position) and the Completed table (a `### Completed` table row whose first cell is the marker's label plus an ID, such as `STEP 12A`, starts that step `Passed`). A `bash` block: `orrery status`, `orrery run --step 12A`, `orrery mark --step 12A --note "validated on the host"`, `orrery reset --step 12A`.
+4. "Hook and gate arguments": one sentence that the `orrery` object also carries `step_id`, and `item_id` when the queue sets one; one sentence that configured args are rejected if a string starts a token with a secret pattern (`sk-`, `Bearer `, `AIza`, `ghp_`, `xox`).
+5. "Project settings": one sentence that `config show` ends its project section with `limits (effective):`, the limits in force even when `project.toml` leaves them out.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && grep -q '^### Phase queue' README.md && grep -q 'phase.toml' README.md && grep -q 'orrery mark --step 12A' README.md && grep -q 'user = "VM-1"' README.md && grep -q 'item_id' README.md && grep -q 'limits (effective):' README.md
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### User Step: LOOP-2
+
+After Step 122 is committed. Proves the Phase O goal on a throwaway repo with the real binary. No agent time: the queue has only user items, and agent steps are checked through `status`, `mark` and `reset`.
+
+1. Reinstall Orrery:
+
+   ```bash
+   cargo install --path /srv/devshare/Orrery/crates/orrery-cli --locked
+   ```
+
+2. Scratch repo with a lettered plan and one completed step:
+
+   ```bash
+   mkdir -p ~/scratch/orrery-loop2 && cd ~/scratch/orrery-loop2 && git init && orrery init --name loop2 --profile cloud-cli && orrery gate clear && orrery hook clear start
+   ```
+
+   ```bash
+   printf '# Plan\n### Completed\n| Step | Status |\n| :--- | :--- |\n| **STEP 1A** | **COMPLETED** |\n---\n### STEP 1A: First\nA\n### STEP 1B: Second\nB\n### STEP 2: Third\nC\n' > PLAN.md && orrery ingest PLAN.md --marker "### STEP " && orrery status
+   ```
+
+   Expect: `ingest` lists `1A: First`, `1B: Second`, `2: Third`; `status` shows `[Passed] 1A: First` and the other two `[Pending]`.
+
+3. Queue with user items:
+
+   ```bash
+   printf 'phase = "T"\n[[queue]]\nuser = "U1"\ntitle = "First check"\n[[queue]]\nstep = "1B"\n[[queue]]\nuser = "U2"\ntitle = "Second check"\n' > .orrery/phase.toml && orrery ingest PLAN.md --marker "### STEP " && orrery status
+   ```
+
+   Expect: three lines, in order: `[USER] U1: First check`, `1B: Second`, `[USER] U2: Second check`; `2: Third` is gone.
+
+4. Pause and approve:
+
+   ```bash
+   orrery run; echo "exit $?"; orrery approve && orrery mark --step 1B --note "host check" && orrery run; echo "exit $?"; orrery status
+   ```
+
+   Expect: the first `run` exits 3 with `Awaiting operator for step 1: user step U1: First check`; after `approve`, `mark` prints `Marked step 1B Passed`; the second `run` passes U1, skips 1B (Passed) and exits 3 at `user step U2: Second check`; `status` shows U1 and 1B `[Passed]`, U2 `[AwaitingOperator]`.
+
+5. Reset by ID:
+
+   ```bash
+   orrery reset --step 1B && orrery status
+   ```
+
+   Expect: `Reset steps from step 1B to Pending`; 1B and U2 `[Pending]`, U1 still `[Passed]`.
+
+Report back: pass/fail for 2–5, and the `orrery status` output from step 4.

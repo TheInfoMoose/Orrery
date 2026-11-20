@@ -23,13 +23,10 @@ tracked_files = [
     "crates/orrery-core/tests/live_mcp.rs",
 ]
 
-[items]
-features = []
-
 [[items.bugs]]
 id = "BUG-0001"
 title = "Use the plan's step IDs instead of positional step numbers"
-status = "pending"
+status = "open"
 severity = "medium"
 created_at = "2026-11-19T01:58:11Z"
 
@@ -92,23 +89,30 @@ created_at = "2026-11-19T02:54:14Z"
 [[items.bugs]]
 id = "BUG-0016"
 title = "Reject embedded secret patterns in hook and gate args"
-status = "pending"
+status = "open"
 severity = "low"
 created_at = "2026-11-19T04:39:41Z"
 
 [[items.bugs]]
 id = "BUG-0017"
 title = "Profile saved from a project with custom-role skills cannot be applied"
-status = "pending"
+status = "open"
 severity = "low"
 created_at = "2026-11-20T00:16:48Z"
 
 [[items.bugs]]
 id = "BUG-0018"
 title = "Start ingest with already-completed steps marked Passed"
-status = "pending"
+status = "open"
 severity = "high"
 created_at = "2026-11-20T00:42:31Z"
+
+[[items.features]]
+id = "FEAT-0004"
+title = "Run a phase queue from .orrery/phase.toml with operator user steps"
+status = "open"
+severity = "high"
+created_at = "2026-11-20T01:36:38Z"
 
 [[items.tasks]]
 id = "TASK-0001"
@@ -172,3 +176,52 @@ title = "init_project_with_profile"
 status = "closed"
 severity = "medium"
 created_at = "2026-11-19T04:39:27Z"
+
+[[items.tasks]]
+id = "TASK-0019"
+title = "Plan step IDs (BUG-0001)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0020"
+title = "Completed table → completed_ids (BUG-0018)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0021"
+title = "phase.toml queue, apply_queue, load_run_plan (FEAT-0004)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0022"
+title = "Checkpoints by step ID, completed seeding, mark_passed (BUG-0018, FEAT-0002)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0023"
+title = "User steps pause the engine (FEAT-0004)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0027"
+title = "Secret patterns in hook and gate args (BUG-0016)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0028"
+title = "Profiles keep default-role skills only (BUG-0017)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T01:36:53Z"
