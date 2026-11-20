@@ -27,7 +27,7 @@ use crate::llm::{
 use crate::mcp::{
     McpConnector, McpGatekeeper, RmcpConnector, WriteScope, tool_result_is_error, tool_result_text,
 };
-use crate::plan::{ImplementationPlan, PlanStep};
+use crate::plan::{ImplementationPlan, PlanStep, StepKind};
 use crate::security::{OsKeyringStore, SecretRedactor, SecretStore};
 use crate::stream_log::{LiveStreamConfig, LiveStreamHub, StreamEvent, StreamEventKind};
 use crate::{Error, Result};
@@ -225,6 +225,7 @@ enum AwaitingContext {
     PassCheck,
     StepPassHook,
     HaltOrEscalation,
+    UserStep,
 }
 
 enum AwaitResolution {
@@ -430,6 +431,20 @@ impl WorkflowEngine {
 
             let step = &self.ctx.plan.steps[step_idx];
             state.current_step_index = step_idx;
+
+            if step.kind == StepKind::User {
+                if let Some(outcome) = race_cancel!(
+                    self,
+                    cancel,
+                    state,
+                    step_idx,
+                    step,
+                    self.run_user_step(&mut state, step_idx, opts.wait_for_operator)
+                )? {
+                    return Ok(outcome);
+                }
+                continue;
+            }
 
             let mut step_state = if state.step_statuses[step_idx] == StepStatus::AwaitingOperator {
                 let (history, last_stage_run, last_is_step_passed) =
@@ -1105,6 +1120,60 @@ impl WorkflowEngine {
         }
     }
 
+    async fn run_user_step(
+        &self,
+        state: &mut WorkflowCheckpoint,
+        step_idx: usize,
+        wait_for_operator: bool,
+    ) -> Result<Option<RunOutcome>> {
+        let step = &self.ctx.plan.steps[step_idx];
+        let mut step_state = StepRunState {
+            step_idx,
+            step_number: step.number,
+            notes: Vec::new(),
+            history: Vec::new(),
+            last_stage_run: None,
+            consecutive_violations: 0,
+            stage_ran_since_gate_failure: true,
+        };
+        let resolution = if state.step_statuses[step_idx] == StepStatus::AwaitingOperator
+            && let Some(decision) = state.operator_decision.take()
+        {
+            self.apply_operator_decision(
+                state,
+                &mut step_state,
+                AwaitingContext::UserStep,
+                decision,
+            )?
+        } else {
+            self.enter_awaiting_operator(
+                state,
+                &mut step_state,
+                format!("user step {}", step.title),
+                AwaitingContext::UserStep,
+                wait_for_operator,
+            )
+            .await?
+        };
+        match resolution {
+            AwaitResolution::PassStep => {
+                state.step_statuses[step_idx] = StepStatus::Passed;
+                state.awaiting_reason = None;
+                self.ctx.checkpoints.save_state(state)?;
+                self.emit_event(EngineEvent::StepStatusChanged {
+                    step_number: step.number,
+                    status: StepStatus::Passed,
+                });
+                Ok(None)
+            }
+            AwaitResolution::HaltRun(outcome) => Ok(Some(outcome)),
+            AwaitResolution::ContinueOrchestrator => Err(Error::Engine {
+                step_number: step.number,
+                message: "user step got an orchestrator decision".to_string(),
+            }),
+        }
+    }
+
     async fn enter_awaiting_operator(
         &self,
         state: &mut WorkflowCheckpoint,
@@ -1119,7 +1188,9 @@ impl WorkflowEngine {
         }
 
         let step = &self.ctx.plan.steps[step_state.step_idx];
-        if state.step_statuses[step_state.step_idx] != StepStatus::AwaitingOperator {
+        if step.kind == StepKind::Agent
+            && state.step_statuses[step_state.step_idx] != StepStatus::AwaitingOperator
+        {
             self.run_halt_hook(state, step).await?;
         }
 
@@ -1171,9 +1242,24 @@ impl WorkflowEngine {
 
         match (context, decision) {
             (
-                AwaitingContext::PassCheck | AwaitingContext::StepPassHook,
+                AwaitingContext::PassCheck
+                | AwaitingContext::StepPassHook
+                | AwaitingContext::UserStep,
                 OperatorDecision::Approve,
             ) => Ok(AwaitResolution::PassStep),
+            (AwaitingContext::UserStep, OperatorDecision::Reject { feedback }) => {
+                let reason = format!("user step rejected: {feedback}");
+                state.step_statuses[step_state.step_idx] = StepStatus::AwaitingOperator;
+                state.phase = EnginePhase::AwaitingOperator;
+                state.awaiting_reason = Some(reason.clone());
+                self.ctx.checkpoints.save_state(state)?;
+                let outcome = RunOutcome::AwaitingOperator {
+                    step_number: step_state.step_number,
+                    reason,
+                };
+                self.emit_event(EngineEvent::RunFinished(outcome.clone()));
+                Ok(AwaitResolution::HaltRun(outcome))
+            }
             (AwaitingContext::PassCheck, OperatorDecision::Reject { feedback }) => {
                 state.retry_count += 1;
                 step_state.last_stage_run = None;
@@ -6657,5 +6743,149 @@ mod tests {
         };
         let res = build_engine(&store, backends2).await;
         assert!(matches!(res, Err(Error::Validation { .. })));
+    }
+
+    #[tokio::test]
+    async fn user_step_pauses_then_approve_passes() {
+        use crate::phase::{PhaseQueue, QueueEntry, apply_queue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.plan = apply_queue(
+            &ctx.plan,
+            &PhaseQueue {
+                phase: String::new(),
+                queue: vec![
+                    QueueEntry {
+                        user: Some("U1".into()),
+                        title: Some("Check".into()),
+                        ..Default::default()
+                    },
+                    QueueEntry {
+                        step: Some("1".into()),
+                        ..Default::default()
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "user step U1: Check".into(),
+            }
+        );
+        assert!(mock.invocations().is_empty());
+
+        let mut state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::AwaitingOperator, StepStatus::Pending]
+        );
+        state.operator_decision = Some(OperatorDecision::Approve);
+        checkpoints.save_state(&state).unwrap();
+
+        let outcome2 = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome2, RunOutcome::Completed { steps_passed: 1 });
+
+        let state2 = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state2.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Passed]
+        );
+    }
+
+    #[tokio::test]
+    async fn user_step_reject_halts() {
+        use crate::phase::{PhaseQueue, QueueEntry, apply_queue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.plan = apply_queue(
+            &ctx.plan,
+            &PhaseQueue {
+                phase: String::new(),
+                queue: vec![
+                    QueueEntry {
+                        user: Some("U1".into()),
+                        title: Some("Check".into()),
+                        ..Default::default()
+                    },
+                    QueueEntry {
+                        step: Some("1".into()),
+                        ..Default::default()
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "user step U1: Check".into(),
+            }
+        );
+
+        let mut state = checkpoints.load_state().unwrap().unwrap();
+        state.operator_decision = Some(OperatorDecision::Reject {
+            feedback: "not yet".into(),
+        });
+        checkpoints.save_state(&state).unwrap();
+
+        let outcome2 = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome2,
+            RunOutcome::AwaitingOperator {
+                step_number: 1,
+                reason: "user step rejected: not yet".into(),
+            }
+        );
+
+        let state2 = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state2.step_statuses,
+            vec![StepStatus::AwaitingOperator, StepStatus::Pending]
+        );
+        assert!(mock.invocations().is_empty());
     }
 }
