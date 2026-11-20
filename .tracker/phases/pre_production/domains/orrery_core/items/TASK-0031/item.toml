@@ -4,17 +4,22 @@ schema_version = 2
 id = "TASK-0031"
 type = "task"
 title = "Checkpoint list lengths (BUG-0019)"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_core"
 created_at = "2026-11-20T11:40:29Z"
-updated_at = "2026-11-20T11:40:29Z"
+updated_at = "2026-11-20T11:54:02Z"
 source_ref = "STEP 123"
 
 [effort]
-logged_time_minutes = 0
+logged_time_minutes = 5
 iteration_count = 1
+last_timer_session = "TASK-0031@2026-11-20T11:48:43Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "b4af54a"
+summary = "check_lengths rejects mismatched step_ids/step_hashes/step_statuses in load_state and reconcile"
