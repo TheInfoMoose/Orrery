@@ -4,6 +4,7 @@ pub mod docker;
 pub mod engine;
 pub mod llm;
 pub mod mcp;
+pub mod phase;
 pub mod plan;
 pub mod security;
 pub mod stream_log;
