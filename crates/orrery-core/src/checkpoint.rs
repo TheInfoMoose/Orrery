@@ -342,7 +342,25 @@ impl WorkflowCheckpoint {
         }
     }
 
+    fn check_lengths(&self) -> Result<()> {
+        if self.step_hashes.len() != self.step_statuses.len()
+            || (!self.step_ids.is_empty() && self.step_ids.len() != self.step_statuses.len())
+        {
+            return Err(Error::Validation {
+                field: "checkpoint".to_string(),
+                message: format!(
+                    "checkpoint step lists differ in length (step_ids {}, step_hashes {}, step_statuses {}); move .orrery/checkpoints/workflow_state.toml aside to start over",
+                    self.step_ids.len(),
+                    self.step_hashes.len(),
+                    self.step_statuses.len()
+                ),
+            });
+        }
+        Ok(())
+    }
+
     pub fn reconcile(&mut self, plan: &ImplementationPlan) -> Result<ReconcileOutcome> {
+        self.check_lengths()?;
         let outcome = if self.step_ids.is_empty() {
             let outcome = self.reconcile_positional(plan)?;
             self.step_ids = plan.steps.iter().map(|s| s.id.clone()).collect();
@@ -612,6 +630,7 @@ impl CheckpointManager {
         };
         let state = toml::from_str::<WorkflowCheckpoint>(&raw)
             .map_err(|source| Error::TomlDe { path, source })?;
+        state.check_lengths()?;
         Ok(Some(state))
     }
 
@@ -1704,5 +1723,43 @@ extra = 123
             );
             assert_eq!(requires_feedback(status), expected);
         }
+    }
+
+    #[test]
+    fn mismatched_checkpoint_lengths_rejected() {
+        let plan = three_step_plan();
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_ids.pop();
+        match cp.reconcile(&plan).unwrap_err() {
+            Error::Validation { field, message } => {
+                assert_eq!(field, "checkpoint");
+                assert!(message.contains("step_ids 2, step_hashes 3, step_statuses 3"));
+                assert!(message.contains("workflow_state.toml aside"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let dir = TempDir::new().unwrap();
+        let mgr = CheckpointManager::new(dir.path().join("checkpoints"));
+        mgr.save_state(&cp).unwrap();
+        match mgr.load_state().unwrap_err() {
+            Error::Validation { field, .. } => assert_eq!(field, "checkpoint"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let mut legacy_bad = WorkflowCheckpoint::new(&plan);
+        legacy_bad.step_ids.clear();
+        legacy_bad.step_hashes.pop();
+        match legacy_bad.reconcile(&plan).unwrap_err() {
+            Error::Validation { field, .. } => assert_eq!(field, "checkpoint"),
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let mut legacy_ok = WorkflowCheckpoint::new(&plan);
+        legacy_ok.step_ids.clear();
+        assert_eq!(
+            legacy_ok.reconcile(&plan).unwrap(),
+            ReconcileOutcome::Unchanged
+        );
     }
 }
