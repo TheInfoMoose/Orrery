@@ -4,17 +4,22 @@ schema_version = 2
 id = "TASK-0027"
 type = "task"
 title = "Secret patterns in hook and gate args (BUG-0016)"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_core"
 created_at = "2026-11-20T01:36:53Z"
-updated_at = "2026-11-20T01:36:53Z"
+updated_at = "2026-11-20T10:59:11Z"
 source_ref = "STEP 119"
 
 [effort]
-logged_time_minutes = 0
+logged_time_minutes = 4
 iteration_count = 1
+last_timer_session = "TASK-0027@2026-11-20T10:54:51Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "e1361e0"
+summary = "validate_tool_args scans every string in hook/gate args for secret patterns at a token start"
