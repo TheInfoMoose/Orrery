@@ -107,6 +107,13 @@ status = "open"
 severity = "high"
 created_at = "2026-11-20T00:42:31Z"
 
+[[items.bugs]]
+id = "BUG-0019"
+title = "Reject checkpoints whose step_ids length differs from step_statuses"
+status = "pending"
+severity = "low"
+created_at = "2026-11-20T02:30:17Z"
+
 [[items.features]]
 id = "FEAT-0004"
 title = "Run a phase queue from .orrery/phase.toml with operator user steps"
@@ -201,7 +208,7 @@ created_at = "2026-11-20T01:36:53Z"
 [[items.tasks]]
 id = "TASK-0022"
 title = "Checkpoints by step ID, completed seeding, mark_passed (BUG-0018, FEAT-0002)"
-status = "open"
+status = "closed"
 severity = "medium"
 created_at = "2026-11-20T01:36:53Z"
 
