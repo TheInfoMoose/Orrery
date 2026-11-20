@@ -103,7 +103,7 @@ created_at = "2026-11-20T00:16:48Z"
 [[items.bugs]]
 id = "BUG-0018"
 title = "Start ingest with already-completed steps marked Passed"
-status = "open"
+status = "closed"
 severity = "high"
 created_at = "2026-11-20T00:42:31Z"
 
@@ -117,7 +117,7 @@ created_at = "2026-11-20T02:30:17Z"
 [[items.features]]
 id = "FEAT-0004"
 title = "Run a phase queue from .orrery/phase.toml with operator user steps"
-status = "open"
+status = "closed"
 severity = "high"
 created_at = "2026-11-20T01:36:38Z"
 
