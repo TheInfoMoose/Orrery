@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -30,6 +30,7 @@ pub struct ImplementationPlan {
     pub step_marker: String,
     pub preamble: String,
     pub steps: Vec<PlanStep>,
+    pub completed_ids: BTreeSet<String>,
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -100,6 +101,25 @@ pub fn is_step_id(s: &str) -> bool {
     digit_len > 0 && bytes[digit_len..].iter().all(u8::is_ascii_uppercase)
 }
 
+fn completed_row_id(line: &str, label: &str) -> Option<String> {
+    if label.is_empty() {
+        return None;
+    }
+    let after_first = line.trim_start().strip_prefix('|')?;
+    let (raw_cell, _) = after_first.split_once('|')?;
+    let cleaned: String = raw_cell.chars().filter(|&c| c != '*' && c != '`').collect();
+    let rest = cleaned.trim().strip_prefix(label)?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let id = rest.trim();
+    if is_step_id(id) {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
 impl ImplementationPlan {
     pub fn parse(markdown: &str, step_marker: &str) -> Result<Self> {
         if step_marker.is_empty() {
@@ -110,9 +130,12 @@ impl ImplementationPlan {
         }
 
         let normalized = markdown.replace("\r\n", "\n");
+        let label = step_marker.trim_start_matches('#').trim();
         let mut preamble_lines: Vec<&str> = Vec::new();
         let mut raw_steps: Vec<(usize, String, Vec<&str>)> = Vec::new();
         let mut active_fence: Option<(u8, usize, usize)> = None;
+        let mut in_completed_section = false;
+        let mut completed_ids: BTreeSet<String> = BTreeSet::new();
 
         for (idx, line) in normalized.split('\n').enumerate() {
             let line_num = idx + 1;
@@ -137,6 +160,13 @@ impl ImplementationPlan {
                     preamble_lines.push(line);
                 }
                 continue;
+            }
+
+            if line.starts_with('#') {
+                let heading_text = line.trim_start_matches('#').trim();
+                in_completed_section = heading_text.eq_ignore_ascii_case("Completed");
+            } else if in_completed_section && let Some(id) = completed_row_id(line, label) {
+                completed_ids.insert(id);
             }
 
             if let Some(after_marker) = line.strip_prefix(step_marker) {
@@ -221,6 +251,7 @@ impl ImplementationPlan {
             step_marker: step_marker.to_string(),
             preamble: join_and_trim(&preamble_lines),
             steps,
+            completed_ids,
         })
     }
 
@@ -451,6 +482,47 @@ mod tests {
     }
 
     #[test]
+    fn completed_table_ids() {
+        let input = [
+            "# P",
+            "### Up Next",
+            "| # | Step |",
+            "| 1 | **STEP 3** |",
+            "### Completed",
+            "| Step | Status |",
+            "| :--- | :---: |",
+            "| **STEP 1** | **COMPLETED** |",
+            "| STEP 2A | done abc1234 |",
+            "| [USER] CI-1 | done |",
+            "| `STEP 9` | x |",
+            "| STEP x1 | bad id |",
+            "### Notes",
+            "| STEP 3 | not done |",
+            "### STEP 1: a",
+            "body",
+            "```",
+            "### Completed",
+            "| STEP 3 | fenced |",
+            "```",
+            "### STEP 2A: b",
+            "### STEP 3: c",
+        ]
+        .join("\n");
+        let plan = ImplementationPlan::parse(&input, "### STEP ").unwrap();
+        let expected: std::collections::BTreeSet<String> =
+            ["1", "2A", "9"].into_iter().map(String::from).collect();
+        assert_eq!(plan.completed_ids, expected);
+        let ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["1", "2A", "3"]);
+    }
+
+    #[test]
+    fn completed_table_absent_is_empty() {
+        let plan = ImplementationPlan::parse(SAMPLE_PLAN, "## S ").unwrap();
+        assert!(plan.completed_ids.is_empty());
+    }
+
+    #[test]
     fn acceptance_fixture_counts_plan_steps() {
         let plan = ImplementationPlan::parse(
             include_str!("../../../STEPPED_IMPLEMENTATION_PLAN.md"),
@@ -462,5 +534,7 @@ mod tests {
         assert_eq!(numbers, (1..=122).collect::<Vec<_>>());
         assert!(plan.steps.iter().all(|s| s.id == s.number.to_string()));
         assert!(plan.steps[5].title.starts_with("6: "));
+        assert!(plan.completed_ids.contains("1"));
+        assert!(plan.completed_ids.contains("110"));
     }
 }
