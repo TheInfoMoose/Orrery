@@ -25,19 +25,18 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 111** | `/goal` | Plan step IDs (BUG-0001) | `crates/orrery-core/src/plan.rs`, `llm.rs`, `tests/live_docker.rs`, `tests/live_llm.rs` | — |
-| 4 | **STEP 112** | `/goal` | Completed table → `completed_ids` (BUG-0018) | `crates/orrery-core/src/plan.rs` | STEP 111 |
-| 5 | **STEP 113** | `/goal` | `phase.toml` queue, `apply_queue`, `load_run_plan` (FEAT-0004) | `crates/orrery-core/src/phase.rs`, `lib.rs` | STEP 112 |
-| 6 | **STEP 114** | `/boost` | Checkpoints by step ID, completed seeding, `mark_passed` (BUG-0018, FEAT-0002) | `crates/orrery-core/src/checkpoint.rs` | STEP 113 |
-| 7 | **STEP 115** | `/boost` | User steps pause the engine (FEAT-0004) | `crates/orrery-core/src/engine.rs` | STEP 114 |
-| 8 | **STEP 116** | `/goal` | Engine `--step` by ID, `step_id`/`item_id` hook args (BUG-0001) | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/args.rs` | STEP 115 |
-| 9 | **STEP 117** | `/goal` | CLI `reset`/`mark` by ID, queue-aware `status`/`ingest` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 116 |
-| 10 | **STEP 118** | `/goal` | TUI loads the run plan, seeds completed steps | `crates/orrery-tui/src/bridge.rs` | STEP 117 |
-| 11 | **STEP 119** | `/goal` | Secret patterns in hook and gate args (BUG-0016) | `crates/orrery-core/src/config.rs` | STEP 118 |
-| 12 | **STEP 120** | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` | STEP 119 |
-| 13 | **STEP 121** | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` | STEP 120 |
-| 14 | **STEP 122** | `/goal` | README phase queue, step IDs, `mark` | `README.md` | STEP 121 |
-| 15 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
+| 3 | **STEP 112** | `/goal` | Completed table → `completed_ids` (BUG-0018) | `crates/orrery-core/src/plan.rs` | STEP 111 |
+| 4 | **STEP 113** | `/goal` | `phase.toml` queue, `apply_queue`, `load_run_plan` (FEAT-0004) | `crates/orrery-core/src/phase.rs`, `lib.rs` | STEP 112 |
+| 5 | **STEP 114** | `/boost` | Checkpoints by step ID, completed seeding, `mark_passed` (BUG-0018, FEAT-0002) | `crates/orrery-core/src/checkpoint.rs` | STEP 113 |
+| 6 | **STEP 115** | `/boost` | User steps pause the engine (FEAT-0004) | `crates/orrery-core/src/engine.rs` | STEP 114 |
+| 7 | **STEP 116** | `/goal` | Engine `--step` by ID, `step_id`/`item_id` hook args (BUG-0001) | `crates/orrery-core/src/engine.rs`, `crates/orrery-cli/src/args.rs` | STEP 115 |
+| 8 | **STEP 117** | `/goal` | CLI `reset`/`mark` by ID, queue-aware `status`/`ingest` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 116 |
+| 9 | **STEP 118** | `/goal` | TUI loads the run plan, seeds completed steps | `crates/orrery-tui/src/bridge.rs` | STEP 117 |
+| 10 | **STEP 119** | `/goal` | Secret patterns in hook and gate args (BUG-0016) | `crates/orrery-core/src/config.rs` | STEP 118 |
+| 11 | **STEP 120** | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` | STEP 119 |
+| 12 | **STEP 121** | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` | STEP 120 |
+| 13 | **STEP 122** | `/goal` | README phase queue, step IDs, `mark` | `README.md` | STEP 121 |
+| 14 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
 
 ### Completed
 
@@ -156,6 +155,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 109** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 | **STEP 110** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | README config, profiles and gate routing | `README.md` |
 | **[USER] LOOP-1** | **COMPLETED** (2026-11-19, steps 2–4 pass; step 5 skipped) | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo |
+| **STEP 111** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | Plan step IDs (BUG-0001) | `crates/orrery-core/src/plan.rs`, `llm.rs`, `tests/live_docker.rs`, `tests/live_llm.rs` |
 
 ---
 
