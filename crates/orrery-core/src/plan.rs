@@ -529,9 +529,9 @@ mod tests {
             "### STEP ",
         )
         .unwrap();
-        assert_eq!(plan.steps.len(), 122);
+        assert_eq!(plan.steps.len(), 124);
         let numbers: Vec<usize> = plan.steps.iter().map(|s| s.number).collect();
-        assert_eq!(numbers, (1..=122).collect::<Vec<_>>());
+        assert_eq!(numbers, (1..=124).collect::<Vec<_>>());
         assert!(plan.steps.iter().all(|s| s.id == s.number.to_string()));
         assert!(plan.steps[5].title.starts_with("6: "));
         assert!(plan.completed_ids.contains("1"));

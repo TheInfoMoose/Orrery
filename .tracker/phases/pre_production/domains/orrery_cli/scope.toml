@@ -36,7 +36,7 @@ created_at = "2026-11-19T02:21:11Z"
 [[items.bugs]]
 id = "BUG-0020"
 title = "Warn when a saved profile names project-only skills"
-status = "pending"
+status = "open"
 severity = "low"
 created_at = "2026-11-20T11:34:14Z"
 
@@ -109,3 +109,10 @@ title = "Effective limits in config show (FEAT-0003)"
 status = "closed"
 severity = "medium"
 created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0032"
+title = "profile save warns on project-only skills (BUG-0020)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T11:40:29Z"

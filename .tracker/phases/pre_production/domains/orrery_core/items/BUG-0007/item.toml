@@ -2,11 +2,11 @@
 id = "BUG-0007"
 type = "bug"
 title = "Report step-number overflow instead of treating it as unnumbered (F60-6)"
-status = "pending"
+status = "closed"
 severity = "low"
 scope_ref = "orrery_core"
 created_at = "2026-11-19T01:58:11Z"
-updated_at = "2026-11-19T01:58:11Z"
+updated_at = "2026-11-20T11:39:17Z"
 
 [effort]
 logged_time_minutes = 0
@@ -14,4 +14,8 @@ iteration_count = 1
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "9f6bde6"
+summary = "won't fix: obsolete since STEP 111 (9d9d743); step IDs are kept as strings and never parsed to usize, so heading digits can't overflow"

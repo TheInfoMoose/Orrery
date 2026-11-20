@@ -1672,3 +1672,14 @@ A practical run on Perigee (2026-11-19) showed Orrery offering STEP 1A first in 
 #### 9.20.12 README and acceptance (Step 122, User Step LOOP-2)
 - README documents `phase.toml` (format, queue order, user items, `item`), step IDs (`--step 1A`, the `step_id` and `item_id` hook args), the Completed table rule, `orrery mark`, and the token-start secret check for args.
 - Acceptance (User Step LOOP-2), on a scratch repo with a lettered plan: a Completed row's step starts `Passed`; with `phase.toml` set, `status` and `ingest` list only the queue, in order; the run pauses at the user item, and `approve` passes it and continues; `mark --step <ID>` passes a step; `reset --step <ID>` works by ID.
+
+### 9.21 Phase P: Phase O follow-ups (Steps 123–124)
+Two findings from Phase O's validation and LOOP-2: a hand-edited checkpoint whose step lists differ in length panics `reconcile` instead of failing cleanly (BUG-0019), and a profile saved in a project with project-only skills creates projects that can't run until those skill files are copied (BUG-0020).
+
+#### 9.21.1 Checkpoint list lengths (Step 123) (adds to §9.20.4)
+- checkpoint.rs: private `fn check_lengths(&self) -> Result<()>` on `WorkflowCheckpoint`: if `step_hashes.len() != step_statuses.len()`, or `step_ids` is non-empty and `step_ids.len() != step_statuses.len()` → `Error::Validation { field: "checkpoint", message: "checkpoint step lists differ in length (step_ids <a>, step_hashes <b>, step_statuses <c>); move .orrery/checkpoints/workflow_state.toml aside to start over" }`. The message doesn't suggest `orrery reset`, which loads the same file.
+- `CheckpointManager::load_state` calls it right after parsing, and `WorkflowCheckpoint::reconcile` calls it first.
+
+#### 9.21.2 Profiles and project-only skills (Step 124) (adds to §9.19.10 `profile save`)
+- `orrery profile save <NAME>`: after saving, collect the skill names in the profile's `role_skills` whose `catalog_entries()` entry has `kind == Skill` and `source == Project` (found only in this project), sorted and de-duplicated. If any, write one line to stderr: `warning: profile '<NAME>' names skills found only in this project: <a>, <b>; copy them to the global skills directory or into each new project's .orrery/skills/`. The exit code stays 0.
+- README "Global profiles": one sentence that skills named in `role_skills` must be in the global skills directory or copied into the new project's `.orrery/skills/`, and that `profile save` warns about skills found only in the source project.

@@ -4,11 +4,11 @@ schema_version = 2
 id = "TASK-0002"
 type = "task"
 title = "Replace direct chrono use in orrery-core with jiff"
-status = "pending"
+status = "closed"
 severity = "low"
 scope_ref = "orrery_core"
 created_at = "2026-11-19T01:58:11Z"
-updated_at = "2026-11-19T01:58:11Z"
+updated_at = "2026-11-20T11:39:17Z"
 
 [effort]
 logged_time_minutes = 0
@@ -16,4 +16,8 @@ iteration_count = 1
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "9f6bde6"
+summary = "won't fix: obsolete; no chrono left in any crate or Cargo.toml (removed in Phase K)"

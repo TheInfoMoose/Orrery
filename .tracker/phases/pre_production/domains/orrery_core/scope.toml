@@ -54,7 +54,7 @@ created_at = "2026-11-19T01:58:11Z"
 [[items.bugs]]
 id = "BUG-0007"
 title = "Report step-number overflow instead of treating it as unnumbered (F60-6)"
-status = "pending"
+status = "closed"
 severity = "low"
 created_at = "2026-11-19T01:58:11Z"
 
@@ -110,7 +110,7 @@ created_at = "2026-11-20T00:42:31Z"
 [[items.bugs]]
 id = "BUG-0019"
 title = "Reject checkpoints whose step_ids length differs from step_statuses"
-status = "pending"
+status = "open"
 severity = "low"
 created_at = "2026-11-20T02:30:17Z"
 
@@ -131,7 +131,7 @@ created_at = "2026-11-19T01:58:11Z"
 [[items.tasks]]
 id = "TASK-0002"
 title = "Replace direct chrono use in orrery-core with jiff"
-status = "pending"
+status = "closed"
 severity = "low"
 created_at = "2026-11-19T01:58:11Z"
 
@@ -232,3 +232,10 @@ title = "Profiles keep default-role skills only (BUG-0017)"
 status = "closed"
 severity = "medium"
 created_at = "2026-11-20T01:36:53Z"
+
+[[items.tasks]]
+id = "TASK-0031"
+title = "Checkpoint list lengths (BUG-0019)"
+status = "open"
+severity = "medium"
+created_at = "2026-11-20T11:40:29Z"

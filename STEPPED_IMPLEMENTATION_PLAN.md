@@ -1,6 +1,6 @@
 # Orrery — Stepped Implementation Plan
 
-This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92), Phase M role protocol and skills (93–99) Phase N config safety and global profiles (100–110) and Phase O phase queue, step IDs and completed steps (111–122). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
+This plan builds Orrery one Argon step at a time: `orrery-core` (Steps 1–26), `orrery-tui` (27–32) and `orrery-cli` (33–37), then the Phase D follow-up (38–51), Phase E (52–57), Phase F (58), the Phase G audit (59–64), Phase H fixes (65–76), Phase I tidy-ups (77–79), Phase J secret-handling fixes (80–83), Phase K (84–87), Phase L configured tool arguments (88–92), Phase M role protocol and skills (93–99) Phase N config safety and global profiles (100–110) Phase O phase queue, step IDs and completed steps (111–122) and Phase P follow-ups (123–124). `ORRERY_TECHNICAL_SPECIFICATION.md` (the spec) is the design. Each step block below says which spec lines it implements, which files it may touch, which tests it must add, and the exact shell lines that gate it.
 
 Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line gates, `ALLOWED_FILES` / `READ_ONLY_REFS` / `FORBIDDEN_SCOPE`, a fixed `HALT_INVARIANT`). Step numbers, scopes and test names are unchanged from the 2026-11-12 plan. The old text is kept in `STEPPED_IMPLEMENTATION_PLAN.pre-2026-11-13.md`.
 
@@ -8,7 +8,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 ## Step Execution Roadmap
 
-**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (122). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
+**How to read this:** work goes strictly top to bottom through **Up Next**, one step at a time. A step moves to **Completed** only after its `POST_GATE` exits 0. Step numbers are permanent: spec §3.1 and §3.2 name steps by number, and Step 6's acceptance test counts the `### STEP ` headings in this file (124). Never add, remove or renumber a step heading without updating that test and the spec in the same change.
 
 **Who runs what:**
 - **Gemini** runs one step from its Argon block **in this file**, found by its heading (`### STEP <N>:`). It never works from a pasted copy. If a pasted prompt and this file disagree, this file wins and Gemini says so in its report instead of halting. Gemini never edits this file or the spec.
@@ -25,6 +25,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
+| 3 | **STEP 123** | `/goal` | Checkpoint list lengths (BUG-0019) | `crates/orrery-core/src/checkpoint.rs` | — |
+| 4 | **STEP 124** | `/goal` | `profile save` warns on project-only skills (BUG-0020) | `crates/orrery-cli/src/commands.rs`, `README.md` | STEP 123 |
 
 ### Completed
 
@@ -6359,3 +6361,83 @@ After Step 122 is committed. Proves the Phase O goal on a throwaway repo with th
    Expect: `Reset steps from step 1B to Pending`; 1B and U2 `[Pending]`, U1 still `[Passed]`.
 
 Report back: pass/fail for 2–5, and the `orrery status` output from step 4.
+
+## Phase P — Phase O follow-ups (Steps 123–124)
+
+**Phase goal (frozen until the phase ends):** fix the two findings Phase O turned up. A checkpoint whose step lists differ in length fails with a clear error instead of panicking (BUG-0019). `profile save` warns when a profile names skills that exist only in the source project, and the README says so (BUG-0020). Done when both steps pass; no user step. Design: spec §9.21 (`ORRERY_TECHNICAL_SPECIFICATION.md:1676-1685`).
+
+Written 2026-11-20 against `9f6bde6`. Facts checked while planning:
+- `reconcile_by_id` indexes `self.step_ids[cur]` and zips the three lists (`checkpoint.rs`), so mismatched lengths panic or silently drop steps. `load_state` is at `checkpoint.rs:606`, `reconcile` at `:345`.
+- `orrery reset` and `orrery mark` load the checkpoint through `load_state`, so the new error must not tell the user to run `reset`.
+- `profile save` is `commands.rs:440-449`. The CLI writes stderr with `writeln!(ctx.err, ..)` mapped to `Error::Io { path: "<stderr>" }` (`commands.rs:957`). `catalog_entries` already labels a skill `project`, `global` or `project_overrides_global`.
+- BUG-0004 (gate-failure counters on resume) stays pending: it needs a spec decision before code.
+
+### STEP 123: Checkpoint List Lengths
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 123: a checkpoint whose step_ids, step_hashes and step_statuses differ in length is rejected with a Validation error by load_state and reconcile, instead of panicking
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-core/src/checkpoint.rs
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1679-1681 (§9.21.1; binding)
+  - crates/orrery-core/src/checkpoint.rs:345 (`reconcile`), `reconcile_by_id`, 606 (`load_state`), `three_step_plan`
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `reset_from`, `mark_passed` and the reconcile algorithms are unchanged.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.21.1 ' $S && grep -q '^### Phase queue' README.md && ! grep -q 'fn check_lengths(' crates/orrery-core/src/checkpoint.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. checkpoint.rs: private `fn check_lengths(&self) -> Result<()>` on `WorkflowCheckpoint`, with the condition and message of §9.21.1 exactly.
+2. checkpoint.rs: `CheckpointManager::load_state` calls `state.check_lengths()?` right after `toml::from_str` succeeds; `WorkflowCheckpoint::reconcile` calls `self.check_lengths()?` as its first line.
+3. Test in checkpoint.rs `mod tests`, `mismatched_checkpoint_lengths_rejected`:
+   - `cp = WorkflowCheckpoint::new(&three_step_plan())`; `cp.step_ids.pop()`; `cp.reconcile(&three_step_plan())` → `Error::Validation { field, message }` with `field == "checkpoint"`, `message.contains("step_ids 2, step_hashes 3, step_statuses 3")` and `message.contains("workflow_state.toml aside")`.
+   - Save that `cp` with `CheckpointManager::save_state` in a `TempDir`; `load_state()` → `Error::Validation { field: "checkpoint", .. }`.
+   - A legacy checkpoint (`step_ids` cleared) with one `step_hashes` entry popped → `reconcile` → `Error::Validation { field: "checkpoint", .. }`. A legacy checkpoint with matching lengths and empty `step_ids` still reconciles `Ok`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'fn check_lengths(' crates/orrery-core/src/checkpoint.rs && test "$(grep -c 'check_lengths()?' crates/orrery-core/src/checkpoint.rs)" -ge 2 && test "$(cargo test -p orrery-core --lib --locked -- --list 2>/dev/null | grep -cE '^checkpoint::tests::mismatched_checkpoint_lengths_rejected: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
+
+### STEP 124: Profiles Warn on Project-Only Skills
+
+* **Recommended Command:** `/goal`
+
+```text
+[STEP_ID]
+STEP 124: orrery profile save warns on stderr when the profile names skills found only in this project, and the README says profile skills must be global or copied into the new project
+
+[SCOPE_LOCK]
+ALLOWED_FILES:
+  - crates/orrery-cli/src/commands.rs
+  - README.md
+READ_ONLY_REFS:
+  - ORRERY_TECHNICAL_SPECIFICATION.md:1683-1685 (§9.21.2; binding)
+  - crates/orrery-cli/src/commands.rs:440-449 (`ProfileCmd::Save`), 957 (stderr write pattern), 1277 (`test_ctx`), 4465 (`profile_save_then_init_with_profile`)
+  - crates/orrery-core/src/config.rs (`catalog_entries`, `CatalogKind`, `CatalogSource`)
+  - README.md "Global profiles"
+FORBIDDEN_SCOPE:
+  - Any file not listed in ALLOWED_FILES. `orrery-core` is not touched. `profile save` still saves and exits 0 when it warns.
+
+[PRE_GATE]
+S=ORRERY_TECHNICAL_SPECIFICATION.md && grep -q '^#### 9.21.2 ' $S && grep -q 'fn check_lengths(' crates/orrery-core/src/checkpoint.rs && ! grep -q 'names skills found only in this project' crates/orrery-cli/src/commands.rs && cargo test --workspace --locked >/dev/null 2>&1
+
+[MUTATION_SPEC]
+1. commands.rs `ProfileCmd::Save`: after the `Saved profile` line, build the sorted, de-duplicated list of §9.21.2 and, when non-empty, write the warning line to `ctx.err` with `writeln!`, mapping a write error to `Error::Io { path: PathBuf::from("<stderr>"), source }` as at 957.
+2. README.md "Global profiles": the one sentence of §9.21.2, after the existing MCP servers sentence.
+3. Test in commands.rs `mod tests`, `profile_save_warns_on_project_only_skills`: `test_ctx()` with `ctx.config_home = Some(<TempDir>/xdg)`; `init`; write `.orrery/skills/repo-rules.md`; `RoleCmd::Skills { id: "coder", names: ["repo-rules"] }`; `ProfileCmd::Save { name: "p" }` → 0, `err` contains `warning: profile 'p' names skills found only in this project: repo-rules`, and the profile file exists. Then `err.clear()`, write `<xdg>/orrery/skills/repo-rules.md` (now `project_overrides_global`), save again → 0 and `err` does not contain `warning:`.
+
+[POST_GATE]
+cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked && cargo deny check && cargo llvm-cov --workspace --locked --fail-under-lines 80 && grep -q 'names skills found only in this project' crates/orrery-cli/src/commands.rs && grep -q 'profile save` warns' README.md && test "$(cargo test -p orrery-cli --bin orrery --locked -- --list 2>/dev/null | grep -cE '^commands::tests::profile_save_warns_on_project_only_skills: test$')" -eq 1
+
+[HALT_INVARIANT]
+Halt and report if any POST_GATE command fails after two fix attempts, if a change is needed outside ALLOWED_FILES, or if this block contradicts the spec. Never commit; never edit the spec or this plan.
+```
