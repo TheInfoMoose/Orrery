@@ -4,17 +4,22 @@ schema_version = 2
 id = "TASK-0024"
 type = "task"
 title = "Engine --step by ID, step_id/item_id hook args (BUG-0001)"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "inbox"
 created_at = "2026-11-20T01:36:53Z"
-updated_at = "2026-11-20T01:36:53Z"
+updated_at = "2026-11-20T02:55:39Z"
 source_ref = "STEP 116"
 
 [effort]
-logged_time_minutes = 0
+logged_time_minutes = 6
 iteration_count = 1
+last_timer_session = "TASK-0024@2026-11-20T02:48:53Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "760c9ab"
+summary = "start_step resolves by ID then position; hooks and gates get orrery.step_id and item_id; build_engine uses load_run_plan; run --step takes an ID"
