@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -265,10 +266,20 @@ pub struct HookResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct OperatorPass {
+    pub step_id: String,
+    pub note: String,
+    pub recorded_at: jiff::Timestamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowCheckpoint {
     pub run_id: uuid::Uuid,
     pub plan_sha256: String,
     pub step_hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_ids: Vec<String>,
     pub step_statuses: Vec<StepStatus>,
     pub current_step_index: usize,
     pub round: usize,
@@ -283,6 +294,8 @@ pub struct WorkflowCheckpoint {
     pub operator_decision: Option<OperatorDecision>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hook_results: Vec<HookResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operator_passes: Vec<OperatorPass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,11 +311,23 @@ pub enum ReconcileOutcome {
 impl WorkflowCheckpoint {
     pub fn new(plan: &ImplementationPlan) -> Self {
         let step_hashes = plan.steps.iter().map(|s| s.sha256_hex.clone()).collect();
-        let step_statuses = vec![StepStatus::Pending; plan.steps.len()];
+        let step_ids = plan.steps.iter().map(|s| s.id.clone()).collect();
+        let step_statuses = plan
+            .steps
+            .iter()
+            .map(|s| {
+                if plan.completed_ids.contains(&s.id) {
+                    StepStatus::Passed
+                } else {
+                    StepStatus::Pending
+                }
+            })
+            .collect();
         Self {
             run_id: uuid::Uuid::new_v4(),
             plan_sha256: plan.plan_sha256(),
             step_hashes,
+            step_ids,
             step_statuses,
             current_step_index: 0,
             round: 0,
@@ -313,10 +338,27 @@ impl WorkflowCheckpoint {
             awaiting_reason: None,
             operator_decision: None,
             hook_results: Vec::new(),
+            operator_passes: Vec::new(),
         }
     }
 
     pub fn reconcile(&mut self, plan: &ImplementationPlan) -> Result<ReconcileOutcome> {
+        let outcome = if self.step_ids.is_empty() {
+            let outcome = self.reconcile_positional(plan)?;
+            self.step_ids = plan.steps.iter().map(|s| s.id.clone()).collect();
+            outcome
+        } else {
+            self.reconcile_by_id(plan)?
+        };
+        for (status, id) in self.step_statuses.iter_mut().zip(self.step_ids.iter()) {
+            if *status == StepStatus::Pending && plan.completed_ids.contains(id) {
+                *status = StepStatus::Passed;
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn reconcile_positional(&mut self, plan: &ImplementationPlan) -> Result<ReconcileOutcome> {
         let old_len = self.step_hashes.len();
         let new_len = plan.steps.len();
         let common_len = old_len.min(new_len);
@@ -385,6 +427,131 @@ impl WorkflowCheckpoint {
                 removed,
             })
         }
+    }
+
+    fn reconcile_by_id(&mut self, plan: &ImplementationPlan) -> Result<ReconcileOutcome> {
+        let cur = self.current_step_index;
+        if let Some(&status) = self.step_statuses.get(cur)
+            && matches!(
+                status,
+                StepStatus::InProgress | StepStatus::AwaitingOperator
+            )
+        {
+            let cur_id = &self.step_ids[cur];
+            let cur_hash = &self.step_hashes[cur];
+            let matches_active = plan
+                .steps
+                .get(cur)
+                .is_some_and(|s| &s.id == cur_id && &s.sha256_hex == cur_hash);
+            if !matches_active {
+                return Err(Error::Engine {
+                    step_number: cur + 1,
+                    message: format!(
+                        "step edited: step {cur_id} is in progress; finish it or run `orrery reset --step {cur_id}` before changing the plan or phase.toml"
+                    ),
+                });
+            }
+        }
+
+        let old_by_id: HashMap<&str, (&str, StepStatus)> = self
+            .step_ids
+            .iter()
+            .zip(self.step_hashes.iter().zip(self.step_statuses.iter()))
+            .map(|(id, (hash, &status))| (id.as_str(), (hash.as_str(), status)))
+            .collect();
+
+        let mut new_ids = Vec::with_capacity(plan.steps.len());
+        let mut new_hashes = Vec::with_capacity(plan.steps.len());
+        let mut new_statuses = Vec::with_capacity(plan.steps.len());
+        let mut changed_steps = Vec::new();
+        let mut appended = 0usize;
+
+        for (i, step) in plan.steps.iter().enumerate() {
+            if let Some(&(old_hash, status)) = old_by_id.get(step.id.as_str()) {
+                if old_hash != step.sha256_hex {
+                    if status == StepStatus::Passed && !plan.completed_ids.contains(&step.id) {
+                        return Err(Error::Engine {
+                            step_number: i + 1,
+                            message: format!(
+                                "step edited: step {} changed after it passed; run `orrery reset --step {}`",
+                                step.id, step.id
+                            ),
+                        });
+                    }
+                    changed_steps.push(i);
+                }
+                new_statuses.push(status);
+            } else {
+                new_statuses.push(StepStatus::Pending);
+                appended += 1;
+            }
+            new_ids.push(step.id.clone());
+            new_hashes.push(step.sha256_hex.clone());
+        }
+
+        let new_id_set: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        let removed = self
+            .step_ids
+            .iter()
+            .filter(|id| !new_id_set.contains(id.as_str()))
+            .count();
+
+        let old_cur_id = self.step_ids.get(cur).cloned();
+        let unchanged = self.step_ids == new_ids && changed_steps.is_empty();
+
+        self.step_ids = new_ids;
+        self.step_hashes = new_hashes;
+        self.step_statuses = new_statuses;
+        self.current_step_index = old_cur_id
+            .and_then(|id| self.step_ids.iter().position(|s| s == &id))
+            .unwrap_or(0);
+        self.plan_sha256 = plan.plan_sha256();
+
+        if unchanged {
+            Ok(ReconcileOutcome::Unchanged)
+        } else {
+            Ok(ReconcileOutcome::Updated {
+                changed_steps,
+                appended,
+                removed,
+            })
+        }
+    }
+
+    pub fn mark_passed(&mut self, index: usize, note: impl Into<String>) -> Result<()> {
+        let len = self.step_statuses.len();
+        if index >= len {
+            let step_number = index + 1;
+            return Err(Error::Engine {
+                step_number,
+                message: format!("step {step_number} is out of range 1..={len}"),
+            });
+        }
+
+        self.step_statuses[index] = StepStatus::Passed;
+        if index == self.current_step_index {
+            self.round = 0;
+            self.active_stage_index = None;
+            self.retry_count = 0;
+            self.phase = EnginePhase::Idle;
+            self.awaiting_reason = None;
+            self.operator_decision = None;
+        }
+
+        let step_id = self
+            .step_ids
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| (index + 1).to_string());
+        self.operator_passes.push(OperatorPass {
+            step_id,
+            note: note.into(),
+            recorded_at: jiff::Timestamp::now(),
+        });
+        while self.operator_passes.len() > MAX_HOOK_RESULTS {
+            self.operator_passes.remove(0);
+        }
+        Ok(())
     }
 
     pub fn reset_from(&mut self, step_number: usize) -> Result<()> {
@@ -1206,6 +1373,7 @@ extra = 123
 
         // Removing a trailing Pending step succeeds
         let mut cp_ok = WorkflowCheckpoint::new(&plan);
+        cp_ok.step_ids.clear();
         cp_ok.step_statuses[0] = StepStatus::Passed;
         let outcome = cp_ok.reconcile(&two_step_plan).unwrap();
         assert_eq!(
@@ -1221,9 +1389,170 @@ extra = 123
 
         // Removing a trailing Passed step fails with Error::Engine
         let mut cp_err = WorkflowCheckpoint::new(&plan);
+        cp_err.step_ids.clear();
         cp_err.step_statuses[2] = StepStatus::Passed;
         let err = cp_err.reconcile(&two_step_plan).unwrap_err();
         assert!(matches!(err, Error::Engine { step_number: 3, .. }));
+    }
+
+    #[test]
+    fn new_checkpoint_seeds_completed() {
+        let plan = ImplementationPlan::parse(
+            "### Completed\n| S 1 | done |\n## S 1: a\n## S 2: b\n",
+            "## S ",
+        )
+        .unwrap();
+        let cp = WorkflowCheckpoint::new(&plan);
+        assert_eq!(
+            cp.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Pending]
+        );
+        assert_eq!(cp.step_ids, vec!["1".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_by_id_reorders_and_appends() {
+        let plan1 =
+            ImplementationPlan::parse("## S 1: a\n## S 2: b\n## S 3: c\n", "## S ").unwrap();
+        let mut cp = WorkflowCheckpoint::new(&plan1);
+        cp.step_statuses[0] = StepStatus::Passed;
+
+        let plan2 =
+            ImplementationPlan::parse("## S 3: c\n## S 1: a\n## S 4: d\n", "## S ").unwrap();
+        let outcome = cp.reconcile(&plan2).unwrap();
+        assert!(matches!(
+            outcome,
+            ReconcileOutcome::Updated {
+                appended: 1,
+                removed: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            cp.step_ids,
+            vec!["3".to_string(), "1".to_string(), "4".to_string()]
+        );
+        assert_eq!(
+            cp.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Passed, StepStatus::Pending]
+        );
+        let expected_hashes: Vec<String> =
+            plan2.steps.iter().map(|s| s.sha256_hex.clone()).collect();
+        assert_eq!(cp.step_hashes, expected_hashes);
+    }
+
+    #[test]
+    fn reconcile_by_id_guards_active_step() {
+        let plan1 =
+            ImplementationPlan::parse("## S 1: a\n## S 2: b\n## S 3: c\n", "## S ").unwrap();
+        let mut cp = WorkflowCheckpoint::new(&plan1);
+        cp.step_statuses[1] = StepStatus::InProgress;
+        cp.current_step_index = 1;
+
+        let plan2 =
+            ImplementationPlan::parse("## S 2: b\n## S 1: a\n## S 3: c\n", "## S ").unwrap();
+        let err = cp.reconcile(&plan2).unwrap_err();
+        match err {
+            Error::Engine {
+                step_number: 2,
+                message,
+            } => {
+                assert!(message.starts_with("step edited:"));
+                assert!(message.contains("orrery reset --step 2"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(
+            cp.step_ids,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+    }
+
+    #[test]
+    fn reconcile_by_id_accepts_completed_edit() {
+        let plan1 = ImplementationPlan::parse("## S 1: a\nbody 1\n## S 2: b\n", "## S ").unwrap();
+        let mut cp = WorkflowCheckpoint::new(&plan1);
+        cp.step_statuses[0] = StepStatus::Passed;
+
+        let plan_with_completed = ImplementationPlan::parse(
+            "### Completed\n| S 1 | done |\n## S 1: a\nedited body 1\n## S 2: b\n",
+            "## S ",
+        )
+        .unwrap();
+        let mut cp_ok = cp.clone();
+        cp_ok.reconcile(&plan_with_completed).unwrap();
+        assert_eq!(cp_ok.step_statuses[0], StepStatus::Passed);
+        assert_eq!(
+            cp_ok.step_hashes[0],
+            plan_with_completed.steps[0].sha256_hex
+        );
+
+        let plan_without_completed =
+            ImplementationPlan::parse("## S 1: a\nedited body 1\n## S 2: b\n", "## S ").unwrap();
+        let err = cp.reconcile(&plan_without_completed).unwrap_err();
+        match err {
+            Error::Engine {
+                step_number: 1,
+                message,
+            } => {
+                assert!(message.starts_with("step edited:"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_checkpoint_reconciles_positionally() {
+        let plan = three_step_plan();
+        let fresh = WorkflowCheckpoint::new(&plan);
+        let serialized = toml::to_string(&fresh).unwrap();
+        let without_step_ids: String = serialized
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("step_ids"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut loaded: WorkflowCheckpoint = toml::from_str(&without_step_ids).unwrap();
+        assert!(loaded.step_ids.is_empty());
+
+        let outcome = loaded.reconcile(&plan).unwrap();
+        assert_eq!(outcome, ReconcileOutcome::Unchanged);
+        assert_eq!(
+            loaded.step_ids,
+            vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
+    }
+
+    #[test]
+    fn mark_passed_records_operator_pass() {
+        let plan = three_step_plan();
+        let mut cp = WorkflowCheckpoint::new(&plan);
+        cp.step_statuses[1] = StepStatus::AwaitingOperator;
+        cp.current_step_index = 1;
+        cp.phase = EnginePhase::AwaitingOperator;
+        cp.awaiting_reason = Some("awaiting review".to_string());
+        cp.round = 3;
+
+        cp.mark_passed(1, "validated on host").unwrap();
+        assert_eq!(cp.step_statuses[1], StepStatus::Passed);
+        assert_eq!(cp.phase, EnginePhase::Idle);
+        assert_eq!(cp.awaiting_reason, None);
+        assert_eq!(cp.round, 0);
+        assert_eq!(cp.operator_passes.len(), 1);
+        assert_eq!(cp.operator_passes[0].step_id, "2");
+        assert_eq!(cp.operator_passes[0].note, "validated on host");
+
+        let err = cp.mark_passed(9, "").unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Engine {
+                step_number: 10,
+                ..
+            }
+        ));
+
+        let encoded = toml::to_string(&cp).unwrap();
+        let decoded: WorkflowCheckpoint = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded.operator_passes, cp.operator_passes);
     }
 
     #[test]
