@@ -23,7 +23,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 
 | # | Step | Command | Scope | Target Files | Waits on |
 | :---: | :--- | :---: | :--- | :--- | :--- |
-| 1 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
 
 ### Completed
 
@@ -158,6 +157,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 123** | **COMPLETED** (2026-11-20, validate-step PASS) | `/goal` | Checkpoint list lengths (BUG-0019) | `crates/orrery-core/src/checkpoint.rs` |
 | **STEP 124** | **COMPLETED** (2026-11-20, validate-step PASS) | `/goal` | `profile save` warns on project-only skills (BUG-0020) | `crates/orrery-cli/src/commands.rs`, `README.md` |
 | **[USER] CI-1** | **COMPLETED** (2026-11-20, `gates` green on push runs, latest 44732110786 for `8ec8e74`; the `pull_request` trigger not yet exercised) | — | First CI run on GitHub | — |
+| **[USER] LIVE-3** | **COMPLETED** (2026-11-20, run by Claude in `~/scratch/orrery-live3b`: step 3 Passed with a `.tracker/`-only commit; step 4 validator summary began `LIVE3.`; the rerun's commit hook then failed on "no changes", parked) | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo |
 
 ---
 
