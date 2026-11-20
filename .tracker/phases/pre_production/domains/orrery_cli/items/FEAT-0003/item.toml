@@ -2,11 +2,11 @@
 id = "FEAT-0003"
 type = "feature"
 title = "Show effective default limits in orrery config show"
-status = "open"
+status = "closed"
 severity = "low"
 scope_ref = "orrery_cli"
 created_at = "2026-11-19T20:03:19Z"
-updated_at = "2026-11-20T00:47:25Z"
+updated_at = "2026-11-20T11:11:28Z"
 
 [effort]
 logged_time_minutes = 0
@@ -14,4 +14,8 @@ iteration_count = 1
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "67caf8b"
+summary = "Delivered by STEP 121: config show always prints the effective limits"

@@ -43,7 +43,7 @@ created_at = "2026-11-19T04:15:48Z"
 [[items.features]]
 id = "FEAT-0003"
 title = "Show effective default limits in orrery config show"
-status = "open"
+status = "closed"
 severity = "low"
 created_at = "2026-11-19T20:03:19Z"
 
@@ -99,6 +99,6 @@ created_at = "2026-11-20T01:36:53Z"
 [[items.tasks]]
 id = "TASK-0029"
 title = "Effective limits in config show (FEAT-0003)"
-status = "open"
+status = "closed"
 severity = "medium"
 created_at = "2026-11-20T01:36:53Z"
