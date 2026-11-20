@@ -25,7 +25,6 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **[USER] LOOP-2** | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo | **[USER]** runs the steps under "User Step: LOOP-2" after STEP 122. |
 
 ### Completed
 
@@ -156,6 +155,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 120** | **COMPLETED** (2026-11-20, validate-step PASS) | `/goal` | Profiles keep default-role skills only (BUG-0017) | `crates/orrery-core/src/config.rs` |
 | **STEP 121** | **COMPLETED** (2026-11-20, validate-step PASS) | `/goal` | Effective limits in `config show` (FEAT-0003) | `crates/orrery-cli/src/commands.rs` |
 | **STEP 122** | **COMPLETED** (2026-11-20, validate-step PASS) | `/goal` | README phase queue, step IDs, `mark` | `README.md` |
+| **[USER] LOOP-2** | **COMPLETED** (2026-11-20, steps 2–5 pass; step 4 rerun after adding the project-only `repo-rules` skill, BUG-0020) | — | Lettered plan, Completed seeding, queue with user items, `approve`, `mark`, `reset` by ID | scratch repo |
 
 ---
 
