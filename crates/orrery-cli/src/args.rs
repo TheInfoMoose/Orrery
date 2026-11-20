@@ -97,7 +97,7 @@ pub enum Command {
         #[arg(long)]
         cycles: Option<usize>,
         #[arg(long)]
-        step: Option<usize>,
+        step: Option<String>,
     },
     Approve,
     Reject {
@@ -694,6 +694,7 @@ mod tests {
             &["orrery", "profile", "save", "cloud-cli"],
             &["orrery", "profile", "list", "--json"],
             &["orrery", "run", "--loop", "--cycles", "3", "--step", "1"],
+            &["orrery", "run", "--step", "1A"],
             &["orrery", "approve"],
             &["orrery", "reject", "--feedback", "needs test coverage"],
             &["orrery", "resume"],

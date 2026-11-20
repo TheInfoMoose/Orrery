@@ -71,7 +71,7 @@ pub struct EngineContext {
 pub struct RunOptions {
     pub mode: Option<ExecutionMode>,
     pub cycles: Option<usize>,
-    pub start_step: Option<usize>,
+    pub start_step: Option<String>,
     pub wait_for_operator: bool,
 }
 
@@ -1400,14 +1400,20 @@ impl WorkflowEngine {
         let hook_role = build_hook_role(&self.ctx.project.hooks);
         let event_str = hook_event_name(event);
 
-        let orrery = serde_json::json!({
+        let mut orrery = serde_json::json!({
             "project_name": self.ctx.project.project_name,
             "run_id": state.run_id.to_string(),
             "step_number": step.number,
+            "step_id": step.id,
             "step_title": step.title,
             "plan_step_sha256": step.sha256_hex,
             "event": event_str,
         });
+        if let Some(item) = &step.item_id
+            && let Some(obj) = orrery.as_object_mut()
+        {
+            obj.insert("item_id".to_string(), serde_json::json!(item));
+        }
         let args = merge_tool_args(&hook_cfg.args, orrery);
 
         let exec_res = self
@@ -1495,14 +1501,20 @@ impl WorkflowEngine {
             allowed_mcp_tools: self.ctx.project.gate_tools.clone(),
             skills: Vec::new(),
         };
-        let orrery = serde_json::json!({
+        let mut orrery = serde_json::json!({
             "project_name": self.ctx.project.project_name,
             "run_id": state.run_id.to_string(),
             "step_number": step.number,
+            "step_id": step.id,
             "step_title": step.title,
             "plan_step_sha256": step.sha256_hex,
             "event": "gate",
         });
+        if let Some(item) = &step.item_id
+            && let Some(obj) = orrery.as_object_mut()
+        {
+            obj.insert("item_id".to_string(), serde_json::json!(item));
+        }
         let no_args = serde_json::Map::new();
 
         for (idx, tool_ref) in self.ctx.project.gate_tools.iter().enumerate() {
@@ -1628,25 +1640,20 @@ impl WorkflowEngine {
     fn pick_next_step_index(
         &self,
         state: &WorkflowCheckpoint,
-        start_step: Option<usize>,
+        start_step: Option<String>,
     ) -> Result<Option<usize>> {
-        if let Some(step_number) = start_step {
-            let Some(idx) = self
-                .ctx
-                .plan
-                .steps
-                .iter()
-                .position(|s| s.number == step_number)
-            else {
+        if let Some(arg) = start_step {
+            let Some(step) = self.ctx.plan.resolve_step(&arg) else {
                 return Err(Error::Engine {
-                    step_number,
-                    message: format!("step {step_number} not found in plan"),
+                    step_number: arg.parse::<usize>().unwrap_or(0),
+                    message: format!("step '{arg}' not found in the plan"),
                 });
             };
+            let idx = step.index;
             if state.step_statuses.get(idx) != Some(&StepStatus::Pending) {
                 return Err(Error::Engine {
-                    step_number,
-                    message: format!("step {step_number} is not Pending"),
+                    step_number: step.number,
+                    message: format!("step {} is not Pending", step.id),
                 });
             }
             return Ok(Some(idx));
@@ -2108,7 +2115,7 @@ pub async fn build_engine(store: &ConfigStore, backends: Backends) -> Result<Wor
     let inference = store.load_inference()?;
 
     let plan_path = store.resolve_safe_path(&project.plan_path)?;
-    let plan = ImplementationPlan::from_file(&plan_path, &project.step_marker)?;
+    let plan = crate::phase::load_run_plan(&plan_path, &project.step_marker, &store.orrery_dir())?;
 
     let referenced = referenced_mcp_servers(&project, &roles);
     let mut keychain_notices: Vec<String> = Vec::new();
@@ -3200,7 +3207,7 @@ mod tests {
                 RunOptions {
                     mode: None,
                     cycles: None,
-                    start_step: Some(1),
+                    start_step: Some("1".into()),
                     wait_for_operator: false,
                 },
                 CancellationToken::new(),
@@ -4037,7 +4044,7 @@ mod tests {
             .get("orrery")
             .and_then(|v| v.as_object())
             .unwrap();
-        assert_eq!(orrery_obj.len(), 6);
+        assert_eq!(orrery_obj.len(), 7);
         assert_eq!(
             orrery_obj.get("project_name").and_then(|v| v.as_str()),
             Some("test-project")
@@ -4050,6 +4057,11 @@ mod tests {
             orrery_obj.get("step_number").and_then(|v| v.as_u64()),
             Some(1)
         );
+        assert_eq!(
+            orrery_obj.get("step_id").and_then(|v| v.as_str()),
+            Some("1")
+        );
+        assert!(!orrery_obj.contains_key("item_id"));
         assert_eq!(
             orrery_obj.get("step_title").and_then(|v| v.as_str()),
             Some("1: First")
@@ -5299,7 +5311,7 @@ mod tests {
         let outcome = engine
             .run(
                 RunOptions {
-                    start_step: Some(2),
+                    start_step: Some("2".into()),
                     ..Default::default()
                 },
                 CancellationToken::new(),
@@ -5319,7 +5331,7 @@ mod tests {
         let err = engine
             .run(
                 RunOptions {
-                    start_step: Some(2),
+                    start_step: Some("2".into()),
                     ..Default::default()
                 },
                 CancellationToken::new(),
@@ -5335,7 +5347,7 @@ mod tests {
         let missing_err = engine
             .run(
                 RunOptions {
-                    start_step: Some(99),
+                    start_step: Some("99".into()),
                     ..Default::default()
                 },
                 CancellationToken::new(),
@@ -6887,5 +6899,115 @@ mod tests {
             vec![StepStatus::AwaitingOperator, StepStatus::Pending]
         );
         assert!(mock.invocations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_step_accepts_lettered_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.plan =
+            ImplementationPlan::parse("## Step 1A: a\nbody\n## Step 1B: b\nbody\n", "## Step ")
+                .unwrap();
+        let checkpoints = ctx.checkpoints.clone();
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(
+                RunOptions {
+                    start_step: Some("1B".into()),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let state = checkpoints.load_state().unwrap().unwrap();
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Passed]
+        );
+
+        let err = engine
+            .run(
+                RunOptions {
+                    start_step: Some("1C".into()),
+                    ..Default::default()
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            Error::Engine {
+                step_number,
+                message,
+            } => {
+                assert_eq!(step_number, 0);
+                assert!(message.contains("step '1C' not found"), "got: {message}");
+            }
+            other => panic!("expected Error::Engine for missing step 1C, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_args_include_item_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = test_context(
+            dir.path(),
+            &[
+                (RoleKind::Orchestrator, &["orch"]),
+                (RoleKind::Implementer, &["imp"]),
+                (RoleKind::Validator, &["val"]),
+            ],
+        );
+        ctx.plan.steps[0].item_id = Some("TASK-0001".into());
+        ctx.project.hooks.on_step_start = Some(HookConfig {
+            tool: "git:status".to_string(),
+            on_failure: HookFailure::Halt,
+            args: Default::default(),
+        });
+
+        let transport = Arc::new(MockMcpTransport::new("git").with_tool(
+            "status",
+            serde_json::json!({
+                "content": [{ "type": "text", "text": "clean tree" }]
+            }),
+        ));
+        let mut gk = McpGatekeeper::new();
+        gk.register("git", Arc::clone(&transport) as _, Vec::new());
+        ctx.gatekeeper = Arc::new(gk);
+
+        let mock = attach_mock_driver(&mut ctx);
+        script_passing_step(&mock, "orch", "imp", "val");
+
+        let engine = WorkflowEngine::new(ctx).unwrap();
+        let outcome = engine
+            .run(RunOptions::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(outcome, RunOutcome::Completed { steps_passed: 1 });
+
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 1);
+        let orrery_obj = calls[0]
+            .1
+            .get("orrery")
+            .and_then(|v| v.as_object())
+            .unwrap();
+        assert_eq!(
+            orrery_obj.get("item_id").and_then(|v| v.as_str()),
+            Some("TASK-0001")
+        );
     }
 }
