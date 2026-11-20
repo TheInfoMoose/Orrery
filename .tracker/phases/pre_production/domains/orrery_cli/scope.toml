@@ -33,6 +33,13 @@ status = "closed"
 severity = "high"
 created_at = "2026-11-19T02:21:11Z"
 
+[[items.bugs]]
+id = "BUG-0020"
+title = "Warn when a saved profile names project-only skills"
+status = "pending"
+severity = "low"
+created_at = "2026-11-20T11:34:14Z"
+
 [[items.features]]
 id = "FEAT-0002"
 title = "Let the operator mark a step Passed after host validation"

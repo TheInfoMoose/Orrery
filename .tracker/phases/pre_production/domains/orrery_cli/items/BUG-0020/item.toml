@@ -1,0 +1,17 @@
+[item]
+id = "BUG-0020"
+type = "bug"
+title = "Warn when a saved profile names project-only skills"
+status = "pending"
+severity = "low"
+scope_ref = "orrery_cli"
+created_at = "2026-11-20T11:34:14Z"
+updated_at = "2026-11-20T11:34:14Z"
+
+[effort]
+logged_time_minutes = 0
+iteration_count = 1
+
+[history]
+recurrence_count = 0
+previous_fixes = []
