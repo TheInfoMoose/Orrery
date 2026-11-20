@@ -1936,6 +1936,14 @@ impl ConfigStore {
     }
 
     pub fn init_project(&self, name: impl Into<String>) -> Result<ProjectConfig> {
+        self.init_project_with_profile(name, None)
+    }
+
+    pub fn init_project_with_profile(
+        &self,
+        name: impl Into<String>,
+        profile: Option<&ProjectProfile>,
+    ) -> Result<ProjectConfig> {
         let project_name = name.into();
         let existing = self.orrery_dir().join("project.toml");
         if existing.exists() {
@@ -1947,8 +1955,27 @@ impl ConfigStore {
                 ),
             });
         }
-        let project_cfg = ProjectConfig::default_template(project_name);
+        let mut project_cfg = ProjectConfig::default_template(project_name);
+        let mut defaults = default_roles_with_rules();
+        if let Some(profile) = profile {
+            profile.apply(&mut project_cfg);
+            for id in profile.role_skills.keys() {
+                if !defaults.iter().any(|(r, _)| &r.role_id == id) {
+                    return Err(Error::Validation {
+                        field: "role_skills".to_string(),
+                        message: format!("profile sets skills for unknown default role '{id}'"),
+                    });
+                }
+            }
+        }
         project_cfg.validate_staging()?;
+
+        for (role, _) in &mut defaults {
+            if let Some(skills) = profile.and_then(|p| p.role_skills.get(&role.role_id)) {
+                role.skills = skills.clone();
+            }
+            role.validate()?;
+        }
 
         let orrery_dir = self.orrery_dir();
         for sub in ["roles", "agents", "mcp", "checkpoints", "agent_io", "logs"] {
@@ -1956,7 +1983,7 @@ impl ConfigStore {
             fs::create_dir_all(&dir).map_err(|source| Error::Io { path: dir, source })?;
         }
 
-        for (role, rules_md) in default_roles_with_rules() {
+        for (role, rules_md) in defaults {
             self.save_role(&role, rules_md)?;
         }
 
@@ -5348,5 +5375,98 @@ max_context_tokens = 1024
             store.load_profile("bad"),
             Err(Error::TomlDe { .. })
         ));
+    }
+
+    #[test]
+    fn init_with_profile_applies_settings_and_skills() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+
+        let profile = ProjectProfile {
+            validation_mode: Some(ValidationMode::Agents),
+            max_step_retries: Some(2),
+            gate_tools: Some(vec!["hybrid:step_check".into()]),
+            role_skills: BTreeMap::from([
+                (
+                    "orchestrator".to_string(),
+                    vec!["hybrid-orchestrator".to_string(), "repo-rules".to_string()],
+                ),
+                ("coder".to_string(), vec!["repo-rules".to_string()]),
+            ]),
+            ..Default::default()
+        };
+
+        store
+            .init_project_with_profile("p", Some(&profile))
+            .unwrap();
+
+        let loaded = store.load_project().unwrap();
+        assert_eq!(loaded.project_name, "p");
+        assert_eq!(loaded.validation_mode, ValidationMode::Agents);
+        assert_eq!(loaded.max_step_retries, 2);
+        assert_eq!(loaded.gate_tools, vec!["hybrid:step_check".to_string()]);
+
+        let roles = store.load_roles().unwrap();
+        let role_by_id = |id: &str| roles.iter().find(|r| r.role_id == id).unwrap();
+        assert_eq!(
+            role_by_id("orchestrator").skills,
+            vec!["hybrid-orchestrator".to_string(), "repo-rules".to_string()]
+        );
+        assert_eq!(role_by_id("coder").skills, vec!["repo-rules".to_string()]);
+        assert!(role_by_id("validator").skills.is_empty());
+
+        let default_coder_rules = default_roles_with_rules()
+            .into_iter()
+            .find(|(r, _)| r.role_id == "coder")
+            .unwrap()
+            .1;
+        assert_eq!(store.load_role_rules("coder").unwrap(), default_coder_rules);
+    }
+
+    #[test]
+    fn init_with_bad_profile_writes_nothing() {
+        let global = tempfile::TempDir::new().unwrap();
+
+        let p_a = tempfile::TempDir::new().unwrap();
+        let store_a = ConfigStore::new(p_a.path(), Some(global.path().to_path_buf())).unwrap();
+        let bad_role = ProjectProfile {
+            role_skills: BTreeMap::from([("reviewer".to_string(), vec!["x".to_string()])]),
+            ..Default::default()
+        };
+        match store_a.init_project_with_profile("p", Some(&bad_role)) {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "role_skills");
+                assert!(message.contains("unknown default role 'reviewer'"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        assert!(!p_a.path().join(".orrery").exists());
+
+        let p_b = tempfile::TempDir::new().unwrap();
+        let store_b = ConfigStore::new(p_b.path(), Some(global.path().to_path_buf())).unwrap();
+        let bad_concurrency = ProjectProfile {
+            max_concurrent_agents: Some(0),
+            ..Default::default()
+        };
+        match store_b.init_project_with_profile("p", Some(&bad_concurrency)) {
+            Err(Error::Validation { field, .. }) => {
+                assert_eq!(field, "max_concurrent_agents");
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+        assert!(!p_b.path().join(".orrery").exists());
+
+        let p_c = tempfile::TempDir::new().unwrap();
+        let store_c = ConfigStore::new(p_c.path(), Some(global.path().to_path_buf())).unwrap();
+        let bad_skill = ProjectProfile {
+            role_skills: BTreeMap::from([("coder".to_string(), vec!["../x".to_string()])]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            store_c.init_project_with_profile("p", Some(&bad_skill)),
+            Err(Error::PathTraversal { .. })
+        ));
+        assert!(!p_c.path().join(".orrery").exists());
     }
 }
