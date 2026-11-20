@@ -2,11 +2,11 @@
 id = "BUG-0001"
 type = "bug"
 title = "Use the plan's step IDs instead of positional step numbers"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_core"
 created_at = "2026-11-19T01:58:11Z"
-updated_at = "2026-11-20T00:47:25Z"
+updated_at = "2026-11-20T03:07:26Z"
 
 [effort]
 logged_time_minutes = 0
@@ -14,4 +14,8 @@ iteration_count = 1
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "c07b19c"
+summary = "Fixed by STEPS 111, 116, 117: plan step IDs carried through parse, checkpoints, hook args and --step for run/reset/mark"

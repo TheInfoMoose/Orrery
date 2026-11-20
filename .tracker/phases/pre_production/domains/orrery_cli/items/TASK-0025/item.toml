@@ -4,17 +4,22 @@ schema_version = 2
 id = "TASK-0025"
 type = "task"
 title = "CLI reset/mark by ID, queue-aware status/ingest"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_cli"
 created_at = "2026-11-20T01:36:53Z"
-updated_at = "2026-11-20T01:36:53Z"
+updated_at = "2026-11-20T03:07:26Z"
 source_ref = "STEP 117"
 
 [effort]
-logged_time_minutes = 0
+logged_time_minutes = 10
 iteration_count = 1
+last_timer_session = "TASK-0025@2026-11-20T02:57:24Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "c07b19c"
+summary = "reset/mark --step take IDs (checkpoint step_ids first, then position); status/reset/mark/ingest load the run plan; status shows id/kind/item_id and [USER]"
