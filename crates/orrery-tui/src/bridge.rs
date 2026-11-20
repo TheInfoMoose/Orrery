@@ -10,7 +10,9 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use orrery_core::checkpoint::{CheckpointManager, OperatorDecision, StepStatus};
+use orrery_core::checkpoint::{
+    CheckpointManager, OperatorDecision, StepStatus, WorkflowCheckpoint,
+};
 use orrery_core::config::{ConfigStore, ProjectConfig};
 use orrery_core::engine::{Backends, EngineEvent, RunOptions, RunOutcome, build_engine};
 use orrery_core::plan::ImplementationPlan;
@@ -382,7 +384,11 @@ impl EngineController {
                         return Err(err);
                     }
                 };
-                let plan = match ImplementationPlan::from_file(&resolved, &app.config.step_marker) {
+                let plan = match orrery_core::phase::load_run_plan(
+                    &resolved,
+                    &app.config.step_marker,
+                    &self.store.orrery_dir(),
+                ) {
                     Ok(plan) => plan,
                     Err(err) => {
                         app.config.step_marker = self.store.load_project()?.step_marker;
@@ -649,13 +655,13 @@ fn load_step_statuses(
             }
             Err(e) => {
                 app.status_message = Some(e.to_string());
-                vec![StepStatus::Pending; plan.steps.len()]
+                WorkflowCheckpoint::new(plan).step_statuses
             }
         },
-        Ok(None) => vec![StepStatus::Pending; plan.steps.len()],
+        Ok(None) => WorkflowCheckpoint::new(plan).step_statuses,
         Err(e) => {
             app.status_message = Some(e.to_string());
-            vec![StepStatus::Pending; plan.steps.len()]
+            WorkflowCheckpoint::new(plan).step_statuses
         }
     }
 }
@@ -670,8 +676,13 @@ fn load_initial_app(store: &ConfigStore, project_root: &Path) -> Result<App> {
 
     match store
         .resolve_safe_path(&app.config.plan_path)
-        .and_then(|plan_path| ImplementationPlan::from_file(&plan_path, &app.config.step_marker))
-    {
+        .and_then(|plan_path| {
+            orrery_core::phase::load_run_plan(
+                &plan_path,
+                &app.config.step_marker,
+                &store.orrery_dir(),
+            )
+        }) {
         Ok(plan) => {
             app.step_statuses = load_step_statuses(store, &plan, &mut app);
             app.plan = Some(plan);
@@ -2229,5 +2240,72 @@ mod tests {
         assert_eq!(reloaded.max_step_retries, 9);
         assert_eq!(reloaded.limits.mcp_call_timeout_secs, 1800);
         assert_eq!(app.config.max_step_retries, 9);
+    }
+
+    #[test]
+    fn initial_statuses_seed_completed_steps() {
+        let tmp = TempDir::new().expect("tempdir");
+        let global_dir = tmp.path().join("global");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+
+        let store = ConfigStore::new(&project_dir, Some(global_dir)).expect("config store");
+        store.init_project("demo").expect("init project");
+
+        std::fs::write(
+            project_dir.join("PLAN.md"),
+            "### Completed\n| STEP 1 | done |\n### STEP 1: a\nA\n### STEP 2: b\nB\n",
+        )
+        .expect("write plan");
+
+        let mut cfg = store.load_project().expect("load project");
+        cfg.plan_path = PathBuf::from("PLAN.md");
+        cfg.step_marker = "### STEP ".into();
+        store.save_project(&cfg).expect("save project");
+
+        let app = load_initial_app(&store, &project_dir).expect("load initial app");
+        assert_eq!(
+            app.step_statuses,
+            vec![StepStatus::Passed, StepStatus::Pending]
+        );
+    }
+
+    #[test]
+    fn tui_plan_follows_phase_queue() {
+        let tmp = TempDir::new().expect("tempdir");
+        let global_dir = tmp.path().join("global");
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        std::fs::create_dir_all(&global_dir).expect("create global dir");
+
+        let store = ConfigStore::new(&project_dir, Some(global_dir)).expect("config store");
+        store.init_project("demo").expect("init project");
+
+        std::fs::write(
+            project_dir.join("PLAN.md"),
+            "### Completed\n| STEP 1 | done |\n### STEP 1: a\nA\n### STEP 2: b\nB\n",
+        )
+        .expect("write plan");
+
+        let mut cfg = store.load_project().expect("load project");
+        cfg.plan_path = PathBuf::from("PLAN.md");
+        cfg.step_marker = "### STEP ".into();
+        store.save_project(&cfg).expect("save project");
+
+        std::fs::write(
+            store.orrery_dir().join("phase.toml"),
+            "[[queue]]\nstep = \"2\"\n[[queue]]\nuser = \"U1\"\n",
+        )
+        .expect("write phase.toml");
+
+        let app = load_initial_app(&store, &project_dir).expect("load initial app");
+        let plan = app.plan.expect("plan loaded");
+        let step_ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(step_ids, vec!["2", "U1"]);
+        assert_eq!(
+            app.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Pending]
+        );
     }
 }
