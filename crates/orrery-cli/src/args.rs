@@ -43,6 +43,8 @@ pub enum Command {
         path: Option<PathBuf>,
         #[arg(long)]
         name: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
     },
     Ingest {
         md_file: PathBuf,
@@ -84,6 +86,10 @@ pub enum Command {
     Config {
         #[command(subcommand)]
         command: ConfigCmd,
+    },
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCmd,
     },
     Run {
         #[arg(long = "loop")]
@@ -468,6 +474,17 @@ pub enum ConfigCmd {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ProfileCmd {
+    Save {
+        name: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +690,9 @@ mod tests {
             &["orrery", "config", "set", "max_step_retries", "2"],
             &["orrery", "config", "show"],
             &["orrery", "config", "show", "--json"],
+            &["orrery", "init", "--profile", "cloud-cli"],
+            &["orrery", "profile", "save", "cloud-cli"],
+            &["orrery", "profile", "list", "--json"],
             &["orrery", "run", "--loop", "--cycles", "3", "--step", "1"],
             &["orrery", "approve"],
             &["orrery", "reject", "--feedback", "needs test coverage"],

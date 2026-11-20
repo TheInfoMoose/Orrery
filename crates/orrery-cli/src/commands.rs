@@ -9,8 +9,8 @@ use orrery_core::checkpoint::{
 use orrery_core::config::{
     AgentBackend, AgentConfig, ConfigScope, ConfigStore, ExecutionMode, HookConfig, HookEvent,
     HookFailure, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
-    McpTransportConfig, ProjectConfig, RoleConfig, RoleKind, WorkspaceMount, WriteToolSpec,
-    resolve_compose_file,
+    McpTransportConfig, ProjectConfig, ProjectProfile, RoleConfig, RoleKind, WorkspaceMount,
+    WriteToolSpec, resolve_compose_file,
 };
 use orrery_core::engine::{Backends, RunOptions, RunOutcome, build_engine};
 use orrery_core::plan::ImplementationPlan;
@@ -20,8 +20,8 @@ use orrery_core::{Error, Result};
 use tokio_util::sync::CancellationToken;
 
 use crate::args::{
-    AgentCmd, Command, ConfigCmd, GateCmd, HookCmd, InferenceCmd, McpCmd, RoleCmd, SecretCmd,
-    WorkflowCmd,
+    AgentCmd, Command, ConfigCmd, GateCmd, HookCmd, InferenceCmd, McpCmd, ProfileCmd, RoleCmd,
+    SecretCmd, WorkflowCmd,
 };
 
 pub type ReadSecretFn = Box<dyn FnMut() -> Result<String>>;
@@ -74,7 +74,11 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             orrery_tui::run_tui(root).await?;
             Ok(0)
         }
-        Command::Init { path, name } => {
+        Command::Init {
+            path,
+            name,
+            profile,
+        } => {
             let target = path.as_deref().unwrap_or(project);
             let store = ConfigStore::new(target, ctx.config_home.clone())?;
             let project_name = match name {
@@ -87,7 +91,13 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
                     .unwrap_or("orrery-project")
                     .to_string(),
             };
-            let cfg = store.init_project(project_name)?;
+            let cfg = match &profile {
+                Some(p) => {
+                    let loaded = store.load_profile(p)?;
+                    store.init_project_with_profile(project_name, Some(&loaded))?
+                }
+                None => store.init_project(project_name)?,
+            };
             write_stdout_line(
                 ctx,
                 &format!(
@@ -96,6 +106,9 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
                     store.orrery_dir().display()
                 ),
             )?;
+            if let Some(p) = &profile {
+                write_stdout_line(ctx, &format!("Applied profile '{p}'"))?;
+            }
             Ok(0)
         }
         Command::Ingest { md_file, marker } => {
@@ -121,6 +134,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
         Command::Gate { command } => dispatch_gate(command, project, ctx),
         Command::Hook { command } => dispatch_hook(command, project, ctx),
         Command::Config { command } => dispatch_config(command, project, ctx),
+        Command::Profile { command } => dispatch_profile(command, project, ctx),
         Command::Run {
             r#loop,
             cycles,
@@ -401,6 +415,34 @@ fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> 
                     let kind = kind_val.as_str().unwrap_or_default();
                     let source = source_val.as_str().unwrap_or_default();
                     write_stdout_line(ctx, &format!("  {kind} {} ({source})", entry.id))?;
+                }
+            }
+            Ok(0)
+        }
+    }
+}
+
+fn dispatch_profile(command: ProfileCmd, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
+    match command {
+        ProfileCmd::Save { name } => {
+            let profile =
+                ProjectProfile::from_project(&store.load_project()?, &store.load_roles()?);
+            let path = store.save_profile(&name, &profile)?;
+            write_stdout_line(
+                ctx,
+                &format!("Saved profile '{name}' to {}", path.display()),
+            )?;
+            Ok(0)
+        }
+        ProfileCmd::List { json } => {
+            let names = store.list_profiles()?;
+            if json {
+                let rendered = serde_json::to_string_pretty(&names)?;
+                write_stdout_line(ctx, &rendered)?;
+            } else {
+                for name in &names {
+                    write_stdout_line(ctx, name)?;
                 }
             }
             Ok(0)
@@ -1187,6 +1229,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("demo-app".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1234,6 +1277,7 @@ mod tests {
             Command::Init {
                 path: Some(sub_dir.clone()),
                 name: None,
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1256,6 +1300,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("ingest-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1303,6 +1348,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("bad-plan-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1342,6 +1388,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("show-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1437,6 +1484,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("stages-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1487,6 +1535,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("edit-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1580,6 +1629,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("invalid-edit-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1615,6 +1665,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("mode-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1668,6 +1719,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("gate-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1719,6 +1771,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("hook-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1781,6 +1834,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("hook-args-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1824,6 +1878,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("hook-bad-args-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -1902,6 +1957,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("gate-args-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2052,6 +2108,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("agents-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2168,6 +2225,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("risk-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2218,6 +2276,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("secret-reject-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2256,6 +2315,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("show-remove-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2343,6 +2403,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("inf-defaults-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2389,6 +2450,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("inf-lifecycle-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2473,6 +2535,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("inf-abs-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2529,6 +2592,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("inf-list-rm-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2608,6 +2672,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("role-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2714,6 +2779,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("mcp-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2827,6 +2893,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("mcp-unreach-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -2892,6 +2959,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("mcp-tools-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -3096,6 +3164,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("run-proj".to_string()),
+                profile: None,
             },
             dir,
             &mut ctx,
@@ -3726,6 +3795,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("demo".into()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -3906,6 +3976,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("role-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -4025,6 +4096,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("role-skills-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -4128,6 +4200,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("role-show-skills-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -4177,6 +4250,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("config-set-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -4252,6 +4326,7 @@ mod tests {
             Command::Init {
                 path: None,
                 name: Some("config-show-proj".to_string()),
+                profile: None,
             },
             dir.path(),
             &mut ctx,
@@ -4298,5 +4373,200 @@ mod tests {
             })),
             "got: {catalog:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn profile_save_then_init_with_profile() {
+        let dir_a = TempDir::new().expect("tempdir a");
+        let (mut ctx, out, _err) = test_ctx();
+        let xdg_dir = dir_a.path().join("xdg");
+        ctx.config_home = Some(xdg_dir.clone());
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("a".to_string()),
+                profile: None,
+            },
+            dir_a.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init a");
+
+        dispatch(
+            Command::Config {
+                command: ConfigCmd::Set {
+                    key: "validation_mode".to_string(),
+                    value: "agents".to_string(),
+                },
+            },
+            dir_a.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set validation_mode");
+
+        dispatch(
+            Command::Config {
+                command: ConfigCmd::Set {
+                    key: "max_step_retries".to_string(),
+                    value: "2".to_string(),
+                },
+            },
+            dir_a.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set max_step_retries");
+
+        dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: vec!["repo-rules".to_string()],
+                },
+            },
+            dir_a.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set coder skills");
+
+        out.clear();
+        let save_code = dispatch(
+            Command::Profile {
+                command: ProfileCmd::Save {
+                    name: "cloud".to_string(),
+                },
+            },
+            dir_a.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("profile save");
+        assert_eq!(save_code, 0);
+        assert!(
+            out.as_string().contains("Saved profile 'cloud' to "),
+            "got: {}",
+            out.as_string()
+        );
+        assert!(
+            xdg_dir
+                .join("orrery")
+                .join("profiles")
+                .join("cloud.toml")
+                .is_file()
+        );
+
+        let dir_b = TempDir::new().expect("tempdir b");
+        out.clear();
+        let init_code = dispatch(
+            Command::Init {
+                path: None,
+                name: Some("b".to_string()),
+                profile: Some("cloud".to_string()),
+            },
+            dir_b.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init b with profile");
+        assert_eq!(init_code, 0);
+        assert!(
+            out.as_string().contains("Applied profile 'cloud'"),
+            "got: {}",
+            out.as_string()
+        );
+
+        let store_b = ConfigStore::new(dir_b.path(), ctx.config_home.clone()).expect("store b");
+        let cfg_b = store_b.load_project().expect("load project b");
+        assert_eq!(cfg_b.validation_mode, ValidationMode::Agents);
+        assert_eq!(cfg_b.max_step_retries, 2);
+        assert_eq!(cfg_b.project_name, "b");
+        let coder_b = store_b
+            .load_roles()
+            .expect("load roles b")
+            .into_iter()
+            .find(|r| r.role_id == "coder")
+            .expect("coder role in b");
+        assert_eq!(coder_b.skills, vec!["repo-rules".to_string()]);
+
+        let dir_c = TempDir::new().expect("tempdir c");
+        let missing_res = dispatch(
+            Command::Init {
+                path: None,
+                name: Some("c".to_string()),
+                profile: Some("missing".to_string()),
+            },
+            dir_c.path(),
+            &mut ctx,
+        )
+        .await;
+        assert!(
+            matches!(missing_res, Err(Error::Validation { .. })),
+            "got: {missing_res:?}"
+        );
+        assert!(!dir_c.path().join(".orrery").exists());
+    }
+
+    #[tokio::test]
+    async fn profile_list_json() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+        ctx.config_home = Some(dir.path().join("xdg"));
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("p".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        for name in ["b", "a"] {
+            dispatch(
+                Command::Profile {
+                    command: ProfileCmd::Save {
+                        name: name.to_string(),
+                    },
+                },
+                dir.path(),
+                &mut ctx,
+            )
+            .await
+            .expect("save profile");
+        }
+
+        out.clear();
+        let json_code = dispatch(
+            Command::Profile {
+                command: ProfileCmd::List { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("profile list json");
+        assert_eq!(json_code, 0);
+        let listed: Vec<String> = serde_json::from_str(&out.as_string()).expect("parse json array");
+        assert_eq!(listed, vec!["a".to_string(), "b".to_string()]);
+
+        out.clear();
+        let text_code = dispatch(
+            Command::Profile {
+                command: ProfileCmd::List { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("profile list text");
+        assert_eq!(text_code, 0);
+        assert_eq!(out.as_string(), "a\nb\n");
     }
 }
