@@ -96,6 +96,13 @@ status = "pending"
 severity = "low"
 created_at = "2026-11-19T04:39:41Z"
 
+[[items.bugs]]
+id = "BUG-0017"
+title = "Profile saved from a project with custom-role skills cannot be applied"
+status = "pending"
+severity = "low"
+created_at = "2026-11-20T00:16:48Z"
+
 [[items.tasks]]
 id = "TASK-0001"
 title = "Resolve bare stdio MCP commands via PATHEXT on Windows"
