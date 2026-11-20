@@ -216,7 +216,7 @@ orrery profile list
 orrery init --name NewRepo --profile cloud-cli
 ```
 
-MCP servers named by a profile's gate or hooks must be present in the global `mcp/servers.toml` (or added to the new project) for a run to start.
+MCP servers named by a profile's gate or hooks must be present in the global `mcp/servers.toml` (or added to the new project) for a run to start. Skills named in `role_skills` must be in the global skills directory or copied into the new project's `.orrery/skills/`, and `orrery profile save` warns about skills found only in the source project.
 
 ## Security
 

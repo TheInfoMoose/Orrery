@@ -7,10 +7,10 @@ use orrery_core::checkpoint::{
     CheckpointManager, EnginePhase, OperatorDecision, StepStatus, WorkflowCheckpoint,
 };
 use orrery_core::config::{
-    AgentBackend, AgentConfig, ConfigScope, ConfigStore, ExecutionMode, HookConfig, HookEvent,
-    HookFailure, InferenceConfig, InferenceLifecycle, InferenceMode, McpServerConfig,
-    McpTransportConfig, ProjectConfig, ProjectProfile, RoleConfig, RoleKind, WorkspaceMount,
-    WriteToolSpec, resolve_compose_file,
+    AgentBackend, AgentConfig, CatalogKind, CatalogSource, ConfigScope, ConfigStore, ExecutionMode,
+    HookConfig, HookEvent, HookFailure, InferenceConfig, InferenceLifecycle, InferenceMode,
+    McpServerConfig, McpTransportConfig, ProjectConfig, ProjectProfile, RoleConfig, RoleKind,
+    WorkspaceMount, WriteToolSpec, resolve_compose_file,
 };
 use orrery_core::engine::{Backends, RunOptions, RunOutcome, build_engine};
 use orrery_core::phase::load_run_plan;
@@ -445,6 +445,33 @@ fn dispatch_profile(command: ProfileCmd, project: &Path, ctx: &mut CliContext) -
                 ctx,
                 &format!("Saved profile '{name}' to {}", path.display()),
             )?;
+            let entries = store.catalog_entries()?;
+            let mut project_only: Vec<&str> = profile
+                .role_skills
+                .values()
+                .flatten()
+                .map(String::as_str)
+                .filter(|skill| {
+                    entries.iter().any(|e| {
+                        e.kind == CatalogKind::Skill
+                            && e.source == CatalogSource::Project
+                            && e.id == *skill
+                    })
+                })
+                .collect();
+            project_only.sort_unstable();
+            project_only.dedup();
+            if !project_only.is_empty() {
+                writeln!(
+                    ctx.err,
+                    "warning: profile '{name}' names skills found only in this project: {}; copy them to the global skills directory or into each new project's .orrery/skills/",
+                    project_only.join(", ")
+                )
+                .map_err(|source| Error::Io {
+                    path: PathBuf::from("<stderr>"),
+                    source,
+                })?;
+            }
             Ok(0)
         }
         ProfileCmd::List { json } => {
@@ -4937,6 +4964,95 @@ mod tests {
         assert!(
             val["limits"]["mcp_call_timeout_secs"].is_number(),
             "got: {val}"
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_save_warns_on_project_only_skills() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, _out, err) = test_ctx();
+        let xdg_dir = dir.path().join("xdg");
+        ctx.config_home = Some(xdg_dir.clone());
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("warn-proj".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let project_skills = dir.path().join(".orrery").join("skills");
+        std::fs::create_dir_all(&project_skills).expect("create project skills dir");
+        std::fs::write(project_skills.join("repo-rules.md"), "# Repo rules\n")
+            .expect("write project skill");
+
+        dispatch(
+            Command::Role {
+                command: RoleCmd::Skills {
+                    id: "coder".to_string(),
+                    names: vec!["repo-rules".to_string()],
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("set coder skills");
+
+        let code = dispatch(
+            Command::Profile {
+                command: ProfileCmd::Save {
+                    name: "p".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("profile save project-only");
+        assert_eq!(code, 0);
+        assert!(
+            err.as_string().contains(
+                "warning: profile 'p' names skills found only in this project: repo-rules"
+            ),
+            "got: {}",
+            err.as_string()
+        );
+        assert!(
+            xdg_dir
+                .join("orrery")
+                .join("profiles")
+                .join("p.toml")
+                .is_file()
+        );
+
+        err.clear();
+        let global_skills = xdg_dir.join("orrery").join("skills");
+        std::fs::create_dir_all(&global_skills).expect("create global skills dir");
+        std::fs::write(global_skills.join("repo-rules.md"), "# Global repo rules\n")
+            .expect("write global skill");
+
+        let code = dispatch(
+            Command::Profile {
+                command: ProfileCmd::Save {
+                    name: "p".to_string(),
+                },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("profile save override");
+        assert_eq!(code, 0);
+        assert!(
+            !err.as_string().contains("warning:"),
+            "got: {}",
+            err.as_string()
         );
     }
 }
