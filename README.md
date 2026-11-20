@@ -112,6 +112,7 @@ TUI config changes reload `project.toml` from disk and write back only the chang
 
 <project_root>/.orrery/
 ├── project.toml
+├── phase.toml                                    # optional: this phase's run queue
 ├── roles/<role_id>.toml + .md
 ├── skills/<name>.md
 ├── agents/<agent_id>.toml
@@ -132,7 +133,7 @@ TUI config changes reload `project.toml` from disk and write back only the chang
 
 ### Hook and gate arguments
 
-Each hook and gate is called with its configured `args` merged with an `orrery` object (`project_name`, `run_id`, `step_number`, `step_title`, `plan_step_sha256`, `event`); `orrery` is a reserved key, and `args` cannot contain `null` (`neb:gate_run` below is an example gate tool name).
+Each hook and gate is called with its configured `args` merged with an `orrery` object (`project_name`, `run_id`, `step_number`, `step_title`, `plan_step_sha256`, `event`); `orrery` is a reserved key, and `args` cannot contain `null` (`neb:gate_run` below is an example gate tool name). The `orrery` object also carries `step_id`, and `item_id` when the queue sets one. Configured `args` are rejected if any string starts a token with an embedded secret pattern (`sk-`, `Bearer `, `AIza`, `ghp_`, `xox`).
 
 ```toml
 [hooks.on_step_pass]
@@ -173,11 +174,36 @@ orrery role skills coder repo-rules
 
 ### Project settings
 
-`orrery config set <KEY> <VALUE>` updates one of the nine settable project fields (`validation_mode`, `max_step_retries`, `max_concurrent_agents`, `limits.max_tool_calls`, `limits.model_idle_timeout_secs`, `limits.mcp_call_timeout_secs`, `limits.live_stream_ring_capacity`, `limits.live_stream_max_file_bytes`, `limits.live_stream_max_files`) and validates before saving. `orrery config show [--json]` prints the project configuration plus every catalog entry marked `global`, `project`, or `project_overrides_global`.
+`orrery config set <KEY> <VALUE>` updates one of the nine settable project fields (`validation_mode`, `max_step_retries`, `max_concurrent_agents`, `limits.max_tool_calls`, `limits.model_idle_timeout_secs`, `limits.mcp_call_timeout_secs`, `limits.live_stream_ring_capacity`, `limits.live_stream_max_file_bytes`, `limits.live_stream_max_files`) and validates before saving. `orrery config show [--json]` prints the project configuration plus every catalog entry marked `global`, `project`, or `project_overrides_global`. `config show` ends its project section with `limits (effective):`, the limits in force even when `project.toml` leaves them out.
 
 ```bash
 orrery config set validation_mode agents
 orrery config set limits.mcp_call_timeout_secs 1800
+```
+
+### Phase queue
+
+An optional `.orrery/phase.toml` defines an explicit run queue for the current phase with an optional `phase` label and `[[queue]]` entries (each with either `step` for a plan step ID or `user` for an operator item ID, an optional tracker `item`, and an optional `title` on `user` entries). The queue order is the run order and every other plan step is ignored; a `user` entry pauses the run until `orrery approve` (or `reject`), `item` reaches hooks and gates as `orrery.item_id`, and with no `phase.toml` the whole plan runs in file order.
+
+```toml
+phase = "O"
+[[queue]]
+step = "12A"
+item = "TASK-0042"
+[[queue]]
+user = "VM-1"
+title = "Boot test on the VM"
+[[queue]]
+step = "12B"
+```
+
+Step headings can carry step IDs: digits, optionally followed by uppercase letters (`12`, `12A`; gaps are allowed, and `--step` takes a step ID and falls back to 1-based position). Anywhere in the plan outside a code fence, a row of a `### Completed` table whose first cell is the step marker's label plus an ID (such as `STEP 12A`) starts that step `Passed`, and `orrery mark` records a host-validated pass directly in the checkpoint:
+
+```bash
+orrery status
+orrery run --step 12A
+orrery mark --step 12A --note "validated on the host"
+orrery reset --step 12A
 ```
 
 ### Global profiles
