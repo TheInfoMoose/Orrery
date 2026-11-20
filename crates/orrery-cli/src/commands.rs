@@ -13,7 +13,8 @@ use orrery_core::config::{
     WriteToolSpec, resolve_compose_file,
 };
 use orrery_core::engine::{Backends, RunOptions, RunOutcome, build_engine};
-use orrery_core::plan::ImplementationPlan;
+use orrery_core::phase::load_run_plan;
+use orrery_core::plan::{ImplementationPlan, StepKind};
 use orrery_core::security::{KeyringBackend, OsKeyringStore, SecretStore, SecretValue};
 use orrery_core::stream_log::{LogFollower, StreamEvent, tail_log};
 use orrery_core::{Error, Result};
@@ -116,12 +117,17 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             let mut cfg = store.load_project()?;
             let step_marker = marker.unwrap_or_else(|| cfg.step_marker.clone());
             let resolved = store.resolve_safe_path(&md_file)?;
-            let plan = ImplementationPlan::from_file(&resolved, &step_marker)?;
+            let plan = load_run_plan(&resolved, &step_marker, &store.orrery_dir())?;
             cfg.plan_path = md_file;
             cfg.step_marker = step_marker;
             store.save_project(&cfg)?;
             for step in &plan.steps {
-                write_stdout_line(ctx, &step.title)?;
+                let prefix = if step.kind == StepKind::User {
+                    "[USER] "
+                } else {
+                    ""
+                };
+                write_stdout_line(ctx, &format!("{prefix}{}", step.title))?;
             }
             Ok(0)
         }
@@ -164,6 +170,7 @@ pub async fn dispatch(command: Command, project: &Path, ctx: &mut CliContext) ->
             dispatch_run(opts, project, ctx).await
         }
         Command::Reset { step } => dispatch_reset(step, project, ctx),
+        Command::Mark { step, note } => dispatch_mark(step, note, project, ctx),
         Command::Status { json } => dispatch_status(json, project, ctx),
         Command::Logs { tail, follow } => dispatch_logs(tail, follow, project, ctx).await,
     }
@@ -1002,21 +1009,69 @@ fn dispatch_operator_decision(
     Ok(0)
 }
 
-fn dispatch_reset(step: usize, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+fn load_cli_plan(store: &ConfigStore, cfg: &ProjectConfig) -> Result<ImplementationPlan> {
+    let resolved = store.resolve_safe_path(&cfg.plan_path)?;
+    load_run_plan(&resolved, &cfg.step_marker, &store.orrery_dir())
+}
+
+fn resolve_checkpoint_step(state: &WorkflowCheckpoint, arg: &str) -> Result<usize> {
+    if let Some(idx) = state.step_ids.iter().position(|id| id == arg) {
+        return Ok(idx);
+    }
+    if let Ok(pos) = arg.parse::<usize>()
+        && (1..=state.step_statuses.len()).contains(&pos)
+    {
+        return Ok(pos - 1);
+    }
+    Err(Error::Validation {
+        field: "step".into(),
+        message: format!("step '{arg}' not found"),
+    })
+}
+
+fn dispatch_reset(step: String, project: &Path, ctx: &mut CliContext) -> Result<u8> {
     let store = ConfigStore::new(project, ctx.config_home.clone())?;
     let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
     let mut state = match checkpoints.load_state()? {
         Some(cp) => cp,
         None => {
             let cfg = store.load_project()?;
-            let resolved = store.resolve_safe_path(&cfg.plan_path)?;
-            let plan = ImplementationPlan::from_file(&resolved, &cfg.step_marker)?;
+            let plan = load_cli_plan(&store, &cfg)?;
             WorkflowCheckpoint::new(&plan)
         }
     };
-    state.reset_from(step)?;
+    let index = resolve_checkpoint_step(&state, &step)?;
+    state.reset_from(index + 1)?;
+    let id = state
+        .step_ids
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| (index + 1).to_string());
     checkpoints.save_state(&state)?;
-    write_stdout_line(ctx, &format!("Reset steps from step {step} to Pending"))?;
+    write_stdout_line(ctx, &format!("Reset steps from step {id} to Pending"))?;
+    Ok(0)
+}
+
+fn dispatch_mark(step: String, note: String, project: &Path, ctx: &mut CliContext) -> Result<u8> {
+    let store = ConfigStore::new(project, ctx.config_home.clone())?;
+    let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+    let mut state = match checkpoints.load_state()? {
+        Some(cp) => cp,
+        None => {
+            let cfg = store.load_project()?;
+            let plan = load_cli_plan(&store, &cfg)?;
+            WorkflowCheckpoint::new(&plan)
+        }
+    };
+    let index = resolve_checkpoint_step(&state, &step)?;
+    state.mark_passed(index, note)?;
+    let id = state
+        .step_ids
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| (index + 1).to_string());
+    checkpoints.save_state(&state)?;
+    write_stdout_line(ctx, &format!("Marked step {id} Passed"))?;
     Ok(0)
 }
 
@@ -1033,7 +1088,7 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
             ),
         });
     }
-    let plan = ImplementationPlan::from_file(&resolved, &cfg.step_marker)?;
+    let plan = load_cli_plan(&store, &cfg)?;
     let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
     let state = checkpoints.load_state()?;
 
@@ -1069,7 +1124,7 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
             0,
             0,
             None,
-            vec![StepStatus::Pending; plan.steps.len()],
+            WorkflowCheckpoint::new(&plan).step_statuses,
         ),
     };
 
@@ -1079,11 +1134,26 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
             .iter()
             .zip(statuses.iter())
             .map(|(step, status)| {
-                serde_json::json!({
+                let kind = match step.kind {
+                    StepKind::Agent => "agent",
+                    StepKind::User => "user",
+                };
+                let mut obj = serde_json::json!({
                     "number": step.number,
+                    "id": step.id,
+                    "kind": kind,
                     "title": step.title,
                     "status": status,
-                })
+                });
+                if let Some(item_id) = &step.item_id
+                    && let Some(map) = obj.as_object_mut()
+                {
+                    map.insert(
+                        "item_id".to_string(),
+                        serde_json::Value::String(item_id.clone()),
+                    );
+                }
+                obj
             })
             .collect();
         let payload = serde_json::json!({
@@ -1108,7 +1178,12 @@ fn dispatch_status(json: bool, project: &Path, ctx: &mut CliContext) -> Result<u
             write_stdout_line(ctx, &format!("Awaiting operator: {reason}"))?;
         }
         for (step, status) in plan.steps.iter().zip(statuses.iter()) {
-            write_stdout_line(ctx, &format!("[{status:?}] {}", step.title))?;
+            let prefix = if step.kind == StepKind::User {
+                "[USER] "
+            } else {
+                ""
+            };
+            write_stdout_line(ctx, &format!("[{status:?}] {prefix}{}", step.title))?;
         }
     }
     Ok(0)
@@ -3494,9 +3569,15 @@ mod tests {
         .await
         .expect("run");
 
-        let reset_code = dispatch(Command::Reset { step: 1 }, dir.path(), &mut ctx)
-            .await
-            .expect("reset --step 1");
+        let reset_code = dispatch(
+            Command::Reset {
+                step: "1".to_string(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("reset --step 1");
         assert_eq!(reset_code, 0);
 
         let store = ConfigStore::new(dir.path(), Some(test_config_home())).expect("store");
@@ -3571,11 +3652,11 @@ mod tests {
         assert_eq!(steps.len(), 2);
         assert_eq!(
             steps[0],
-            serde_json::json!({"number": 1, "title": "1: First", "status": "Passed"})
+            serde_json::json!({"number": 1, "id": "1", "kind": "agent", "title": "1: First", "status": "Passed"})
         );
         assert_eq!(
             steps[1],
-            serde_json::json!({"number": 2, "title": "2: Second", "status": "Pending"})
+            serde_json::json!({"number": 2, "id": "2", "kind": "agent", "title": "2: Second", "status": "Pending"})
         );
 
         out.clear();
@@ -4568,5 +4649,239 @@ mod tests {
         .expect("profile list text");
         assert_eq!(text_code, 0);
         assert_eq!(out.as_string(), "a\nb\n");
+    }
+
+    #[tokio::test]
+    async fn status_seeds_completed_steps() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("seed-proj".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let plan_md = "### Completed\n| STEP 1A | done |\n### STEP 1A: a\nA\n### STEP 1B: b\nB\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_md).expect("write PLAN.md");
+
+        dispatch(
+            Command::Ingest {
+                md_file: PathBuf::from("PLAN.md"),
+                marker: Some("### STEP ".into()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("ingest");
+
+        out.clear();
+        let code = dispatch(Command::Status { json: true }, dir.path(), &mut ctx)
+            .await
+            .expect("status --json");
+        assert_eq!(code, 0);
+
+        let val: serde_json::Value =
+            serde_json::from_str(&out.as_string()).expect("parse status json");
+        let steps = val["steps"].as_array().expect("steps array");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            (&steps[0]["id"], &steps[0]["kind"], &steps[0]["status"]),
+            (
+                &serde_json::json!("1A"),
+                &serde_json::json!("agent"),
+                &serde_json::json!("Passed")
+            )
+        );
+        assert_eq!(
+            (&steps[1]["id"], &steps[1]["kind"], &steps[1]["status"]),
+            (
+                &serde_json::json!("1B"),
+                &serde_json::json!("agent"),
+                &serde_json::json!("Pending")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_and_reset_take_step_ids() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("mark-proj".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let plan_md = "### STEP 1A: a\nA\n### STEP 1B: b\nB\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_md).expect("write PLAN.md");
+
+        dispatch(
+            Command::Ingest {
+                md_file: PathBuf::from("PLAN.md"),
+                marker: Some("### STEP ".into()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("ingest");
+
+        out.clear();
+        let mark_code = dispatch(
+            Command::Mark {
+                step: "1B".to_string(),
+                note: "host ok".to_string(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("mark 1B");
+        assert_eq!(mark_code, 0);
+        assert!(
+            out.as_string().contains("Marked step 1B Passed"),
+            "got: {}",
+            out.as_string()
+        );
+
+        let store = ConfigStore::new(dir.path(), ctx.config_home.clone()).expect("store");
+        let checkpoints = CheckpointManager::new(store.orrery_dir().join("checkpoints"));
+        let state = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(
+            state.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Passed]
+        );
+        assert_eq!(state.operator_passes[0].note, "host ok");
+
+        out.clear();
+        let reset_code = dispatch(
+            Command::Reset {
+                step: "1A".to_string(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("reset 1A");
+        assert_eq!(reset_code, 0);
+        assert!(
+            out.as_string()
+                .contains("Reset steps from step 1A to Pending"),
+            "got: {}",
+            out.as_string()
+        );
+
+        let state_after = checkpoints
+            .load_state()
+            .expect("load_state")
+            .expect("checkpoint");
+        assert_eq!(
+            state_after.step_statuses,
+            vec![StepStatus::Pending, StepStatus::Pending]
+        );
+
+        let bad_mark = dispatch(
+            Command::Mark {
+                step: "9Z".to_string(),
+                note: String::new(),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect_err("mark 9Z should fail");
+        match bad_mark {
+            Error::Validation { field, .. } => assert_eq!(field, "step"),
+            other => panic!("expected Error::Validation, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_and_status_follow_phase_queue() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("queue-proj".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        let plan_md = "### STEP 1A: First\nA\n### STEP 1B: Second\nB\n### STEP 2: Third\nC\n";
+        std::fs::write(dir.path().join("PLAN.md"), plan_md).expect("write PLAN.md");
+        std::fs::write(
+            dir.path().join(".orrery").join("phase.toml"),
+            "[[queue]]\nstep = \"2\"\nitem = \"TASK-0001\"\n[[queue]]\nuser = \"U1\"\ntitle = \"Check\"\n[[queue]]\nstep = \"1A\"\n",
+        )
+        .expect("write phase.toml");
+
+        out.clear();
+        let ingest_code = dispatch(
+            Command::Ingest {
+                md_file: PathBuf::from("PLAN.md"),
+                marker: Some("### STEP ".into()),
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("ingest");
+        assert_eq!(ingest_code, 0);
+        assert_eq!(out.as_string(), "2: Third\n[USER] U1: Check\n1A: First\n");
+
+        out.clear();
+        let json_code = dispatch(Command::Status { json: true }, dir.path(), &mut ctx)
+            .await
+            .expect("status --json");
+        assert_eq!(json_code, 0);
+        let val: serde_json::Value =
+            serde_json::from_str(&out.as_string()).expect("parse status json");
+        let steps = val["steps"].as_array().expect("steps array");
+        let ids: Vec<&str> = steps
+            .iter()
+            .map(|s| s["id"].as_str().expect("id"))
+            .collect();
+        let kinds: Vec<&str> = steps
+            .iter()
+            .map(|s| s["kind"].as_str().expect("kind"))
+            .collect();
+        assert_eq!(ids, vec!["2", "U1", "1A"]);
+        assert_eq!(kinds, vec!["agent", "user", "agent"]);
+        assert_eq!(steps[0]["item_id"], "TASK-0001");
+
+        out.clear();
+        let text_code = dispatch(Command::Status { json: false }, dir.path(), &mut ctx)
+            .await
+            .expect("status text");
+        assert_eq!(text_code, 0);
+        assert!(
+            out.as_string().contains("[Pending] [USER] U1: Check"),
+            "got: {}",
+            out.as_string()
+        );
     }
 }

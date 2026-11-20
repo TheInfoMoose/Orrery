@@ -107,7 +107,13 @@ pub enum Command {
     Resume,
     Reset {
         #[arg(long)]
-        step: usize,
+        step: String,
+    },
+    Mark {
+        #[arg(long)]
+        step: String,
+        #[arg(long, default_value = "")]
+        note: String,
     },
     Status {
         #[arg(long)]
@@ -699,6 +705,15 @@ mod tests {
             &["orrery", "reject", "--feedback", "needs test coverage"],
             &["orrery", "resume"],
             &["orrery", "reset", "--step", "2"],
+            &["orrery", "reset", "--step", "2A"],
+            &[
+                "orrery",
+                "mark",
+                "--step",
+                "1A",
+                "--note",
+                "validated on host",
+            ],
             &["orrery", "status", "--json"],
             &["orrery", "logs", "--tail", "100", "--follow"],
         ];
