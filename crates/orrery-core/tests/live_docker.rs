@@ -152,6 +152,9 @@ async fn live_cli_driver_reads_report() {
     let step = PlanStep {
         index: 0,
         number: 1,
+        id: "1".to_string(),
+        kind: orrery_core::plan::StepKind::Agent,
+        item_id: None,
         title: "1: Trivial check".to_string(),
         body: "Write report.toml.".to_string(),
         sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),

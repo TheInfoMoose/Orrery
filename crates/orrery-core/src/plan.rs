@@ -1,13 +1,24 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::{Error, Result};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StepKind {
+    #[default]
+    Agent,
+    User,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStep {
     pub index: usize,
     pub number: usize,
+    pub id: String,
+    pub kind: StepKind,
+    pub item_id: Option<String>,
     pub title: String,
     pub body: String,
     pub sha256_hex: String,
@@ -64,17 +75,29 @@ fn join_and_trim(lines: &[&str]) -> String {
     lines.join("\n").trim_end_matches('\n').to_string()
 }
 
-fn parse_title_number(title: &str) -> Option<usize> {
-    let digit_len = title.bytes().take_while(u8::is_ascii_digit).count();
+pub fn parse_step_id(title: &str) -> Option<&str> {
+    let bytes = title.as_bytes();
+    let digit_len = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
     if digit_len == 0 {
         return None;
     }
-    let rest = &title[digit_len..];
+    let letter_len = bytes[digit_len..]
+        .iter()
+        .take_while(|b| b.is_ascii_uppercase())
+        .count();
+    let id_len = digit_len + letter_len;
+    let rest = &title[id_len..];
     if rest.is_empty() || rest.starts_with(':') || rest.starts_with('.') || rest.starts_with(' ') {
-        title[..digit_len].parse::<usize>().ok()
+        Some(&title[..id_len])
     } else {
         None
     }
+}
+
+pub fn is_step_id(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let digit_len = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+    digit_len > 0 && bytes[digit_len..].iter().all(u8::is_ascii_uppercase)
 }
 
 impl ImplementationPlan {
@@ -140,37 +163,41 @@ impl ImplementationPlan {
             });
         }
 
-        let parsed_numbers: Vec<Option<usize>> = raw_steps
+        let parsed_ids: Vec<Option<String>> = raw_steps
             .iter()
-            .map(|(_, title, _)| parse_title_number(title))
+            .map(|(_, title, _)| parse_step_id(title).map(str::to_string))
             .collect();
-        let any_numbered = parsed_numbers.iter().any(Option::is_some);
+        let any_has_id = parsed_ids.iter().any(Option::is_some);
+        let mut seen_ids: HashMap<String, usize> = HashMap::new();
 
         let mut steps = Vec::with_capacity(raw_steps.len());
-        for (index, ((marker_line, title, body_lines), parsed_num)) in
-            raw_steps.into_iter().zip(parsed_numbers).enumerate()
+        for (index, ((marker_line, title, body_lines), parsed_id)) in
+            raw_steps.into_iter().zip(parsed_ids).enumerate()
         {
-            let expected_number = index + 1;
-            let number = if any_numbered {
-                match parsed_num {
-                    Some(n) if n == expected_number => n,
-                    Some(n) => {
-                        return Err(Error::PlanParse {
-                            line: marker_line,
-                            message: format!("expected step {expected_number}, found {n}"),
-                        });
+            let number = index + 1;
+            let id = if any_has_id {
+                match parsed_id {
+                    Some(id) => {
+                        if let Some(&first_line) = seen_ids.get(&id) {
+                            return Err(Error::PlanParse {
+                                line: marker_line,
+                                message: format!(
+                                    "duplicate step ID '{id}' (first used on line {first_line})"
+                                ),
+                            });
+                        }
+                        seen_ids.insert(id.clone(), marker_line);
+                        id
                     }
                     None => {
                         return Err(Error::PlanParse {
                             line: marker_line,
-                            message: format!(
-                                "unnumbered step where step {expected_number} was expected"
-                            ),
+                            message: "step heading without an ID (e.g. '12:' or '12A:') in a plan that uses IDs".into(),
                         });
                     }
                 }
             } else {
-                expected_number
+                number.to_string()
             };
 
             let body = join_and_trim(&body_lines);
@@ -180,6 +207,9 @@ impl ImplementationPlan {
             steps.push(PlanStep {
                 index,
                 number,
+                id,
+                kind: StepKind::Agent,
+                item_id: None,
                 title,
                 body,
                 sha256_hex: step_hash,
@@ -217,13 +247,22 @@ impl ImplementationPlan {
     pub fn step(&self, number: usize) -> Option<&PlanStep> {
         self.steps.iter().find(|s| s.number == number)
     }
+
+    pub fn step_by_id(&self, id: &str) -> Option<&PlanStep> {
+        self.steps.iter().find(|s| s.id == id)
+    }
+
+    pub fn resolve_step(&self, arg: &str) -> Option<&PlanStep> {
+        self.step_by_id(arg)
+            .or_else(|| arg.parse::<usize>().ok().and_then(|n| self.step(n)))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
 
-    use super::{ImplementationPlan, sha256_hex};
+    use super::{ImplementationPlan, StepKind, is_step_id, sha256_hex};
     use crate::Error;
 
     const SAMPLE_PLAN: &str = "intro\n## S 1: a\nbody a\n## S 2: b\nbody b\n";
@@ -299,9 +338,18 @@ mod tests {
     }
 
     #[test]
-    fn numbering_gap_rejected() {
-        let err = ImplementationPlan::parse("## S 1: a\n## S 3: b\n", "## S ").unwrap_err();
-        assert!(matches!(err, Error::PlanParse { line: 2, .. }));
+    fn ids_allow_gaps_and_letters() {
+        let plan =
+            ImplementationPlan::parse("## S 1: a\n## S 3: b\n## S 3A: c\n", "## S ").unwrap();
+        let ids: Vec<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
+        let numbers: Vec<usize> = plan.steps.iter().map(|s| s.number).collect();
+        assert_eq!(ids, vec!["1", "3", "3A"]);
+        assert_eq!(numbers, vec![1, 2, 3]);
+        assert!(plan.steps.iter().all(|s| s.kind == StepKind::Agent));
+        assert!(plan.steps.iter().all(|s| s.item_id.is_none()));
+        assert!(is_step_id("3A"));
+        assert!(!is_step_id("3a"));
+        assert!(!is_step_id("A3"));
     }
 
     #[test]
@@ -311,11 +359,44 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_id_rejected() {
+        let err =
+            ImplementationPlan::parse("## S 1: a\n## S 2: b\n## S 1: c\n", "## S ").unwrap_err();
+        match err {
+            Error::PlanParse { line: 3, message } => {
+                assert!(message.contains("duplicate step ID '1'"));
+                assert!(message.contains("line 1"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn unnumbered_titles_use_index() {
         let plan = ImplementationPlan::parse("## S alpha\n## S beta\n", "## S ").unwrap();
         assert_eq!(plan.steps.len(), 2);
         assert_eq!(plan.steps[0].number, 1);
+        assert_eq!(plan.steps[0].id, "1");
         assert_eq!(plan.steps[1].number, 2);
+        assert_eq!(plan.steps[1].id, "2");
+    }
+
+    #[test]
+    fn resolve_step_prefers_id_then_position() {
+        let plan = ImplementationPlan::parse("## S 2: a\n## S 1: b\n", "## S ").unwrap();
+        assert_eq!(
+            plan.resolve_step("1").map(|s| s.title.as_str()),
+            Some("1: b")
+        );
+        assert!(plan.resolve_step("9").is_none());
+        assert_eq!(plan.step_by_id("2").map(|s| s.title.as_str()), Some("2: a"));
+
+        let lettered = ImplementationPlan::parse("## S 1A: a\n## S 1B: b\n", "## S ").unwrap();
+        assert_eq!(
+            lettered.resolve_step("2").map(|s| s.title.as_str()),
+            Some("1B: b")
+        );
+        assert!(lettered.resolve_step("1C").is_none());
     }
 
     #[test]
@@ -379,6 +460,7 @@ mod tests {
         assert_eq!(plan.steps.len(), 122);
         let numbers: Vec<usize> = plan.steps.iter().map(|s| s.number).collect();
         assert_eq!(numbers, (1..=122).collect::<Vec<_>>());
+        assert!(plan.steps.iter().all(|s| s.id == s.number.to_string()));
         assert!(plan.steps[5].title.starts_with("6: "));
     }
 }

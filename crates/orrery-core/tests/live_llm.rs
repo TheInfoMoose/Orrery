@@ -68,6 +68,9 @@ async fn live_single_turn() {
     let step = PlanStep {
         index: 0,
         number: 1,
+        id: "1".to_string(),
+        kind: orrery_core::plan::StepKind::Agent,
+        item_id: None,
         title: "1: Trivial check".to_string(),
         body: "Call submit_report immediately with status Complete and summary 'done'.".to_string(),
         sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
@@ -151,6 +154,9 @@ async fn live_cloud_api_turn() {
     let step = PlanStep {
         index: 0,
         number: 1,
+        id: "1".to_string(),
+        kind: orrery_core::plan::StepKind::Agent,
+        item_id: None,
         title: "1: Trivial check".to_string(),
         body: "Call submit_report immediately with status Complete and summary 'done'.".to_string(),
         sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),

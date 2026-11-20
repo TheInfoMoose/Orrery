@@ -1357,6 +1357,9 @@ mod tests {
         PlanStep {
             index: 0,
             number: 1,
+            id: "1".to_string(),
+            kind: crate::plan::StepKind::Agent,
+            item_id: None,
             title: "1: Implement parser".to_string(),
             body: "Build the parser and add unit tests.".to_string(),
             sha256_hex: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
