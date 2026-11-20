@@ -25,9 +25,8 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | :---: | :--- | :---: | :--- | :--- | :--- |
 | 1 | **[USER] CI-1** | — | First CI run on GitHub | — | **[USER]** runs the steps under "User Step: CI-1". |
 | 2 | **[USER] LIVE-3** | — | Fresh `init` passes on local 27B; skill reaches prompt | scratch repo | **[USER]** runs the steps under "User Step: LIVE-3". |
-| 3 | **STEP 109** | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` | STEP 108 |
-| 4 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
-| 5 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
+| 3 | **STEP 110** | `/goal` | README config, profiles and gate routing | `README.md` | STEP 109 |
+| 4 | **[USER] LOOP-1** | — | Profile init, init refusal, TUI keeps CLI edits, Run ↔ Loop | scratch repo | **[USER]** runs the steps under "User Step: LOOP-1" after STEP 110. |
 
 ### Completed
 
@@ -143,6 +142,7 @@ Restructured 2026-11-13 to the Nebulous plan format (roadmap tables, one-line ga
 | **STEP 106** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | CLI `config set` / `config show` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs`, `crates/orrery-cli/Cargo.toml`, `Cargo.lock` |
 | **STEP 107** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `ProjectProfile`, load/save/list profiles | `crates/orrery-core/src/config.rs` |
 | **STEP 108** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | `init_project_with_profile` | `crates/orrery-core/src/config.rs` |
+| **STEP 109** | **COMPLETED** (2026-11-19, validate-step PASS) | `/goal` | CLI `init --profile`, `profile save` / `list` | `crates/orrery-cli/src/args.rs`, `crates/orrery-cli/src/commands.rs` |
 
 ---
 
