@@ -4,17 +4,22 @@ schema_version = 2
 id = "TASK-0016"
 type = "task"
 title = "init_project_with_profile"
-status = "open"
+status = "closed"
 severity = "medium"
 scope_ref = "orrery_core"
 created_at = "2026-11-19T04:39:27Z"
-updated_at = "2026-11-19T04:39:27Z"
+updated_at = "2026-11-20T00:16:09Z"
 source_ref = "STEP 108"
 
 [effort]
-logged_time_minutes = 0
+logged_time_minutes = 3
 iteration_count = 1
+last_timer_session = "TASK-0016@2026-11-20T00:12:31Z"
 
 [history]
 recurrence_count = 0
-previous_fixes = []
+
+[[history.previous_fixes]]
+date = "2026-11-20"
+commit = "2a7e6bd"
+summary = "Added init_project_with_profile (validates profile before writing anything); init_project delegates with None"
