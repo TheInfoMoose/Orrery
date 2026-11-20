@@ -35,6 +35,7 @@ Initialize a project, register the `coder-14b` inference server at `http://127.0
 ```bash
 # 1. Initialize .orrery/ with the default 3-stage template
 orrery init --name my-service
+# (`orrery init` refuses a directory that already has `.orrery/project.toml` with exit 1; move `.orrery/` aside to start over.)
 
 # 2. Register an existing llama.cpp inference server
 orrery inference add --id coder-14b --endpoint http://127.0.0.1:8080
@@ -97,12 +98,15 @@ Launch the TUI with `orrery` (or `orrery <PATH>`).
 
 In the `Ingest` modal, `Tab` / `BackTab` switches between the plan path input and the step marker input.
 
+TUI config changes reload `project.toml` from disk and write back only the changed setting, so CLI or hand edits made while the TUI is open are kept.
+
 ## Project layout
 
 ```text
 ~/.config/orrery/                 # Global catalog (optional). Project files override by id.
 ├── roles/<role_id>.toml + .md
 ├── skills/<name>.md
+├── profiles/<name>.toml
 ├── agents/<agent_id>.toml
 └── mcp/servers.toml
 
@@ -162,7 +166,31 @@ skills = ["house-style"]
 
 ```bash
 orrery role add --id reviewer --name Reviewer --kind validator --rules-file reviewer.md --skill house-style
+orrery role skills coder repo-rules
 ```
+
+`orrery role skills <ID> [NAME]...` sets an existing role's skills (passing no names clears them, and `orrery role show <ID>` lists them). In `Agents` validation mode, a failed gate routes back to the Implementer stage with the gate output.
+
+### Project settings
+
+`orrery config set <KEY> <VALUE>` updates one of the nine settable project fields (`validation_mode`, `max_step_retries`, `max_concurrent_agents`, `limits.max_tool_calls`, `limits.model_idle_timeout_secs`, `limits.mcp_call_timeout_secs`, `limits.live_stream_ring_capacity`, `limits.live_stream_max_file_bytes`, `limits.live_stream_max_files`) and validates before saving. `orrery config show [--json]` prints the project configuration plus every catalog entry marked `global`, `project`, or `project_overrides_global`.
+
+```bash
+orrery config set validation_mode agents
+orrery config set limits.mcp_call_timeout_secs 1800
+```
+
+### Global profiles
+
+A global profile lives at `~/.config/orrery/profiles/<name>.toml` (`$XDG_CONFIG_HOME/orrery/profiles/<name>.toml`) and captures reusable workflow settings (`step_marker`, `execution_mode`, `cycle_count`, `max_concurrent_agents`, `max_step_retries`, `validation_mode`, `gate_tools`, `gate_args`, `stages`, `hooks`, `limits`, and `role_skills` for default roles), never `project_name`, `plan_path`, or `inference`.
+
+```bash
+orrery profile save cloud-cli
+orrery profile list
+orrery init --name NewRepo --profile cloud-cli
+```
+
+MCP servers named by a profile's gate or hooks must be present in the global `mcp/servers.toml` (or added to the new project) for a run to start.
 
 ## Security
 
