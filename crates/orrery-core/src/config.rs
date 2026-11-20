@@ -1548,6 +1548,46 @@ fn json_contains_null(value: &serde_json::Value) -> bool {
     }
 }
 
+fn secret_token_match(value: &str) -> Option<&'static str> {
+    let bytes = value.as_bytes();
+    for pattern in EMBEDDED_SECRET_PATTERNS {
+        for (idx, _) in value.match_indices(pattern) {
+            if idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric() {
+                return Some(pattern);
+            }
+        }
+    }
+    None
+}
+
+fn check_args_no_embedded_secret(field: &str, value: &serde_json::Value) -> Result<()> {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(pattern) = secret_token_match(s) {
+                return Err(Error::Security {
+                    message: format!(
+                        "field '{field}' appears to contain an embedded secret matching '{pattern}'"
+                    ),
+                });
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                check_args_no_embedded_secret(&format!("{field}[{i}]"), item)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                check_args_no_embedded_secret(&format!("{field}.{key}"), item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn validate_tool_args(
     args: &serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -1563,6 +1603,9 @@ pub fn validate_tool_args(
             field: field.to_string(),
             message: "null is not allowed (project.toml can't store it)".to_string(),
         });
+    }
+    for (key, value) in args {
+        check_args_no_embedded_secret(&format!("{field}.{key}"), value)?;
     }
     Ok(())
 }
@@ -5468,5 +5511,70 @@ max_context_tokens = 1024
             Err(Error::PathTraversal { .. })
         ));
         assert!(!p_c.path().join(".orrery").exists());
+    }
+
+    #[test]
+    fn tool_args_reject_embedded_secrets() {
+        let top = serde_json::json!({"token": "sk-abc123"})
+            .as_object()
+            .unwrap()
+            .clone();
+        match validate_tool_args(&top, "hooks.on_step_start.args") {
+            Err(Error::Security { message }) => {
+                assert!(message.contains("hooks.on_step_start.args.token"));
+                assert!(message.contains("'sk-'"));
+            }
+            other => panic!("expected Security error, got {other:?}"),
+        }
+
+        let nested = serde_json::json!({"headers": {"auth": "Bearer abc"}})
+            .as_object()
+            .unwrap()
+            .clone();
+        match validate_tool_args(&nested, "hooks.on_step_start.args") {
+            Err(Error::Security { message }) => {
+                assert!(message.contains("headers.auth"));
+            }
+            other => panic!("expected Security error, got {other:?}"),
+        }
+
+        let list = serde_json::json!({"list": ["ok", "ghp_123"]})
+            .as_object()
+            .unwrap()
+            .clone();
+        match validate_tool_args(&list, "hooks.on_step_start.args") {
+            Err(Error::Security { message }) => {
+                assert!(message.contains("list[1]"));
+            }
+            other => panic!("expected Security error, got {other:?}"),
+        }
+
+        let hook = HookConfig {
+            tool: "neb:git_commit_documented".into(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::json!({"summary": "xoxb-1"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        assert!(matches!(
+            hook.validate("hooks.on_step_pass.tool"),
+            Err(Error::Security { .. })
+        ));
+    }
+
+    #[test]
+    fn tool_args_allow_secret_lookalikes() {
+        let args = serde_json::json!({
+            "script": "validate-task-step.sh",
+            "flag": "--disk-check",
+            "note": "risk-free",
+            "n": 3,
+            "dry_run": false
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        validate_tool_args(&args, "hooks.on_step_start.args").unwrap();
     }
 }
