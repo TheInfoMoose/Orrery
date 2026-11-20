@@ -399,8 +399,10 @@ fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> 
             let cfg = store.load_project()?;
             let catalog = store.catalog_entries()?;
             if json {
+                let limits = cfg.limits.clone();
                 let payload = serde_json::json!({
                     "project": cfg,
+                    "limits": limits,
                     "catalog": catalog,
                 });
                 let rendered = serde_json::to_string_pretty(&payload)?;
@@ -415,6 +417,9 @@ fn dispatch_config(command: ConfigCmd, project: &Path, ctx: &mut CliContext) -> 
                 )?;
                 let project_toml = toml::to_string_pretty(&cfg)?;
                 write_stdout_line(ctx, &project_toml)?;
+                write_stdout_line(ctx, "limits (effective):")?;
+                let limits_toml = toml::to_string_pretty(&cfg.limits)?;
+                write_stdout_line(ctx, &limits_toml)?;
                 write_stdout_line(ctx, "catalog:")?;
                 for entry in &catalog {
                     let kind_val = serde_json::to_value(entry.kind)?;
@@ -4882,6 +4887,56 @@ mod tests {
             out.as_string().contains("[Pending] [USER] U1: Check"),
             "got: {}",
             out.as_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn config_show_prints_effective_limits() {
+        let dir = TempDir::new().expect("tempdir");
+        let (mut ctx, out, _err) = test_ctx();
+
+        dispatch(
+            Command::Init {
+                path: None,
+                name: Some("limits-show-proj".to_string()),
+                profile: None,
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("init");
+
+        out.clear();
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Show { json: false },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("config show text");
+        assert_eq!(code, 0);
+        let text = out.as_string();
+        assert!(text.contains("limits (effective):"), "got: {text}");
+        assert!(text.contains("mcp_call_timeout_secs = "), "got: {text}");
+
+        out.clear();
+        let code = dispatch(
+            Command::Config {
+                command: ConfigCmd::Show { json: true },
+            },
+            dir.path(),
+            &mut ctx,
+        )
+        .await
+        .expect("config show json");
+        assert_eq!(code, 0);
+        let val: serde_json::Value = serde_json::from_str(&out.as_string()).expect("parse json");
+        assert!(
+            val["limits"]["mcp_call_timeout_secs"].is_number(),
+            "got: {val}"
         );
     }
 }
