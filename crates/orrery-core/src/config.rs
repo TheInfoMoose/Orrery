@@ -713,6 +713,95 @@ impl ProjectConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectProfile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<ExecutionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_agents: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_step_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_mode: Option<ValidationMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_args: Option<BTreeMap<String, serde_json::Map<String, serde_json::Value>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<StageConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<RuntimeLimits>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub role_skills: BTreeMap<String, Vec<String>>,
+}
+
+impl ProjectProfile {
+    pub fn from_project(cfg: &ProjectConfig, roles: &[RoleConfig]) -> Self {
+        let role_skills = roles
+            .iter()
+            .filter(|r| !r.skills.is_empty())
+            .map(|r| (r.role_id.clone(), r.skills.clone()))
+            .collect();
+        Self {
+            step_marker: Some(cfg.step_marker.clone()),
+            execution_mode: Some(cfg.execution_mode),
+            cycle_count: Some(cfg.cycle_count),
+            max_concurrent_agents: Some(cfg.max_concurrent_agents),
+            max_step_retries: Some(cfg.max_step_retries),
+            validation_mode: Some(cfg.validation_mode),
+            gate_tools: Some(cfg.gate_tools.clone()),
+            gate_args: Some(cfg.gate_args.clone()),
+            stages: Some(cfg.stages.clone()),
+            hooks: Some(cfg.hooks.clone()),
+            limits: Some(cfg.limits.clone()),
+            role_skills,
+        }
+    }
+
+    pub fn apply(&self, cfg: &mut ProjectConfig) {
+        if let Some(v) = &self.step_marker {
+            cfg.step_marker = v.clone();
+        }
+        if let Some(v) = self.execution_mode {
+            cfg.execution_mode = v;
+        }
+        if let Some(v) = self.cycle_count {
+            cfg.cycle_count = v;
+        }
+        if let Some(v) = self.max_concurrent_agents {
+            cfg.max_concurrent_agents = v;
+        }
+        if let Some(v) = self.max_step_retries {
+            cfg.max_step_retries = v;
+        }
+        if let Some(v) = self.validation_mode {
+            cfg.validation_mode = v;
+        }
+        if let Some(v) = &self.gate_tools {
+            cfg.gate_tools = v.clone();
+        }
+        if let Some(v) = &self.gate_args {
+            cfg.gate_args = v.clone();
+        }
+        if let Some(v) = &self.stages {
+            cfg.stages = v.clone();
+        }
+        if let Some(v) = &self.hooks {
+            cfg.hooks = v.clone();
+        }
+        if let Some(v) = &self.limits {
+            cfg.limits = v.clone();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoleKind {
     Orchestrator,
@@ -2000,6 +2089,78 @@ impl ConfigStore {
                 "skill '{name}' not found in .orrery/skills/ or the global skills directory"
             ),
         })
+    }
+
+    pub fn load_profile(&self, name: &str) -> Result<ProjectProfile> {
+        validate_config_file_id(name, "profile")?;
+        let global_dir = self.global_dir().ok_or_else(|| Error::Validation {
+            field: "profile".to_string(),
+            message: "no global config directory; profiles live in <config>/orrery/profiles/"
+                .to_string(),
+        })?;
+        let profiles_dir = global_dir.join("profiles");
+        let path = profiles_dir.join(format!("{name}.toml"));
+        let content = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::Validation {
+                    field: "profile".to_string(),
+                    message: format!("profile '{name}' not found in {}", profiles_dir.display()),
+                });
+            }
+            Err(source) => return Err(Error::Io { path, source }),
+        };
+        toml::from_str(&content).map_err(|source| Error::TomlDe { path, source })
+    }
+
+    pub fn save_profile(&self, name: &str, profile: &ProjectProfile) -> Result<PathBuf> {
+        validate_config_file_id(name, "profile")?;
+        let global_dir = self.global_dir().ok_or_else(|| Error::Validation {
+            field: "profile".to_string(),
+            message: "no global config directory; profiles live in <config>/orrery/profiles/"
+                .to_string(),
+        })?;
+        let profiles_dir = global_dir.join("profiles");
+        fs::create_dir_all(&profiles_dir).map_err(|source| Error::Io {
+            path: profiles_dir.clone(),
+            source,
+        })?;
+        let path = profiles_dir.join(format!("{name}.toml"));
+        let serialized = toml::to_string_pretty(profile)?;
+        atomic_write(&path, serialized.as_bytes())?;
+        Ok(path)
+    }
+
+    pub fn list_profiles(&self) -> Result<Vec<String>> {
+        let Some(global_dir) = self.global_dir() else {
+            return Ok(Vec::new());
+        };
+        let profiles_dir = global_dir.join("profiles");
+        if !profiles_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(&profiles_dir).map_err(|source| Error::Io {
+            path: profiles_dir.clone(),
+            source,
+        })?;
+        let mut names = Vec::new();
+        for entry_res in entries {
+            let entry = entry_res.map_err(|source| Error::Io {
+                path: profiles_dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if path.extension() != Some(OsStr::new("toml")) {
+                continue;
+            }
+            if let Some(stem) = path.file_stem().and_then(OsStr::to_str)
+                && validate_config_file_id(stem, "profile").is_ok()
+            {
+                names.push(stem.to_string());
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 
     pub fn save_role(&self, role: &RoleConfig, rules_markdown: &str) -> Result<()> {
@@ -5088,5 +5249,104 @@ max_context_tokens = 1024
         let mut sorted = entries.clone();
         sorted.sort_by(|a, b| (a.kind, &a.id).cmp(&(b.kind, &b.id)));
         assert_eq!(entries, sorted);
+    }
+
+    #[test]
+    fn profile_round_trip_and_apply() {
+        let mut cfg = ProjectConfig::default_template("src");
+        cfg.validation_mode = ValidationMode::Agents;
+        cfg.max_step_retries = 2;
+        cfg.max_concurrent_agents = 1;
+        cfg.gate_tools = vec!["hybrid:step_check".into()];
+        cfg.stages[1].agent_ids = vec!["agy-impl".into()];
+        cfg.limits.mcp_call_timeout_secs = 1800;
+        cfg.hooks.on_step_start = Some(HookConfig {
+            tool: "hybrid:step_start".into(),
+            on_failure: HookFailure::Halt,
+            args: serde_json::Map::new(),
+        });
+
+        let mut roles: Vec<RoleConfig> = default_roles_with_rules()
+            .into_iter()
+            .map(|(r, _)| r)
+            .collect();
+        roles
+            .iter_mut()
+            .find(|r| r.role_id == "coder")
+            .unwrap()
+            .skills = vec!["repo-rules".into()];
+
+        let p = ProjectProfile::from_project(&cfg, &roles);
+        assert_eq!(
+            p.role_skills,
+            BTreeMap::from([("coder".to_string(), vec!["repo-rules".to_string()])])
+        );
+
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+
+        let saved_path = store.save_profile("cloud", &p).unwrap();
+        assert!(saved_path.ends_with("profiles/cloud.toml"));
+        assert_eq!(store.load_profile("cloud").unwrap(), p);
+
+        let mut target = ProjectConfig::default_template("dst");
+        let orig_plan_path = target.plan_path.clone();
+        p.apply(&mut target);
+        assert_eq!(target.project_name, "dst");
+        assert_eq!(target.plan_path, orig_plan_path);
+        assert_eq!(target.validation_mode, cfg.validation_mode);
+        assert_eq!(target.max_step_retries, cfg.max_step_retries);
+        assert_eq!(target.max_concurrent_agents, cfg.max_concurrent_agents);
+        assert_eq!(target.gate_tools, cfg.gate_tools);
+        assert_eq!(target.stages, cfg.stages);
+        assert_eq!(target.hooks, cfg.hooks);
+        assert_eq!(target.limits, cfg.limits);
+
+        let mut x = ProjectConfig::default_template("fresh");
+        ProjectProfile::default().apply(&mut x);
+        assert_eq!(x, ProjectConfig::default_template("fresh"));
+    }
+
+    #[test]
+    fn profile_load_errors_and_list() {
+        let project = tempfile::TempDir::new().unwrap();
+        let global = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(project.path(), Some(global.path().to_path_buf())).unwrap();
+
+        assert!(store.list_profiles().unwrap().is_empty());
+
+        match store.load_profile("nope") {
+            Err(Error::Validation { field, message }) => {
+                assert_eq!(field, "profile");
+                assert!(message.contains("profile 'nope' not found"));
+            }
+            other => panic!("expected Validation error, got {other:?}"),
+        }
+
+        assert!(matches!(
+            store.load_profile("../x"),
+            Err(Error::PathTraversal { .. })
+        ));
+
+        let profiles_dir = store.global_dir().unwrap().join("profiles");
+        fs::create_dir_all(&profiles_dir).unwrap();
+        fs::write(profiles_dir.join("b.toml"), "max_step_retries = 1\n").unwrap();
+        fs::write(
+            profiles_dir.join("a.toml"),
+            "validation_mode = \"Agents\"\n",
+        )
+        .unwrap();
+        fs::write(profiles_dir.join("notes.md"), "ignored\n").unwrap();
+        assert_eq!(
+            store.list_profiles().unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        fs::write(profiles_dir.join("bad.toml"), "project_name = \"x\"\n").unwrap();
+        assert!(matches!(
+            store.load_profile("bad"),
+            Err(Error::TomlDe { .. })
+        ));
     }
 }
